@@ -5,7 +5,7 @@ HMAC-SHA256 verified webhook from Mobile Money providers.
 from datetime import datetime, timezone
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, status
 
 from app.api.deps import DBSession
 from app.config import get_settings

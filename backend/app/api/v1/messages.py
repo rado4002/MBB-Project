@@ -24,7 +24,6 @@ from app.redis_client import blackout_enqueue
 from app.redis_utils import dedup_check_and_mark, rate_limit_check
 from app.schemas.messages import (
     InboundMessageRequest,
-    InboundMessageResponse,
     QueuedMessageResponse,
 )
 

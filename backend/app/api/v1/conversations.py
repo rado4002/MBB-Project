@@ -7,12 +7,11 @@ EP-19: POST /api/v1/conversations/{conversation_id}/escalate
 A-13:  PUT  /api/v1/conversations/{conversation_id}/handoff
 """
 import uuid
-from datetime import datetime, timezone
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from app.api.deps import DBSession, RedisClient, get_current_role, require_role
+from app.api.deps import DBSession, get_current_role, require_role
 from app.schemas.admin import HandoffToggle, HandoffToggleResponse
 from app.schemas.conversations import (
     ConversationContextResponse,

@@ -1,9 +1,7 @@
 """Schemas for EP-23, EP-24 (M9 Analytics Dashboard)."""
-from datetime import date, datetime
+from datetime import date
 
-from pydantic import BaseModel, Field
-
-from app.schemas.common import Language, LeadScore
+from pydantic import BaseModel
 
 
 class FunnelStageMetrics(BaseModel):
