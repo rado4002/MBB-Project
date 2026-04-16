@@ -16,6 +16,10 @@ class EscalationTicket(Base):
             "priority IN ('high', 'medium', 'low')", name="chk_esc_priority"
         ),
         CheckConstraint(
+            "reason IN ('voice_note', 'complex_complaint', 'high_value_lead', 'unresolved_3x', 'sav_issue')",
+            name="chk_esc_reason",
+        ),
+        CheckConstraint(
             "status IN ('open', 'in_progress', 'resolved', 'closed')",
             name="chk_esc_status",
         ),

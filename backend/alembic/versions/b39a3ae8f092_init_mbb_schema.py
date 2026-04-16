@@ -20,6 +20,12 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # ── Extensions (idempotent — init_db.sql also runs these on Docker init) ──
+    # Required even outside Docker so `alembic upgrade head` works standalone.
+    op.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"')
+    op.execute('CREATE EXTENSION IF NOT EXISTS "pg_trgm"')
+    op.execute('CREATE EXTENSION IF NOT EXISTS "unaccent"')
+
     # ── Schema ────────────────────────────────────────────────────────────────
     op.execute("CREATE SCHEMA IF NOT EXISTS mbb")
 
@@ -158,6 +164,10 @@ def upgrade() -> None:
         sa.Column("cancelled", sa.Boolean, nullable=False, server_default=sa.text("FALSE")),
         sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False, server_default=sa.text("NOW()")),
         sa.CheckConstraint("attempt_number BETWEEN 1 AND 3", name="chk_relance_attempt"),
+        sa.CheckConstraint(
+            "hook_type IN ('reciprocity', 'social_proof', 'scarcity', 'loyalty')",
+            name="chk_relance_hook_type",
+        ),
         sa.UniqueConstraint("lead_id", "attempt_number", name="uq_relance_lead_attempt"),
         schema="mbb",
     )
@@ -282,6 +292,10 @@ def upgrade() -> None:
         sa.Column("assigned_at", sa.TIMESTAMP(timezone=True), nullable=True),
         sa.Column("resolved_at", sa.TIMESTAMP(timezone=True), nullable=True),
         sa.CheckConstraint("priority IN ('high', 'medium', 'low')", name="chk_esc_priority"),
+        sa.CheckConstraint(
+            "reason IN ('voice_note', 'complex_complaint', 'high_value_lead', 'unresolved_3x', 'sav_issue')",
+            name="chk_esc_reason",
+        ),
         sa.CheckConstraint("status IN ('open', 'in_progress', 'resolved', 'closed')", name="chk_esc_status"),
         schema="mbb",
     )

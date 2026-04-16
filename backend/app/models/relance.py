@@ -26,6 +26,10 @@ class Relance(Base):
         CheckConstraint(
             "attempt_number BETWEEN 1 AND 3", name="chk_relance_attempt"
         ),
+        CheckConstraint(
+            "hook_type IN ('reciprocity', 'social_proof', 'scarcity', 'loyalty')",
+            name="chk_relance_hook_type",
+        ),
         UniqueConstraint("lead_id", "attempt_number", name="uq_relance_lead_attempt"),
         Index("idx_relance_lead", "lead_id"),
         Index(
