@@ -47,7 +47,7 @@ class MapsTag(Base):
         "metadata", JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
     created_at: Mapped[datetime] = mapped_column(
-        nullable=False, server_default=text("NOW()")
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
     )
 
     # Relationships

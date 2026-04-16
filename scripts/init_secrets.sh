@@ -55,6 +55,7 @@ create_secret "whatsapp_api_token" "CHANGE_ME_whatsapp_token"
 create_secret "orange_money_key"  "CHANGE_ME_orange_money_key"
 create_secret "airtel_money_key"  "CHANGE_ME_airtel_money_key"
 create_secret "mpesa_key"         "CHANGE_ME_mpesa_key"
+create_secret "payment_webhook_secret" "CHANGE_ME_payment_webhook_hmac_secret"
 
 # ── Grafana ───────────────────────────────────────────────────────────────────
 create_secret "grafana_admin_password" "CHANGE_ME_grafana_admin_password"

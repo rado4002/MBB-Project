@@ -57,10 +57,10 @@ class Customer(Base):
         Integer, nullable=False, server_default=text("0")
     )
     created_at: Mapped[datetime] = mapped_column(
-        nullable=False, server_default=text("NOW()")
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
     )
     last_interaction: Mapped[datetime] = mapped_column(
-        nullable=False, server_default=text("NOW()")
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
     )
 
     # Relationships

@@ -53,7 +53,7 @@ def tag_event(
 
     log.info("maps.tag_event.start", conversation_id=conversation_id, event_type=event_type)
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             maps_svc.tag_event(
                 conversation_id=conversation_id,
                 event_type=event_type,
@@ -87,11 +87,11 @@ def aggregate_daily_maps() -> dict:
     from app.cache import invalidate_prefix, make_key
 
     log.info("maps.aggregate_daily.start")
-    result = asyncio.get_event_loop().run_until_complete(
+    result = asyncio.run(
         maps_svc.aggregate_daily()
     )
     # Invalidate analytics cache so dashboard picks up fresh data
-    asyncio.get_event_loop().run_until_complete(
+    asyncio.run(
         invalidate_prefix(make_key("analytics", ""))
     )
     log.info("maps.aggregate_daily.done", result=result)

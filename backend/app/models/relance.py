@@ -8,6 +8,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    String,
     Text,
     TIMESTAMP,
     UniqueConstraint,
@@ -51,7 +52,7 @@ class Relance(Base):
     delivered_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     value_hook: Mapped[str] = mapped_column(Text, nullable=False)
     hook_type: Mapped[str] = mapped_column(
-        # No CHECK here — hook type is open-ended (reciprocity, social_proof, scarcity, loyalty, custom)
+        String(30),
         nullable=False
     )
     response_received: Mapped[bool] = mapped_column(
@@ -62,7 +63,7 @@ class Relance(Base):
         Boolean, nullable=False, server_default=text("FALSE")
     )
     created_at: Mapped[datetime] = mapped_column(
-        nullable=False, server_default=text("NOW()")
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
     )
 
     # Relationships

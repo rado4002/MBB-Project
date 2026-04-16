@@ -37,5 +37,5 @@ class AdminAuditLog(Base):
     justification: Mapped[str | None] = mapped_column(Text, nullable=True)
     ip_address: Mapped[str | None] = mapped_column(INET, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        nullable=False, server_default=text("NOW()")
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
     )

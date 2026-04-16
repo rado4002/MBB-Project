@@ -57,7 +57,7 @@ class Payment(Base):
     )
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        nullable=False, server_default=text("NOW()")
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
     )
     completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 

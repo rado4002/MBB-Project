@@ -80,7 +80,7 @@ class Lead(Base):
         Integer, nullable=False, server_default=text("0")
     )
     qualified_at: Mapped[datetime] = mapped_column(
-        nullable=False, server_default=text("NOW()")
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
     )
     last_nurture_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True

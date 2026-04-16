@@ -38,10 +38,10 @@ class Conversation(Base):
         nullable=False,
     )
     start_time: Mapped[datetime] = mapped_column(
-        nullable=False, server_default=text("NOW()")
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
     )
     last_message_time: Mapped[datetime] = mapped_column(
-        nullable=False, server_default=text("NOW()")
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
     )
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default="active"
@@ -54,10 +54,10 @@ class Conversation(Base):
         Integer, nullable=False, server_default=text("0")
     )
     created_at: Mapped[datetime] = mapped_column(
-        nullable=False, server_default=text("NOW()")
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
     )
     updated_at: Mapped[datetime] = mapped_column(
-        nullable=False, server_default=text("NOW()")
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
     )
 
     # Relationships

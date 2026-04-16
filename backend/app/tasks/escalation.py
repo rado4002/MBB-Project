@@ -63,7 +63,7 @@ def escalate_conversation(
         lead_id=lead_id,
     )
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             escalation_svc.escalate(
                 conversation_id=conversation_id,
                 reason=reason,
@@ -96,7 +96,7 @@ def check_stale_escalations() -> dict:
     from app.modules.m9_dashboard import service as escalation_svc  # type: ignore[import]
 
     log.info("escalation.check_stale.start")
-    result = asyncio.get_event_loop().run_until_complete(
+    result = asyncio.run(
         escalation_svc.check_stale_escalations()
     )
     log.info("escalation.check_stale.done", reminders_sent=result.get("reminders_sent", 0))

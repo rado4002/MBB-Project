@@ -53,7 +53,7 @@ def send_relance(self: Task, relance_id: str, lead_id: str, attempt: int) -> dic
 
     log.info("relance.task.start", relance_id=relance_id, lead_id=lead_id, attempt=attempt)
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             relance_svc.execute_relance(relance_id=relance_id, lead_id=lead_id, attempt=attempt)
         )
         log.info("relance.task.done", relance_id=relance_id, status=result.get("status"))
@@ -88,7 +88,7 @@ def schedule_next_relance(self: Task, lead_id: str, current_attempt: int) -> dic
 
     log.info("relance.schedule_next.start", lead_id=lead_id, current_attempt=current_attempt)
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             relance_svc.schedule_next(lead_id=lead_id, current_attempt=current_attempt)
         )
         return result
@@ -118,7 +118,7 @@ def process_due_relances() -> dict:
     from app.modules.m6_relance import service as relance_svc  # type: ignore[import]
 
     log.info("relance.process_due.start")
-    result = asyncio.get_event_loop().run_until_complete(
+    result = asyncio.run(
         relance_svc.process_due_relances()
     )
     log.info("relance.process_due.done", dispatched=result.get("dispatched", 0))

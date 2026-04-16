@@ -41,7 +41,7 @@ class Message(Base):
         nullable=False,
     )
     timestamp: Mapped[datetime] = mapped_column(
-        nullable=False, server_default=text("NOW()")
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
     )
     direction: Mapped[str] = mapped_column(String(10), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
@@ -53,7 +53,7 @@ class Message(Base):
     processing_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     whatsapp_message_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        nullable=False, server_default=text("NOW()")
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
     )
 
     # Relationships

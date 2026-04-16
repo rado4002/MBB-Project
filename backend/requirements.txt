@@ -16,7 +16,7 @@ alembic==1.13.3                # Database migrations
 # ── Cache / Queue ─────────────────────────────────────────────────────────────
 redis==5.1.1
 celery[redis]==5.4.0
-redbeat==2.2.0                 # Redis-backed Celery Beat scheduler
+celery-redbeat==2.2.0          # Redis-backed Celery Beat scheduler
 
 # ── HTTP Client ───────────────────────────────────────────────────────────────
 httpx==0.27.2                  # Async HTTP client for adapter calls

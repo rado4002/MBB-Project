@@ -53,7 +53,7 @@ def initiate_payment(
 
     log.info("conversion.initiate_payment.start", order_id=order_id)
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             conversion_svc.initiate_payment(
                 order_id=order_id,
                 idempotency_key=idempotency_key,
@@ -100,7 +100,7 @@ def process_payment_callback(
 
     log.info("conversion.callback.start", payment_id=payment_id, provider=provider, status=status)
     try:
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             conversion_svc.process_callback(
                 payment_id=payment_id,
                 provider=provider,
@@ -138,18 +138,18 @@ def drain_blackout_queue() -> dict:
     from app.redis_client import blackout_dequeue_batch, blackout_queue_length
     from app.modules.m1_gateway import service as gateway_svc  # type: ignore[import]
 
-    queue_len = asyncio.get_event_loop().run_until_complete(blackout_queue_length())
+    queue_len = asyncio.run(blackout_queue_length())
     if queue_len <= 0:
         return {"drained": 0, "queue_was_empty": True}
 
     log.info("blackout.drain.start", queue_length=queue_len)
-    messages = asyncio.get_event_loop().run_until_complete(
+    messages = asyncio.run(
         blackout_dequeue_batch(batch_size=50)
     )
     processed = 0
     for msg in messages:
         try:
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 gateway_svc.reprocess_blackout_message(msg)
             )
             processed += 1

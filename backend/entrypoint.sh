@@ -1,11 +1,22 @@
 #!/bin/sh
-# Entrypoint: run Alembic migrations then start the FastAPI server.
-# Used by the Docker container on startup.
+# Entrypoint: run Alembic migrations (API container only), then exec CMD.
+# Celery workers and Beat scheduler skip migrations.
 
 set -e
 
-echo "[entrypoint] Running database migrations..."
-alembic upgrade head
+# Only the API container should run migrations
+# (celery workers/beat pass a command starting with "celery")
+FIRST_ARG="${1:-}"
+case "$FIRST_ARG" in
+    celery)
+        echo "[entrypoint] Celery process — skipping migrations"
+        ;;
+    *)
+        echo "[entrypoint] Running database migrations..."
+        alembic upgrade head
+        echo "[entrypoint] Migrations complete."
+        ;;
+esac
 
-echo "[entrypoint] Starting FastAPI..."
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+echo "[entrypoint] Starting: $@"
+exec "$@"
