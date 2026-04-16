@@ -28,6 +28,7 @@ anthropic==0.39.0              # Claude API client
 # ── Observability ─────────────────────────────────────────────────────────────
 structlog==24.4.0              # Structured JSON logging
 prometheus-fastapi-instrumentator==7.0.0
+prometheus-client>=0.8.0       # Prometheus metrics SDK (Gauge, Counter, Histogram)
 
 # ── Security ──────────────────────────────────────────────────────────────────
 python-jose[cryptography]==3.3.0   # JWT handling
