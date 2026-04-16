@@ -1,0 +1,44 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    project: mbb_ya_kin
+    env: production
+
+scrape_configs:
+
+  # ── FastAPI (all replicas via Docker DNS) ─────────────────────────────────
+  - job_name: mbb_api
+    static_configs:
+      - targets: ["api:8000"]
+    metrics_path: /metrics
+
+  # ── Celery Worker (via Flower or custom metrics endpoint) ─────────────────
+  # Uncomment when Flower is added in Sprint 1.A
+  # - job_name: celery
+  #   static_configs:
+  #     - targets: ["flower:5555"]
+  #   metrics_path: /metrics
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────────
+  # Requires postgres-exporter container (add in Sprint 1.A)
+  # - job_name: postgres
+  #   static_configs:
+  #     - targets: ["postgres-exporter:9187"]
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  # Requires redis-exporter container (add in Sprint 1.A)
+  # - job_name: redis
+  #   static_configs:
+  #     - targets: ["redis-exporter:9121"]
+
+  # ── Nginx ─────────────────────────────────────────────────────────────────
+  # Requires nginx-prometheus-exporter (add in Sprint 1.A)
+  # - job_name: nginx
+  #   static_configs:
+  #     - targets: ["nginx-exporter:9113"]
+
+  # ── Prometheus itself ──────────────────────────────────────────────────────
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

@@ -45,32 +45,62 @@
 
 ---
 
-## 🚀 Quick Start (5 minutes)
+## 🚀 Quick Start (Development Mode)
 
 ### Prerequisites
 - Docker & Docker Compose
-- `.env` file with API keys (see [Configuration](#configuration))
+- Git
 
-### Run Locally
+### Run Locally (5 minutes)
 ```bash
-# Clone the repository
-git clone https://github.com/mbb-corp/mbb-ya-kin.git
-cd mbb-ya-kin
+# 1. Clone the repository
+git clone https://github.com/rado4002/MBB-Project.git
+cd MBB-Project
 
-# Copy and customize the environment file
-cp .env.example .env
+# 2. First-time setup (creates .env and ./secrets/*.txt with placeholders)
+make setup
 
-# Start all services
-docker-compose up -d
+# 3. Edit configuration
+# - Edit .env (set AIRTABLE_BASE_ID, etc.)
+# - Edit ./secrets/claude_api_key.txt (add your Claude API key)
+# - Edit ./secrets/airtable_api_key.txt (add your Airtable PAT)
+# - Other secrets can stay as placeholders for now
 
-# Verify services are running
-docker-compose ps
+# 4. Start development environment (Baileys WhatsApp mode)
+make up
 
-# Check logs
-docker-compose logs -f app
+# 5. Scan QR code to connect WhatsApp
+docker compose -f docker-compose.yml -f docker-compose.dev.yml logs baileys
+
+# 6. Verify services are running
+make ps
+
+# 7. Check API health
+make health
+
+# 8. View logs
+make logs
 ```
 
-The bot is now live on your WhatsApp Business account. Send a test message to verify.
+### Available Commands
+```bash
+make help          # Show all available commands
+make up            # Start dev environment
+make down          # Stop dev environment
+make restart       # Restart all services
+make logs          # Follow all logs
+make logs-api      # Follow API logs only
+make shell-api     # Bash shell inside API container
+make shell-db      # PostgreSQL shell
+make migrate       # Run database migrations
+make up-prod       # Start production (3 API replicas, WhatsApp Official API)
+```
+
+### Access Points
+- **API Docs**: http://localhost/api/docs
+- **Dashboard**: http://localhost/dashboard/
+- **Grafana**: http://localhost:3001/ (dev mode)
+- **Health Check**: http://localhost/health
 
 ---
 
@@ -78,23 +108,102 @@ The bot is now live on your WhatsApp Business account. Send a test message to ve
 
 ```
 mbb-ya-kin/
-├── Documentation/                  # All architecture & design docs
-│   ├── High Level Design/         # System design, tech stack, data model
-│   ├── Low Level Design/          # Modules, APIs, database, security
-│   └── Adapter Architecture Guide.md  # How to switch CRM/Payments/AI
-├── app/                           # FastAPI backend code (Phase 2)
-│   ├── adapters/                  # Universal sockets & Phase 1 tools
-│   ├── core/                      # Conversation engine & workflows
-│   ├── tasks/                     # Celery async tasks
-│   ├── models/                    # SQLAlchemy database schemas
-│   ├── api/                       # REST endpoints
-│   └── main.py                    # FastAPI entry point
-├── celery_config/                 # Celery worker & beat configuration
-├── db/                            # SQL migrations
-├── docker-compose.yml             # Multi-container setup
-├── .env.example                   # Environment template
+├── Documentation/                  # 📚 All architecture & design docs
+│   ├── Architecture/
+│   │   ├── High Level Design/     # System design, tech stack, data model
+│   │   ├── Low Level Design/      # Modules, APIs, database, security
+│   │   └── Adapter Architecture Guide.md
+│   ├── functional-and-non-functional-requirements.md
+│   ├── Use Cases, Misuse Cases & User Stories.md
+│   └── Implementation Roadmap & Workflow.md
+│
+├── backend/                        # 🐍 FastAPI Backend
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── app/
+│       ├── main.py                # FastAPI entry point + health checks
+│       ├── config.py              # Settings (reads Docker secrets)
+│       ├── database.py            # PostgreSQL async engine
+│       ├── redis_client.py        # Redis connection pool
+│       ├── adapters/              # Adapter pattern (AI, CRM, Inventory, Payment, Messaging)
+│       │   ├── __init__.py        # Factory functions
+│       │   └── base.py            # Base interfaces
+│       ├── models/                # SQLAlchemy ORM (Sprint 0.2)
+│       ├── schemas/               # Pydantic request/response
+│       ├── modules/               # M1-M9 business logic
+│       │   ├── m1_gateway/        # WhatsApp webhook handler
+│       │   ├── m2_conversation/   # Language detection + AI response
+│       │   ├── m3_queue/          # Blackout-aware message queue
+│       │   ├── m4_nurturing/      # Product recommendations + persuasion
+│       │   ├── m5_qualification/  # Lead scoring (hot/warm/cold)
+│       │   ├── m6_relance/        # Max 3 relances (value-first)
+│       │   ├── m7_conversion/     # Mobile Money + order management
+│       │   ├── m8_maps/           # MAPS intelligence + escalation
+│       │   └── m9_dashboard/      # Dashboard endpoints (admin ops)
+│       └── tasks/                 # Celery async tasks
+│           ├── celery_app.py      # Celery config (RedBeat, 5 queues)
+│           ├── relance.py         # (Sprint 1.B)
+│           ├── maps.py            # (Sprint 1.D)
+│           ├── escalation.py      # (Sprint 1.D)
+│           └── conversion.py      # (Sprint 1.C)
+│
+├── dashboard/                      # 📊 Streamlit Dashboard (M9)
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── app/
+│       └── main.py                # 3 roles: admin, hub, lab
+│
+├── baileys/                        # 📱 WhatsApp Bridge (Dev Mode)
+│   ├── Dockerfile
+│   ├── package.json
+│   └── src/
+│       └── index.js               # Baileys → FastAPI webhook forwarder
+│
+├── nginx/                          # 🌐 Reverse Proxy
+│   ├── nginx.conf                 # Base config (gzip, rate limits, upstreams)
+│   └── conf.d/
+│       ├── mbb.conf               # HTTP config (dev)
+│       └── mbb.ssl.conf           # HTTPS + HTTP Basic Auth (prod)
+│
+├── redis/
+│   └── redis.conf                 # AOF persistence (blackout recovery)
+│
+├── monitoring/                     # 📈 Observability
+│   ├── prometheus/
+│   │   └── prometheus.yml         # Scrape configs
+│   ├── grafana/
+│   │   └── datasources/           # Auto-provisioned datasources
+│   │       └── datasource.yml
+│   └── loki/
+│       └── loki-config.yml        # Log aggregation
+│
+├── scripts/                        # 🔧 Setup & Utilities
+│   ├── init_db.sql                # PostgreSQL schema + extensions
+│   ├── init_secrets.sh            # Generate ./secrets/*.txt files
+│   └── seed_data.py               # Test data (Sprint 0.2)
+│
+├── secrets/                        # 🔐 Docker Secrets (gitignored)
+│   ├── .gitkeep
+│   ├── postgres_db.txt            # Generated by init_secrets.sh
+│   ├── postgres_user.txt
+│   ├── postgres_password.txt
+│   ├── jwt_secret.txt
+│   ├── claude_api_key.txt
+│   └── ... (11 total secret files)
+│
+├── docker-compose.yml              # Base: 7 services (postgres, redis, api, celery, dashboard, nginx, monitoring)
+├── docker-compose.dev.yml          # Dev overrides: Baileys, hot-reload, exposed ports
+├── docker-compose.prod.yml         # Prod overrides: 3 API replicas, SSL, resource limits
+├── Makefile                        # Commands: make setup, make up, make down, make migrate, etc.
+├── .env.example                    # Environment template (copy to .env)
 └── README.md                       # This file
 ```
+
+### Key Architectural Decisions
+- **Adapter Pattern**: Switch AI (Claude/Gemini), CRM (Airtable/MBB HUB), Inventory (Static/MBB BOX) via env vars
+- **Dual WhatsApp Mode**: `WHATSAPP_MODE=baileys` (dev) or `official` (prod) — zero code changes
+- **DRC-First Design**: Redis AOF persistence, circuit breakers, < 10KB payloads, blackout recovery
+- **Modular (M1-M9)**: Each business domain is isolated; modules communicate via FastAPI + Celery
 
 ---
 

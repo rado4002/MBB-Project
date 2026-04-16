@@ -1,0 +1,81 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# MBB ya Kin — Development Overrides
+#
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Changes vs base:
+#   - Single API replica with hot-reload
+#   - Baileys bridge instead of WhatsApp Official API
+#   - Ports exposed for direct debugging (postgres, redis, prometheus, grafana)
+#   - Volume mounts for live code editing
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  api:
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend:/app
+    environment:
+      WHATSAPP_MODE: baileys
+      DEBUG: "true"
+      LOG_LEVEL: DEBUG
+
+  celery_worker:
+    volumes:
+      - ./backend:/app
+    environment:
+      WHATSAPP_MODE: baileys
+      LOG_LEVEL: DEBUG
+
+  celery_beat:
+    volumes:
+      - ./backend:/app
+    environment:
+      WHATSAPP_MODE: baileys
+
+  dashboard:
+    volumes:
+      - ./dashboard:/app
+    environment:
+      WHATSAPP_MODE: baileys
+
+  # ── Baileys Bridge (dev-only WhatsApp connection) ────────────────────────────
+
+  baileys:
+    build:
+      context: ./baileys
+      dockerfile: Dockerfile
+    volumes:
+      - baileys_session:/app/sessions
+      - ./baileys/src:/app/src
+    environment:
+      FASTAPI_WEBHOOK_URL: http://api:8000/api/v1/messages/inbound
+      PORT: "3000"
+      LOG_LEVEL: info
+    networks:
+      - mbb_internal
+    restart: unless-stopped
+    expose:
+      - "3000"
+
+  # ── Debug-exposed ports ───────────────────────────────────────────────────────
+
+  postgres:
+    ports:
+      - "5432:5432"
+
+  redis:
+    ports:
+      - "6379:6379"
+
+  prometheus:
+    ports:
+      - "9090:9090"
+
+  grafana:
+    ports:
+      - "3001:3000"
+
+volumes:
+  baileys_session:

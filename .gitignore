@@ -120,6 +120,10 @@ streamlit_cache/
 ehthumbs.db
 Thumb.db
 
+# ========== SECRETS (NEVER COMMIT) ==========
+secrets/*.txt
+!secrets/.gitkeep
+
 # ========== PROJECT-SPECIFIC ==========
 config/products.json.bak
 config/test_data/

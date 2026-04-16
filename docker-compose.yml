@@ -1,0 +1,257 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# MBB ya Kin — Docker Compose (Base)
+#
+# Dev  : docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+# Prod : docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# Scale: docker compose ... up --scale api=3
+# ─────────────────────────────────────────────────────────────────────────────
+
+x-api-common: &api-common
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+  env_file: .env
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  networks:
+    - mbb_internal
+  restart: unless-stopped
+
+services:
+
+  # ── Data Layer ───────────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    environment:
+      POSTGRES_DB_FILE: /run/secrets/postgres_db
+      POSTGRES_USER_FILE: /run/secrets/postgres_user
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_db
+      - postgres_user
+      - postgres_password
+    networks:
+      - mbb_internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $$(cat /run/secrets/postgres_db)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server /usr/local/etc/redis/redis.conf
+    volumes:
+      - redis_data:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    networks:
+      - mbb_internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Application Layer ────────────────────────────────────────────────────────
+
+  api:
+    <<: *api-common
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+    expose:
+      - "8000"
+    secrets:
+      - jwt_secret
+      - claude_api_key
+      - airtable_api_key
+      - whatsapp_api_token
+      - orange_money_key
+      - airtel_money_key
+      - mpesa_key
+      - postgres_db
+      - postgres_user
+      - postgres_password
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  celery_worker:
+    <<: *api-common
+    command: >
+      celery -A app.tasks.celery_app worker
+      --loglevel=info
+      --concurrency=4
+      --queues=default,relance,maps,escalation,conversion
+    secrets:
+      - jwt_secret
+      - claude_api_key
+      - airtable_api_key
+      - whatsapp_api_token
+      - orange_money_key
+      - airtel_money_key
+      - mpesa_key
+      - postgres_db
+      - postgres_user
+      - postgres_password
+
+  celery_beat:
+    <<: *api-common
+    command: >
+      celery -A app.tasks.celery_app beat
+      --loglevel=info
+      --scheduler redbeat.RedBeatScheduler
+    secrets:
+      - jwt_secret
+      - postgres_db
+      - postgres_user
+      - postgres_password
+
+  # ── Dashboard Layer ──────────────────────────────────────────────────────────
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - mbb_internal
+    restart: unless-stopped
+    expose:
+      - "8501"
+    secrets:
+      - postgres_db
+      - postgres_user
+      - postgres_password
+      - jwt_secret
+
+  # ── Reverse Proxy ────────────────────────────────────────────────────────────
+
+  nginx:
+    image: nginx:1.25-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - nginx_certs:/etc/nginx/certs
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      api:
+        condition: service_healthy
+      dashboard:
+        condition: service_started
+    networks:
+      - mbb_internal
+    restart: unless-stopped
+
+  # ── Observability Layer ──────────────────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.external-url=/prometheus/"
+      - "--web.route-prefix=/"
+    networks:
+      - mbb_internal
+    restart: unless-stopped
+    expose:
+      - "9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD_FILE: /run/secrets/grafana_admin_password
+      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    secrets:
+      - grafana_admin_password
+    networks:
+      - mbb_internal
+    restart: unless-stopped
+    expose:
+      - "3000"
+
+  loki:
+    image: grafana/loki:2.9.0
+    volumes:
+      - ./monitoring/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki_data:/loki
+    command: -config.file=/etc/loki/loki-config.yml
+    networks:
+      - mbb_internal
+    restart: unless-stopped
+    expose:
+      - "3100"
+
+# ── Networks ─────────────────────────────────────────────────────────────────
+
+networks:
+  mbb_internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+# ── Volumes ──────────────────────────────────────────────────────────────────
+
+volumes:
+  postgres_data:
+  redis_data:
+  nginx_certs:
+  nginx_logs:
+  prometheus_data:
+  grafana_data:
+  loki_data:
+
+# ── Secrets (file-based — works on single-node Docker Compose) ───────────────
+# Each file under ./secrets/ holds the raw secret value (no newline).
+# NEVER commit ./secrets/*.txt to version control.
+
+secrets:
+  postgres_db:
+    file: ./secrets/postgres_db.txt
+  postgres_user:
+    file: ./secrets/postgres_user.txt
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+  jwt_secret:
+    file: ./secrets/jwt_secret.txt
+  claude_api_key:
+    file: ./secrets/claude_api_key.txt
+  airtable_api_key:
+    file: ./secrets/airtable_api_key.txt
+  whatsapp_api_token:
+    file: ./secrets/whatsapp_api_token.txt
+  orange_money_key:
+    file: ./secrets/orange_money_key.txt
+  airtel_money_key:
+    file: ./secrets/airtel_money_key.txt
+  mpesa_key:
+    file: ./secrets/mpesa_key.txt
+  grafana_admin_password:
+    file: ./secrets/grafana_admin_password.txt
