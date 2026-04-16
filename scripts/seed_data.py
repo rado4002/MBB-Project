@@ -271,7 +271,6 @@ async def seed_messages(session) -> None:
 
 async def seed_leads(session) -> None:
     for lead in LEADS:
-        products_pg = "{" + ",".join(f'"{p}"' for p in lead["product_interest"]) + "}"
         await session.execute(text("""
             INSERT INTO mbb.leads
                 (lead_id, customer_id, conversation_id, score, score_value,
@@ -280,7 +279,7 @@ async def seed_leads(session) -> None:
                 (:lead_id, :customer_id, :conversation_id, :score, :score_value,
                  :stage, :intent, CAST(:product_interest AS text[]), :source, :relance_count)
             ON CONFLICT (conversation_id) DO NOTHING
-        """), {**lead, "product_interest": products_pg})
+        """), {**lead, "product_interest": lead["product_interest"]})
     print(f"  + {len(LEADS)} leads seeded")
 
 
