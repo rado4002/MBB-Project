@@ -4,6 +4,7 @@ const {
   makeWASocket,
   DisconnectReason,
   useMultiFileAuthState,
+  fetchLatestWaWebVersion,
 } = require("@whiskeysockets/baileys");
 const axios = require("axios");
 const express = require("express");
@@ -74,12 +75,23 @@ app.listen(PORT, () => {
 async function connectToWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState(SESSIONS_DIR);
 
+  // Fetch latest WA Web version to avoid protocol rejection (405 errors)
+  let version;
+  try {
+    const versionInfo = await fetchLatestWaWebVersion({});
+    version = versionInfo.version;
+    log.info({ version }, "fetched_wa_web_version");
+  } catch (err) {
+    log.warn({ err: err.message }, "version_fetch_failed_using_default");
+  }
+
   sock = makeWASocket({
     auth: state,
-    logger: pino({ level: "silent" }),   // Suppress Baileys internal logs
+    logger: pino({ level: process.env.BAILEYS_LOG_LEVEL || "silent" }),
     browser: ["MBB ya Kin", "Chrome", "1.0.0"],
     syncFullHistory: false,
     generateHighQualityLinkPreview: false,
+    ...(version && { version }),
   });
 
   sock.ev.on("connection.update", async (update) => {
