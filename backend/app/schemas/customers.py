@@ -1,5 +1,4 @@
 """Schemas for EP-20–EP-22 (M4 Customer / Opt-Out) and A-series customer admin."""
-import uuid
 from datetime import datetime
 
 from pydantic import BaseModel, Field

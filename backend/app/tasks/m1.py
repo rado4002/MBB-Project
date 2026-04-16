@@ -139,7 +139,7 @@ async def _process(
     from app.database import async_session_factory
     from app.modules.m1_gateway.service import process_inbound, persist_outbound
     from app.modules.m1_gateway.session_cache import get_session, save_session, SessionState
-    from app.adapters import get_messaging_adapter, get_ai_adapter
+    from app.adapters import get_ai_adapter
     from sqlalchemy import select
 
     t0 = time.monotonic()
