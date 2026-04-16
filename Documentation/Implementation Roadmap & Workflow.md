@@ -69,7 +69,7 @@ The roadmap follows the principle: **infrastructure first → core conversation 
 
 | Task | Deliverable | Owner | Depends On |
 |------|-------------|-------|------------|
-| Run full database migration (all tables) | 9 core tables + indexes + constraints | Backend | PostgreSQL |
+| Run full database migration (all tables) | 10 core tables + indexes + constraints (includes `admin_audit_log`) | Backend | PostgreSQL |
 | Set up Redis data structures | Session keys, rate limit counters, queue structures | Backend | Redis |
 | Deploy Baileys Node.js bridge | WhatsApp dev connection via QR code | Backend | Docker |
 | Verify webhook delivery: Baileys → FastAPI | End-to-end message log | Backend | Baileys + FastAPI |
@@ -226,23 +226,38 @@ The roadmap follows the principle: **infrastructure first → core conversation 
 
 ---
 
-### Sprint 1.8 (Weeks 19–20): M9 — Analytics Dashboard
+### Sprint 1.8 (Weeks 19–20): M9 — Analytics Dashboard & Admin Operations
 
 | Task | Deliverable | Depends On |
 |------|-------------|------------|
-| Build Streamlit app with page navigation | Running on port 8501 | Docker |
+| Build Streamlit app with page navigation (analytics + admin sections) | Running on port 8501 | Docker |
 | Implement conversion funnel visualization | Lead → Qualified → Nurtured → Converted | PostgreSQL |
 | Implement relance performance dashboard | Response rates by attempt #, hook type, time of day | PostgreSQL |
 | Implement language breakdown chart | Lingala/French/Swahili distribution | MAPS tags |
 | Implement MAPS insights explorer | Top patterns, trends, anomalies | Materialized views |
 | Add CSV + Google Sheets export | One-click data export for Lab Team | Streamlit |
 | Add response time monitoring | p50, p95, p99 latency charts | Prometheus / logs |
+| Build Bot Configuration page (admin role) | Master prompt editor, relance templates, feature flags, adapter switch | FastAPI admin endpoints |
+| Build Escalation Manager page (admin role) | Ticket list, assign, resolve, re-escalate | FastAPI + PostgreSQL |
+| Build Content Manager page (admin role) | Static catalog fallback, i18n templates, relance hooks | FastAPI admin endpoints |
+| Build System Control page (admin role) | Circuit breaker states, queue depth, dead-letter retry, adapter health | FastAPI + Redis |
+| Build Lead Operations page (hub role) | Lead detail view, status override with justification | FastAPI + PostgreSQL |
+| Build Escalation Response page (hub role) | Assigned tickets, resolution form | FastAPI + PostgreSQL |
+| Build Tone Audit Console (lab role) | Random 10% sample review, approve/flag actions | FastAPI + PostgreSQL |
+| Build MAPS Tag Manager (lab role) | Validate, merge, retire patterns | FastAPI + PostgreSQL |
+| Create `admin_audit_log` table + FastAPI audit endpoints | Append-only audit trail for all dashboard write ops | PostgreSQL |
+| Implement role-gated page routing in Streamlit | Pages visible only to authorized roles | Nginx + HTTP Basic Auth |
 
 **Acceptance Criteria:**
 - [ ] Dashboard loads in < 5 seconds
 - [ ] Funnel shows correct counts across all stages
 - [ ] CSV export contains all visible data
 - [ ] Date range filter works across all charts
+- [ ] Admin pages visible only to `admin` role; hub pages to `hub`; lab pages to `lab`
+- [ ] All admin write operations logged in `admin_audit_log` table
+- [ ] Lead status override requires justification (enforced at API level)
+- [ ] Escalation assignment and resolution work end-to-end
+- [ ] Feature flag toggle takes effect without service restart
 
 ---
 
@@ -432,6 +447,8 @@ The roadmap follows the principle: **infrastructure first → core conversation 
                     ┌────▼─────┐
                     │   M9     │ ← Sprint 1.8
                     │Dashboard │
+                    │+ Admin   │
+                    │  Ops     │
                     └──────────┘
 ```
 
@@ -517,7 +534,7 @@ Each sprint follows this exact workflow:
 | **M3: First Relance Sent** | Week 14 | Silent lead → automatic value-first relance on schedule |
 | **M4: First Order** | Week 16 | Full flow: message → qualification → order → Mobile Money payment |
 | **M5: MAPS Tag Captured** | Week 18 | Every interaction generates structured intelligence tags |
-| **M6: Dashboard Live** | Week 20 | Streamlit showing real funnel data with export |
+| **M6: Dashboard Live** | Week 20 | Streamlit showing real funnel data with export + admin operations pages live |
 | **M7: Pilot Launch** | Week 24 | 100–150 real leads, 80% automation, < 60s response, Hub approval |
 | **M8: Voice Notes** | Week 28 | Voice notes transcribed and processed (not just escalated) |
 | **M9: Hub CRM Live** | Week 36 | MBBHubAdapter replaces Airtable in production |
@@ -558,7 +575,7 @@ Each sprint follows this exact workflow:
 | 1.5 | 13–14 | Relance Engine | M6 |
 | 1.6 | 15–16 | Conversion & Payment | M7 |
 | 1.7 | 17–18 | MAPS Intelligence + Escalation | M8 |
-| 1.8 | 19–20 | Analytics Dashboard | M9 |
+| 1.8 | 19–20 | Analytics Dashboard & Admin Operations | M9 |
 | 1.9 | 21–22 | Integration Testing + Pilot Prep | All |
 | 1.10 | 23–24 | Production Migration + Pilot Launch | All |
 

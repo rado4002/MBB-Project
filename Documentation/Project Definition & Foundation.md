@@ -224,7 +224,7 @@ Core Stack
 * Backend: FastAPI + Claude
 * Database: PostgreSQL
 * Queue System: Redis
-* Dashboard: Streamlit
+* Dashboard & Admin: Streamlit (dual-purpose: analytics visualization + admin operations — bot configuration, escalation management, content management, system control)
 * Deployment: Docker
 
 > **Dual-Mode Strategy:** During development and testing (Phase 0–1), the system connects to WhatsApp via a self-hosted Baileys Node.js bridge (free, QR-code-based authentication using a test phone number). For production launch, the system switches to the official WhatsApp Business API with the real MBB business number. The switch is configuration-driven (environment variable `WHATSAPP_MODE`) and requires zero code changes to modules M2–M9.

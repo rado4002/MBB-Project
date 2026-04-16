@@ -111,8 +111,11 @@ FR10 — Queue & Resilience Handling
 * The system shall retry sending messages when connectivity is restored.
 * The system shall send the recovery message: “Je suis toujours là même si le courant est coupé 😊” (reinforcing reciprocity and proximity).
 
-FR11 — Analytics & Dashboard
+FR11 — Analytics, Dashboard & Admin Operations
 
+* The system shall provide a **dual-purpose Streamlit dashboard** serving both analytics visualization and admin operations within a single application (M9).
+
+**FR11.1 — Analytics Pages (all roles):**
 * The system shall provide a dashboard displaying:
   * Conversion funnel
   * Response times
@@ -121,6 +124,36 @@ FR11 — Analytics & Dashboard
   * MAPS insights (minimum 20 new patterns per month)
   * Persuasion lift metrics (e.g., reciprocity → conversion delta)
 * The system shall support: CSV export and Google Sheets integration.
+
+**FR11.2 — Admin Operations Pages (admin role only):**
+* The system shall provide a **Bot Configuration** page allowing the admin to:
+  * Edit the master prompt template (with version history)
+  * Manage relance message templates per language (Lingala/French/Swahili)
+  * Toggle feature flags (e.g., enable/disable Gemini fallback, MBB BOX integration)
+  * Switch active adapters via configuration (e.g., `CRM_PROVIDER`, `WHATSAPP_MODE`)
+* The system shall provide an **Escalation Manager** page allowing the admin to:
+  * View all open escalation tickets with priority and SLA status
+  * Assign tickets to Hub Team members
+  * Resolve or re-escalate tickets
+  * **Manually toggle a conversation between bot control and human control** via a "Take Over" / "Return to Bot" button — creating or resolving an escalation ticket accordingly
+* The system shall provide a **Content Manager** page allowing the admin to:
+  * Manage the static product catalog fallback (used when MBB BOX is unreachable)
+  * Edit i18n message templates (error messages, recovery messages, opt-out confirmations)
+  * Manage relance value hooks per language and lead stage
+* The system shall provide a **System Control** page allowing the admin to:
+  * View circuit breaker states (Claude, MBB HUB, MBB BOX)
+  * Monitor queue depth and dead-letter queue; trigger manual retries
+  * View adapter health status and last sync timestamps
+* All admin operations shall be logged in an **audit trail** (who, what, when) stored in PostgreSQL.
+
+**FR11.3 — Hub Operations Pages (hub role):**
+* The Hub Team shall be able to view and manage escalation tickets assigned to them.
+* The Hub Team shall be able to view lead details and manually override lead status when justified.
+* The Hub Team shall be able to **return a conversation to bot control** via a "Return to Bot" button after resolving an escalation.
+
+**FR11.4 — Lab Operations Pages (lab role):**
+* The Lab Team shall be able to perform tone audits (approve/flag conversations) from the dashboard.
+* The Lab Team shall be able to validate or retire MAPS patterns from the insights explorer.
 
 FR12 — Privacy & Consent Management
 

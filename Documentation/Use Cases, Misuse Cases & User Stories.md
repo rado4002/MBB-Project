@@ -244,6 +244,18 @@ US-10: As Toronto Supervision, I want a dashboard with persuasion lift metrics a
 
 (FR11, NFR5)
 
+US-10b: As Toronto Supervision (admin), I want admin operations pages in the dashboard to configure the bot (master prompt, relance templates, feature flags), manage escalation tickets, edit content (i18n templates, catalog fallback), and monitor system health (circuit breakers, queue depth) — without touching code or environment files.
+
+(FR11.2 — Admin Operations)
+
+US-10c: As the Hub team, I want to view and resolve escalation tickets assigned to me and manually override lead status (with justification) directly from the dashboard.
+
+(FR11.3 — Hub Operations)
+
+US-10d: As the Lab team, I want to approve or flag conversations for tone compliance and validate or retire MAPS patterns directly from the dashboard.
+
+(FR11.4 — Lab Operations)
+
 Priority 4 – Ecosystem Integration (Phase 2 / Phase 2+)
 
 US-11: As the Hub team, I want the bot to sync leads, orders, and Club points directly to MBB HUB CRM so I don't have to manually transfer data from Airtable.
