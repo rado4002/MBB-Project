@@ -10,6 +10,7 @@ celery_app = Celery(
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
     include=[
+        "app.tasks.m1",
         "app.tasks.relance",
         "app.tasks.maps",
         "app.tasks.escalation",
@@ -38,6 +39,8 @@ celery_app.conf.update(
 
     # Named queues (one per business domain)
     task_routes={
+        "m1.*":                   {"queue": "default"},
+        "app.tasks.m1.*":         {"queue": "default"},
         "app.tasks.relance.*":    {"queue": "relance"},
         "app.tasks.maps.*":       {"queue": "maps"},
         "app.tasks.escalation.*": {"queue": "escalation"},
@@ -62,6 +65,13 @@ celery_app.conf.update(
             "task": "app.tasks.relance.process_due",
             "schedule": crontab(minute="*/15"),
             "options": {"queue": "relance"},
+        },
+
+        # M1 — Drain blackout queue every 5 minutes (power recovery)
+        "m1-drain-blackout": {
+            "task": "m1.drain_blackout_queue",
+            "schedule": crontab(minute="*/5"),
+            "options": {"queue": "default"},
         },
 
         # M6 — Drain blackout queue every 5 minutes

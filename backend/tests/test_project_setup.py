@@ -135,6 +135,8 @@ try:
 
     # Verify queues
     routes = conf.task_routes
+    assert "m1.*" in routes,                      "m1.* route missing"
+    assert "app.tasks.m1.*" in routes,             "app.tasks.m1.* route missing"
     assert "app.tasks.relance.*" in routes
     assert "app.tasks.maps.*" in routes
     assert "app.tasks.escalation.*" in routes
@@ -142,10 +144,14 @@ try:
 
     # Verify Beat schedule
     beat = conf.beat_schedule
+    assert "m1-drain-blackout" in beat,            "m1-drain-blackout beat task missing"
     assert "relance-process-due" in beat
     assert "conversion-drain-blackout" in beat
     assert "maps-aggregate-daily" in beat
     assert "escalation-check-stale" in beat
+
+    # Verify m1 task module is in include list
+    assert "app.tasks.m1" in celery_app.conf.include, "app.tasks.m1 not in Celery include list"
 
     print(f"    Queues: {list(routes.keys())}")
     print(f"    Beat tasks: {list(beat.keys())}")
@@ -158,12 +164,16 @@ except Exception as e:
 print("\n[10] Celery Task modules...")
 try:
     from app.tasks import relance, maps, escalation, conversion
+    import app.tasks.m1 as m1_tasks
     # Verify tasks are registered
     from app.tasks.relance import send_relance, schedule_next_relance, process_due_relances
     from app.tasks.maps import tag_event, aggregate_daily_maps
     from app.tasks.escalation import escalate_conversation, check_stale_escalations
     from app.tasks.conversion import initiate_payment, process_payment_callback, drain_blackout_queue
-    print("    11 tasks across 4 modules OK")
+    from app.tasks.m1 import process_inbound_message, drain_blackout_queue as m1_drain
+    assert process_inbound_message.name == "m1.process_inbound_message"
+    assert m1_drain.name == "m1.drain_blackout_queue"
+    print("    13 tasks across 5 modules OK")
 except Exception as e:
     errors.append(f"Tasks: {e}")
     print(f"    FAIL: {e}")
@@ -190,7 +200,10 @@ try:
     # Verify critical routes exist
     critical = [
         "/health", "/api/v1/health",
-        "/api/v1/messages", "/api/v1/conversations/{conversation_id}",
+        "/api/v1/messages",
+        "/api/v1/messages/baileys",
+        "/api/v1/messages/send",
+        "/api/v1/conversations/{conversation_id}",
         "/api/v1/leads", "/api/v1/relances",
         "/api/v1/orders", "/api/v1/payments/callback",
         "/api/v1/maps/tags", "/api/v1/customers/{phone_number:path}/opt-out",
@@ -230,8 +243,41 @@ except Exception as e:
     errors.append(f"Config: {e}")
     print(f"    FAIL: {e}")
 
-# ── 14. Alembic ──────────────────────────────────────────────────────────────
-print("\n[14] Alembic migration files...")
+# ── 14. M1 Gateway modules ───────────────────────────────────────────────────
+print("\n[14] M1 Gateway modules...")
+try:
+    from app.modules.m1_gateway.language_detector import (
+        detect_language, is_opt_out, is_language_switch_request,
+    )
+    # Lingala keyword fast-path
+    lang, conf = detect_language("Mbote nalingi")
+    assert lang == "lingala", f"Expected lingala, got {lang}"
+    assert conf >= 0.9
+    # French fallback
+    lang, conf = detect_language("Bonjour quel est le prix")
+    assert lang == "french"
+    # Sticky: if existing_language set, returns it unchanged
+    lang, _ = detect_language("hello", existing_language="swahili")
+    assert lang == "swahili"
+    # Opt-out signals
+    assert is_opt_out("stop") is True
+    assert is_opt_out("tika") is True
+    assert is_opt_out("arrête") is True
+    assert is_opt_out("nalingi eloko") is False
+    # Language switch
+    assert is_language_switch_request("parle français") == "french"
+    assert is_language_switch_request("solomela lingala") == "lingala"
+    assert is_language_switch_request("hello") is None
+    # Service layer importable
+    from app.modules.m1_gateway.service import process_inbound, persist_outbound
+    print("    language_detector: 7 assertions OK")
+    print("    service layer importable OK")
+except Exception as e:
+    errors.append(f"M1 Gateway: {e}")
+    print(f"    FAIL: {e}")
+
+# ── 15. Alembic ──────────────────────────────────────────────────────────────
+print("\n[15] Alembic migration files...")
 try:
     from pathlib import Path
     versions_dir = Path("alembic/versions")
@@ -249,8 +295,8 @@ print("\n" + "=" * 60)
 if errors:
     print(f"FAILED — {len(errors)} error(s):")
     for e in errors:
-        print(f"  ✗ {e}")
+        print(f"  \u2717 {e}")
     sys.exit(1)
 else:
-    print("ALL 14 CHECKS PASSED ✓")
+    print("ALL 15 CHECKS PASSED \u2713")
     sys.exit(0)

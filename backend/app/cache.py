@@ -168,3 +168,23 @@ class TTL:
     ANALYTICS = 600        # 10 min  — funnel / dashboard aggregates
     RATE_LIMIT = 60        # 1 min   — request rate limit window
     LOCK = 30              # 30 sec  — idempotency / distributed lock
+    DEDUP = 86_400         # 24 h    — message deduplication
+    CUSTOMER = 600         # 10 min  — customer profile (language, opt-out)
+
+
+# ── Public client accessor ─────────────────────────────────────────────────────
+
+
+def get_cache_client() -> aioredis.Redis:
+    """
+    Return a Redis client connected to DB2 (application cache).
+
+    The pool uses ``decode_responses=True`` — all keys and values are
+    returned as ``str``, not ``bytes``. Callers must NOT call ``.decode()``
+    on responses.
+
+    The caller is responsible for closing the client after use when it is
+    opened outside a request context (Celery tasks).  FastAPI routes should
+    use the ``RedisClient`` dependency from ``app.api.deps`` instead.
+    """
+    return _cache_client()

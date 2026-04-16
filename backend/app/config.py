@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     # ── Baileys ───────────────────────────────────────────────────────────────
     baileys_host: str = "baileys"
     baileys_port: int = 3000
+    baileys_webhook_secret: str = _read_secret("baileys_webhook_secret", "")
 
     # ── Payment ───────────────────────────────────────────────────────────────
     orange_money_key: str = _read_secret("orange_money_key", "")

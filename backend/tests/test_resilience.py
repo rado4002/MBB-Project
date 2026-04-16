@@ -66,6 +66,14 @@ print("  Redis reachable ✓\n")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _reset_pool() -> None:
+    """Reset the module-level connection pool so each asyncio.run() gets fresh connections.
+    Required on Windows where asyncio.run() closes the event loop between calls,
+    leaving cached pool connections attached to a dead loop."""
+    import app.redis_client as _mod
+    _mod._blackout_pool = None
+
+
 async def _clean_queue() -> None:
     """Wipe the blackout queue key so each test starts from a clean slate."""
     from app.redis_client import _blackout_client, _BLACKOUT_KEY
@@ -95,6 +103,7 @@ async def _t1() -> None:
     assert n == 1, f"Expected queue depth 1 after single enqueue, got {n}"
 
 try:
+    _reset_pool()
     asyncio.run(_t1())
     print("    enqueue → Redis persist OK")
 except Exception as exc:
@@ -116,6 +125,7 @@ async def _t2() -> None:
     assert raw == 4,      f"Raw Redis LLEN returned {raw}, expected 4"
 
 try:
+    _reset_pool()
     asyncio.run(_t2())
     print("    queue_length == LLEN OK")
 except Exception as exc:
@@ -142,6 +152,7 @@ async def _t3() -> None:
     assert remaining == 0, f"Queue should be empty after full dequeue, got depth={remaining}"
 
 try:
+    _reset_pool()
     asyncio.run(_t3())
     print("    FIFO order OK — queue empty after drain")
 except Exception as exc:
@@ -163,6 +174,7 @@ async def _t4() -> None:
     assert remaining == 0, f"Queue should be empty, got {remaining}"
 
 try:
+    _reset_pool()
     asyncio.run(_t4())
     print("    partial dequeue OK")
 except Exception as exc:
@@ -180,6 +192,7 @@ async def _t5() -> None:
     assert batch == [], f"Expected [], got {batch!r}"
 
 try:
+    _reset_pool()
     asyncio.run(_t5())
     print("    empty dequeue → [] OK")
 except Exception as exc:
@@ -209,6 +222,7 @@ async def _t6() -> None:
     assert "good2" in wa_ids, f"good2 missing from batch: {wa_ids}"
 
 try:
+    _reset_pool()
     asyncio.run(_t6())
     print("    corrupt entry skipped, valid messages returned OK")
 except Exception as exc:
@@ -231,6 +245,7 @@ async def _t7() -> None:
     )
 
 try:
+    _reset_pool()
     asyncio.run(_t7())
     print("    Prometheus gauge synced OK")
 except Exception as exc:

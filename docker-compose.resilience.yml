@@ -1,0 +1,53 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# MBB ya Kin — Resilience Test Overrides
+#
+# Adds Toxiproxy (network chaos) for slow-3G and link-failure simulation.
+#
+# Usage:
+#   docker compose -f docker-compose.yml \
+#                  -f docker-compose.dev.yml \
+#                  -f docker-compose.resilience.yml \
+#                  up -d
+#
+# Toxiproxy proxies (all on mbb_internal network, control port 8474):
+#   api_proxy      localhost:18000 → api:8000
+#   redis_proxy    localhost:16379 → redis:6379
+#   postgres_proxy localhost:15432 → postgres:5432
+#
+# Test script controls toxics via the Toxiproxy REST API on port 8474.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    container_name: mbb_toxiproxy
+    ports:
+      - "8474:8474"    # Toxiproxy REST control API
+      - "18000:18000"  # → api:8000    (API proxy)
+      - "16379:16379"  # → redis:6379  (Redis proxy)
+      - "15432:15432"  # → postgres:5432 (Postgres proxy)
+    networks:
+      - mbb_internal
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8474/version"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # ── Override API to expose port directly (resilience tests hit it directly) ──
+  api:
+    ports:
+      - "8000:8000"
+    environment:
+      # Increase healthcheck leniency during chaos tests
+      LOG_LEVEL: DEBUG
+
+  # ── Override Celery worker with faster retry for test speed ──────────────────
+  celery_worker:
+    environment:
+      CELERY_TASK_MAX_RETRIES: "3"
+      CELERY_TASK_RETRY_BACKOFF: "2"
+      LOG_LEVEL: DEBUG
