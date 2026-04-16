@@ -516,14 +516,14 @@ Phase 1 is divided into **5 strategic stages**, each with a clear milestone and 
 | Implement data reconciliation script | Verifies consistency between systems | DB |
 | Build Airtable → MBB Hub historical migration tool | One-time data import (leads, orders) | Airtable API |
 | Conduct "Shadow Mode" testing (2 weeks) | Compare Hub results vs Airtable logs | MBBHubAdapter |
-| Update `.env` to `CRM_PROVIDER=mbb_hub` | Official production switch | All |
+| Update `.env` to `CRM_ADAPTER=mbb_hub` | Official production switch | All |
 | Decommission AirtableAdapter (post-switch) | Removed from active code path | All |
 
 **Acceptance Criteria:**
 - [ ] New leads appear in both Airtable (legacy) and MBB Hub (new) during Dual-Write.
 - [ ] Migration tool successfully imports 100% of historical Phase 1 leads.
 - [ ] MBB Hub API latency is < 500ms for standard CRM operations.
-- [ ] Switching `CRM_PROVIDER` in `.env` requires zero code changes in M1–M9.
+- [ ] Switching `CRM_ADAPTER` in `.env` requires zero code changes in M1–M9.
 
 ---
 

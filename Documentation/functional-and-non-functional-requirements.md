@@ -130,7 +130,7 @@ FR11 — Analytics, Dashboard & Admin Operations
   * Edit the master prompt template (with version history)
   * Manage relance message templates per language (Lingala/French/Swahili)
   * Toggle feature flags (e.g., enable/disable Gemini fallback, MBB BOX integration)
-  * Switch active adapters via configuration (e.g., `CRM_PROVIDER`, `WHATSAPP_MODE`)
+  * Switch active adapters via configuration (e.g., `CRM_ADAPTER`, `WHATSAPP_MODE`)
 * The system shall provide an **Escalation Manager** page allowing the admin to:
   * View all open escalation tickets with priority and SLA status
   * Assign tickets to Hub Team members
