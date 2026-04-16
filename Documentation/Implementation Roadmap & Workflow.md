@@ -3,7 +3,7 @@
 **MBB ya Kin — Multi-Language Lead Nurturer Bot**
 
 Date: April 2026
-Version: 1.1
+Version: 1.2
 Status: Phase 0 Complete — Phase 1 Ready
 
 ---
@@ -142,7 +142,7 @@ To track progress through Phase 1, monitor these **key performance indicators (K
 - [ ] Send WhatsApp message to test number → appears in FastAPI logs (blocked by internet)
 - [x] Celery worker processes a test task (`drain_blackout_queue` returned `{'drained': 0}`)
 - [x] Celery Beat fires scheduled tasks on time (5 periodic tasks configured)
-- [ ] CI pipeline passes on a clean push (blocked — not yet pushed to origin)
+- [x] CI pipeline passes on a clean push (3 jobs green: Lint, Test, Docker Build)
 - [x] All 15+ database tables exist with correct constraints
 - [x] Baileys generates QR code and fetches latest WA Web version
 
@@ -162,7 +162,7 @@ To track progress through Phase 1, monitor these **key performance indicators (K
 | **Dashboard** | `dashboard/app/main.py` | ✅ Streamlit serving |
 | **Nginx** | `nginx/nginx.conf`, `conf.d/mbb.conf` | ✅ Reverse proxy |
 | **Monitoring** | Prometheus, Grafana, Loki configs | ✅ All running |
-| **CI/CD** | `.github/workflows/ci.yml` | ✅ 3 jobs defined |
+| **CI/CD** | `.github/workflows/ci.yml` | ✅ 3 jobs GREEN (Lint, Test, Docker Build) |
 | **Tests** | 4 test files (40 total checks) | ✅ All passing |
 
 ---
@@ -176,6 +176,18 @@ To track progress through Phase 1, monitor these **key performance indicators (K
 ### 4.1 Phase 1 Stages — Strategic Breakdown
 
 Phase 1 is divided into **5 strategic stages**, each with a clear milestone and measurable success criteria. This allows for incremental validation and course correction.
+
+> **Detailed Sub-Phase Documents:**
+>
+> Each stage has a dedicated specification document with full task breakdown, acceptance criteria, file maps, and risk mitigation:
+>
+> | Stage | Document |
+> |-------|----------|
+> | 1.A — Conversational Foundation | [`Phase 1/Phase 1.A - Conversational Foundation.md`](Phase%201/Phase%201.A%20-%20Conversational%20Foundation.md) |
+> | 1.B — Lead Pipeline | [`Phase 1/Phase 1.B - Lead Pipeline.md`](Phase%201/Phase%201.B%20-%20Lead%20Pipeline.md) |
+> | 1.C — Revenue Generation | [`Phase 1/Phase 1.C - Revenue Generation.md`](Phase%201/Phase%201.C%20-%20Revenue%20Generation.md) |
+> | 1.D — Intelligence & Oversight | [`Phase 1/Phase 1.D - Intelligence & Oversight.md`](Phase%201/Phase%201.D%20-%20Intelligence%20&%20Oversight.md) |
+> | 1.E — Validation & Launch | [`Phase 1/Phase 1.E - Validation & Launch.md`](Phase%201/Phase%201.E%20-%20Validation%20&%20Launch.md) |
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
