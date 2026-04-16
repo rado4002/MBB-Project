@@ -166,16 +166,17 @@ Build the Streamlit dashboard with analytics visualizations and role-based admin
 
 | # | Task | Role | Deliverable | Status |
 |---|------|------|-------------|--------|
-| 8 | Bot Configuration page | admin | Master prompt editor, relance templates, feature flags, adapter switch | ⬜ |
-| 9 | Escalation Manager page | admin | Ticket list, assign, resolve, re-escalate | ⬜ |
-| 10 | Content Manager page | admin | Static catalog fallback, i18n templates, relance hooks | ⬜ |
-| 11 | System Control page | admin | Circuit breaker states, queue depth, dead-letter retry, adapter health | ⬜ |
-| 12 | Lead Operations page | hub | Lead detail view, status override with justification | ⬜ |
-| 13 | Escalation Response page | hub | Assigned tickets, resolution form | ⬜ |
-| 14 | Tone Audit Console | lab | Random 10% sample review, approve/flag actions | ⬜ |
-| 15 | MAPS Tag Manager | lab | Validate, merge, retire patterns | ⬜ |
-| 16 | Create `admin_audit_log` entries | all | Append-only audit trail for all write ops | ⬜ |
-| 17 | Implement role-gated page routing | all | Pages visible only to authorized roles | ⬜ |
+| 8 | Admin system prompt editor | admin | UI to edit Lingala/French/Swahili system prompts; versioning; preview before save | ⬜ |
+| 9 | Bot Configuration page | admin | Master config: relance templates, feature flags, adapter switch (includes prompt picker) | ⬜ |
+| 10 | Escalation Manager page | admin | Ticket list, assign, resolve, re-escalate | ⬜ |
+| 11 | Content Manager page | admin | Static catalog fallback, i18n templates, relance hooks | ⬜ |
+| 12 | System Control page | admin | Circuit breaker states, queue depth, dead-letter retry, adapter health | ⬜ |
+| 13 | Lead Operations page | hub | Lead detail view, status override with justification | ⬜ |
+| 14 | Escalation Response page | hub | Assigned tickets, resolution form | ⬜ |
+| 15 | Tone Audit Console | lab | Random 10% sample review, approve/flag actions | ⬜ |
+| 16 | MAPS Tag Manager | lab | Validate, merge, retire patterns | ⬜ |
+| 17 | Create `admin_audit_log` entries | all | Append-only audit trail for all write ops | ⬜ |
+| 18 | Implement role-gated page routing | all | Pages visible only to authorized roles | ⬜ |
 
 ### 5.4 Dashboard Layout
 
@@ -217,7 +218,8 @@ Build the Streamlit dashboard with analytics visualizations and role-based admin
 | Analytics — Languages | ✅ | ✅ | ✅ | Read-only language distribution |
 | Analytics — MAPS | ✅ | ❌ | ✅ | Read-only MAPS insights |
 | Analytics — Response Time | ✅ | ❌ | ❌ | System performance |
-| Bot Configuration | ✅ | ❌ | ❌ | Write: prompts, templates, flags |
+| System Prompt Editor | ✅ | ❌ | ❌ | Write: edit/version system prompts (Lingala/French/Swahili) |
+| Bot Configuration | ✅ | ❌ | ❌ | Write: relance templates, feature flags, adapter switch |
 | Escalation Manager | ✅ | ❌ | ❌ | Write: assign, resolve tickets |
 | Content Manager | ✅ | ❌ | ❌ | Write: catalog, i18n, hooks |
 | System Control | ✅ | ❌ | ❌ | Write: circuit breakers, queues |
@@ -253,13 +255,14 @@ Build the Streamlit dashboard with analytics visualizations and role-based admin
 | 5 | Escalation ticket creation + notification | M8 | ⬜ |
 | 6 | Conversation handoff (bot ↔ human) | M8 | ⬜ |
 | 7 | Streamlit dashboard (7 analytics pages) | M9 | ⬜ |
-| 8 | Admin operations pages (4 pages) | M9 | ⬜ |
-| 9 | Hub operations pages (2 pages) | M9 | ⬜ |
-| 10 | Lab operations pages (2 pages) | M9 | ⬜ |
-| 11 | Role-gated page routing | M9 | ⬜ |
-| 12 | Admin audit log (append-only) | M9 | ⬜ |
-| 13 | CSV + Google Sheets export | M9 | ⬜ |
-| 14 | Unit + integration tests (> 80% coverage) | Both | ⬜ |
+| 8 | Admin system prompt editor (with versioning) | M9 | ⬜ |
+| 9 | Admin operations pages (4 pages: config, escalation, content, system) | M9 | ⬜ |
+| 10 | Hub operations pages (2 pages: leads, escalation response) | M9 | ⬜ |
+| 11 | Lab operations pages (2 pages: tone audit, MAPS tags) | M9 | ⬜ |
+| 12 | Role-gated page routing | M9 | ⬜ |
+| 13 | Admin audit log (append-only) | M9 | ⬜ |
+| 14 | CSV + Google Sheets export | M9 | ⬜ |
+| 15 | Unit + integration tests (> 80% coverage) | Both | ⬜ |
 
 ---
 

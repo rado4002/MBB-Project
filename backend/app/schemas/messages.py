@@ -61,3 +61,21 @@ class QueuedMessageResponse(BaseModel):
     status: str = "queued"
     queue_position: int
     estimated_processing_seconds: int
+
+
+class MessageHistoryItem(BaseModel):
+    message_id: uuid.UUID
+    direction: str
+    content: str
+    content_type: str
+    language: str
+    timestamp: datetime
+    processing_time_ms: int | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class MessageHistoryResponse(BaseModel):
+    conversation_id: uuid.UUID
+    messages: list[MessageHistoryItem]
+    total: int

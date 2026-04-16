@@ -45,9 +45,15 @@ async def lifespan(app: FastAPI):
     from app.redis_client import get_redis_pool
     import redis.asyncio as aioredis
     app.state.redis = aioredis.Redis(connection_pool=get_redis_pool())
+    app.state.shutting_down = False
     yield
+    # ── Graceful shutdown ─────────────────────────────────────────────────────
+    app.state.shutting_down = True
+    log.info("mbb_shutdown.starting", msg="Finishing in-flight requests...")
+    # Uvicorn handles waiting for in-flight requests via --timeout-graceful-shutdown.
+    # We clean up our resources after they complete.
     await app.state.redis.aclose()
-    log.info("mbb_shutdown")
+    log.info("mbb_shutdown.complete")
 
 
 # ── FastAPI App ───────────────────────────────────────────────────────────────
@@ -83,8 +89,8 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 # ── System Endpoints ──────────────────────────────────────────────────────────
 async def _liveness_checks(request: Request) -> tuple[dict, list[str]]:
-    """Run Redis + PostgreSQL liveness probes. Returns (checks_dict, errors)."""
-    checks: dict = {"redis": False, "database": False}
+    """Run Redis + PostgreSQL + Celery + Baileys liveness probes."""
+    checks: dict = {"redis": False, "database": False, "celery": False, "baileys": False}
     errors: list[str] = []
 
     # Redis ping (uses the pool attached during lifespan startup)
@@ -104,6 +110,28 @@ async def _liveness_checks(request: Request) -> tuple[dict, list[str]]:
         checks["database"] = True
     except Exception as exc:
         errors.append(f"database: {exc}")
+
+    # Celery — check broker connectivity via Redis ping on DB 0
+    try:
+        import redis.asyncio as aioredis
+        broker = aioredis.from_url(settings.celery_broker_url, socket_timeout=3)
+        await broker.ping()
+        await broker.aclose()
+        checks["celery"] = True
+    except Exception as exc:
+        errors.append(f"celery: broker unreachable — {exc}")
+
+    # Baileys bridge — HTTP GET /status (best-effort, only in baileys mode)
+    if settings.whatsapp_mode == "baileys":
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+                resp = await client.get(f"{settings.baileys_url}/status")
+                checks["baileys"] = resp.status_code < 500
+        except Exception as exc:
+            errors.append(f"baileys: {exc}")
+    else:
+        checks["baileys"] = True  # not applicable in official mode
 
     return checks, errors
 

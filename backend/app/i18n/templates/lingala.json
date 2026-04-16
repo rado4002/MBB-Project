@@ -1,0 +1,20 @@
+{
+  "opt_out_ack": "OK ndeko, nakosala te lisusu. Ozali libre kozongela nge ntango olingi. 🙏",
+  "voice_note_ack": "Mbote! 🎙️ Na-yoki voice note na yo. Mosali na biso azali ko-vérifier surtout. Tika nga nakozela yo mwa minuti.",
+  "recovery": "Naza-zonga! Message na yo e-batelami ✓",
+  "rate_limit": "Tika moke, ozali ko-tinda mingi. Zongela mwa ntango 🙏",
+  "error_fallback": "Pole ndeko, na-zali na problème mwa moke. Kozongela ye mwa ntango. 🙏",
+  "welcome": "Mbote ndeko! 👋 Nazali assistant na MBB. Nakoki kosalisa yo na nini lelo?",
+  "qualification_q1": "Ozali ko-luka nini exactement? Yebisa ngai, nako-salisa yo 😊",
+  "qualification_q2": "Ozali wapi na Kin? To-ko-deliver na bisika nionso.",
+  "qualification_q3": "Olingi yango nini mbala moko? Lelo to okoki kozela?",
+  "lead_created": "Malamu! Nazo-luka biloko oyo e-kitaka yo mingi... ⏳",
+  "nurturing_fallback": "Malamu ndeko! To-zali na yango. Zela moke, nazo-tala... 😊",
+  "product_suggestion_fallback": "To-zali na biloko mingi oyo eko-sepelisa yo. Benga biso po na ba-détails! 📦",
+  "relance_fallback_1": "Mbote ndeko! Eloko oyo ozalaki ko-luka ezali nanu. To-ko-salisa yo? 😊",
+  "relance_fallback_2": "Ndeko! Batu mingi na Kin ba-zali ko-zua yango sikawa. Olingi ko-kanga libaku? 👀",
+  "relance_fallback_3": "Mbala ya suka! To-zali na offre spécial mpo na yo. Olingi? 🎁",
+  "opt_out_confirm": "Olingi kotika solo? Koma 'iyo' pona ko-confirmer.",
+  "language_switch": "Soki! Nakokoba na Lingala! 🇨🇩",
+  "escalation_ack": "Nazali ko-tindela demande na yo epai ya ndeko moko oyo akosalisa yo malamu. Zela moke 🙏"
+}

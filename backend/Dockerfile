@@ -26,4 +26,4 @@ USER mbb
 # Run migrations then start the server
 ENTRYPOINT ["./entrypoint.sh"]
 # Default command (overridden by docker-compose)
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--timeout-graceful-shutdown", "30"]

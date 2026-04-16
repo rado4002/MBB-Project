@@ -50,22 +50,33 @@ class ClaudeAdapter(BaseAIAdapter):
         )
         self._failures = 0
         self._circuit_open = False
+        self._circuit_opened_at: float = 0.0
 
     # ── Circuit breaker ───────────────────────────────────────────────────────
+
+    _HALF_OPEN_AFTER_S = 60.0  # re-try one request after 60s
 
     def _record_success(self) -> None:
         self._failures = 0
         self._circuit_open = False
+        self._circuit_opened_at = 0.0
 
     def _record_failure(self) -> None:
         self._failures += 1
         if self._failures >= _MAX_RETRIES:
             self._circuit_open = True
+            self._circuit_opened_at = time.monotonic()
             log.error("claude.circuit_open", failures=self._failures)
 
     def _check_circuit(self) -> None:
-        if self._circuit_open:
-            raise AIAdapterError("Claude circuit breaker open — too many consecutive failures")
+        if not self._circuit_open:
+            return
+        elapsed = time.monotonic() - self._circuit_opened_at
+        if elapsed >= self._HALF_OPEN_AFTER_S:
+            # Half-open: allow one probe request
+            log.info("claude.circuit_half_open", elapsed_s=round(elapsed, 1))
+            return
+        raise AIAdapterError("Claude circuit breaker open — too many consecutive failures")
 
     # ── BaseAIAdapter interface ───────────────────────────────────────────────
 

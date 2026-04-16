@@ -60,10 +60,10 @@ celery_app.conf.update(
     # All times are in Africa/Kinshasa (UTC+2).
     # No relance tasks are dispatched between 22:00–07:00 (enforced in M6 service).
     beat_schedule={
-        # M5 — Scan for due relances every 15 minutes
-        "relance-process-due": {
-            "task": "app.tasks.relance.process_due",
-            "schedule": crontab(minute="*/15"),
+        # M6 — Scan for eligible leads every hour (Sprint 1.6)
+        "relance-scan-eligible": {
+            "task": "app.tasks.relance.scan_eligible_leads",
+            "schedule": crontab(minute=0),  # Every hour at :00
             "options": {"queue": "relance"},
         },
 

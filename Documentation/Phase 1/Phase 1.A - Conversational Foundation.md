@@ -9,7 +9,7 @@
 | **Weeks** | 5–12 (8 weeks) |
 | **Sprints** | 1.1, 1.2, 1.3, 1.4 |
 | **Modules** | M1 (Gateway), M2 (Language Detection), M3 (Queue & Resilience), M4 (Conversation Engine) |
-| **Status** | ⬜ Not Started |
+| **Status** | ✅ Complete |
 
 ---
 
@@ -60,12 +60,12 @@ Implement the full inbound/outbound message pipeline: WhatsApp → webhook → n
 
 | # | Task | Deliverable | Depends On | Status |
 |---|------|-------------|------------|--------|
-| 1 | Implement FastAPI webhook endpoint `POST /api/v1/messages` | Receives Baileys payloads | Phase 0 | ⬜ |
-| 2 | Build payload normalizer (Baileys → `InboundMessageEvent`) | Unified message format | Task 1 | ⬜ |
-| 3 | Implement rate limiter (Redis token bucket, 10 msg/min) | 429 responses on abuse | Redis | ⬜ |
-| 4 | Build outbound dispatcher (FastAPI → Baileys bridge) | Bot replies arrive on WhatsApp | Baileys | ⬜ |
-| 5 | Add idempotency key check on all message processing | No duplicate processing | Redis | ⬜ |
-| 6 | Write unit + integration tests for M1 | > 80% coverage | All M1 | ⬜ |
+| 1 | Implement FastAPI webhook endpoint `POST /api/v1/messages` | Receives Baileys payloads | Phase 0 | ✅ |
+| 2 | Build payload normalizer (Baileys → `InboundMessageEvent`) | Unified message format | Task 1 | ✅ |
+| 3 | Implement rate limiter (Redis token bucket, 10 msg/min) | 429 responses on abuse | Redis | ✅ |
+| 4 | Build outbound dispatcher (FastAPI → Baileys bridge) | Bot replies arrive on WhatsApp | Baileys | ✅ |
+| 5 | Add idempotency key check on all message processing | No duplicate processing | Redis | ✅ |
+| 6 | Write unit + integration tests for M1 | > 80% coverage | All M1 | ✅ |
 
 ### 4.3 Data Model Focus
 
@@ -83,18 +83,18 @@ Implement the full inbound/outbound message pipeline: WhatsApp → webhook → n
 
 ### 4.5 Acceptance Criteria
 
-- [ ] Inbound message → normalized event → stored in DB → reply sent to WhatsApp
-- [ ] Duplicate messages are silently deduplicated (idempotency key)
-- [ ] Rate-limited user gets "Tika moke, ozali ko-tinda mingi" response
-- [ ] Payload size < 10KB for all responses
-- [ ] All operations are idempotent and retryable
+- [x] Inbound message → normalized event → stored in DB → reply sent to WhatsApp
+- [x] Duplicate messages are silently deduplicated (idempotency key)
+- [x] Rate-limited user gets "Tika moke, ozali ko-tinda mingi" response
+- [x] Payload size < 10KB for all responses
+- [x] All operations are idempotent and retryable
 
 ### 4.6 DRC Resilience Checklist
 
-- [ ] Idempotent? → Yes (idempotency key on message_id)
-- [ ] Retryable? → Yes (Celery retry with exponential backoff)
-- [ ] Queued during blackout? → Yes (Redis LPUSH with AOF)
-- [ ] < 10KB payload? → Yes (text-only responses)
+- [x] Idempotent? → Yes (idempotency key on message_id)
+- [x] Retryable? → Yes (Celery retry with exponential backoff)
+- [x] Queued during blackout? → Yes (Redis LPUSH with AOF)
+- [x] < 10KB payload? → Yes (text-only responses)
 
 ---
 
@@ -108,13 +108,13 @@ Detect message language (Lingala/French/Swahili), build the Claude AI integratio
 
 | # | Task | Deliverable | Depends On | Status |
 |---|------|-------------|------------|--------|
-| 1 | Implement language detection (Claude API + regex fallback) | Detects Lingala/French/Swahili | M1 | ⬜ |
-| 2 | Build `ClaudeAdapter` (adapter interface + implementation) | LLM abstraction layer | — | ⬜ |
-| 3 | Implement conversation context manager (Redis session) | Loads/saves per-conversation state | Redis | ⬜ |
-| 4 | Build basic AI response generation (system prompt + context) | Claude generates culturally appropriate replies | Task 2 | ⬜ |
-| 5 | Implement circuit breaker for Claude API calls | Fallback to template responses on failure | Task 2 | ⬜ |
-| 6 | Create system prompts for each language | Lingala/French/Swahili prompt templates | — | ⬜ |
-| 7 | Write i18n message catalog (3 languages) | All bot-facing strings externalized | — | ⬜ |
+| 1 | Implement language detection (Claude API + regex fallback) | Detects Lingala/French/Swahili | M1 | ✅ |
+| 2 | Build `ClaudeAdapter` (adapter interface + implementation) | LLM abstraction layer | — | ✅ |
+| 3 | Implement conversation context manager (Redis session) | Loads/saves per-conversation state | Redis | ✅ |
+| 4 | Build basic AI response generation (system prompt + context) | Claude generates culturally appropriate replies | Task 2 | ✅ |
+| 5 | Implement circuit breaker for Claude API calls | Fallback to template responses on failure | Task 2 | ✅ |
+| 6 | Create system prompts for each language | Lingala/French/Swahili prompt templates | — | ✅ |
+| 7 | Write i18n message catalog (3 languages) | All bot-facing strings externalized | — | ✅ |
 
 ### 5.3 Key Design Decisions
 
@@ -135,12 +135,12 @@ Detect message language (Lingala/French/Swahili), build the Claude AI integratio
 
 ### 5.4 Acceptance Criteria
 
-- [ ] Send "Mbote!" → bot detects Lingala, responds in Lingala
-- [ ] Send "Bonjour" → bot detects French, responds in French
-- [ ] Send "Habari" → bot detects Swahili, responds in Swahili
-- [ ] Claude API down → bot responds with graceful template message
-- [ ] Conversation context persists across multiple messages (verified with 5+ turns)
-- [ ] Mixed language message (e.g., "Bonjour ndeko") → detected correctly
+- [x] Send "Mbote!" → bot detects Lingala, responds in Lingala
+- [x] Send "Bonjour" → bot detects French, responds in French
+- [x] Send "Habari" → bot detects Swahili, responds in Swahili
+- [x] Claude API down → bot responds with graceful template message
+- [x] Conversation context persists across multiple messages (verified with 5+ turns)
+- [x] Mixed language message (e.g., "Bonjour ndeko") → detected correctly
 
 ### 5.5 System Prompt Template (Example — Lingala)
 
@@ -164,12 +164,12 @@ Build the blackout-proof message queue. When FastAPI is down (power outage, rest
 
 | # | Task | Deliverable | Depends On | Status |
 |---|------|-------------|------------|--------|
-| 1 | Implement Redis blackout queue (AOF-backed LPUSH/RPOP) | Messages survive power outage | Redis | ⬜ |
-| 2 | Build queue processor Celery task (`drain_blackout_queue`) | Processes backlog on recovery | Celery | ⬜ |
-| 3 | Implement recovery message sender | Sends "Naza-zonga! Message na yo e-batelami ✓" | M1 | ⬜ |
-| 4 | Add health check endpoint `GET /api/v1/health` | Reports status of all components | FastAPI | ⬜ |
-| 5 | Implement graceful shutdown (finish in-flight requests) | Docker SIGTERM handling | Docker | ⬜ |
-| 6 | Simulate blackout test: kill FastAPI → queue → restart → process | End-to-end resilience verification | All | ⬜ |
+| 1 | Implement Redis blackout queue (AOF-backed LPUSH/RPOP) | Messages survive power outage | Redis | ✅ |
+| 2 | Build queue processor Celery task (`drain_blackout_queue`) | Processes backlog on recovery | Celery | ✅ |
+| 3 | Implement recovery message sender | Sends "Naza-zonga! Message na yo e-batelami ✓" | M1 | ✅ |
+| 4 | Add health check endpoint `GET /api/v1/health` | Reports status of all components | FastAPI | ✅ |
+| 5 | Implement graceful shutdown (finish in-flight requests) | Docker SIGTERM handling | Docker | ✅ |
+| 6 | Simulate blackout test: kill FastAPI → queue → restart → process | End-to-end resilience verification | All | ✅ |
 
 ### 6.3 Blackout Queue Architecture
 
@@ -199,11 +199,11 @@ Blackout Flow:
 
 ### 6.5 Acceptance Criteria
 
-- [ ] Kill FastAPI container → send 10 messages → restart → all 10 processed
-- [ ] Recovery messages sent to all affected customers (in their detected language)
-- [ ] Health endpoint returns component-level status (db, redis, celery, baileys)
-- [ ] Zero message loss in blackout simulation
-- [ ] Graceful shutdown completes in-flight requests before exiting
+- [x] Kill FastAPI container → send 10 messages → restart → all 10 processed
+- [x] Recovery messages sent to all affected customers (in their detected language)
+- [x] Health endpoint returns component-level status (db, redis, celery, baileys)
+- [x] Zero message loss in blackout simulation
+- [x] Graceful shutdown completes in-flight requests before exiting
 
 ---
 
@@ -217,12 +217,12 @@ Complete the conversation engine with full context management, conversation stat
 
 | # | Task | Deliverable | Depends On | Status |
 |---|------|-------------|------------|--------|
-| 1 | Implement conversation status state machine | `active → qualifying → nurturing → escalated → converted → dormant` | M4 | ⬜ |
-| 2 | Build opt-out detection ("stop", "arrête", "yaka te", "tika") | Instant conversation closure | M4 | ⬜ |
-| 3 | Implement 2–3 question qualification flow entry | Extracts initial intent signals | M4 → M5 | ⬜ |
-| 4 | Build lead scoring engine (hot/warm/cold) — basic version | Score based on: response speed, product specificity, city | M5 | ⬜ |
-| 5 | Create lead insertion logic | Lead created after qualification signals detected | DB | ⬜ |
-| 6 | Implement `AirtableAdapter` for CRM sync | Leads synced to Airtable via Celery task | Celery | ⬜ |
+| 1 | Implement conversation status state machine | `active → qualifying → nurturing → escalated → converted → dormant` | M4 | ✅ |
+| 2 | Build opt-out detection ("stop", "arrête", "yaka te", "tika") | Instant conversation closure | M4 | ✅ |
+| 3 | Implement 2–3 question qualification flow entry | Extracts initial intent signals | M4 → M5 | ✅ |
+| 4 | Build lead scoring engine (hot/warm/cold) — basic version | Score based on: response speed, product specificity, city | M5 | ✅ |
+| 5 | Create lead insertion logic | Lead created after qualification signals detected | DB | ✅ |
+| 6 | Implement `AirtableAdapter` for CRM sync | Leads synced to Airtable via Celery task | Celery | ✅ |
 
 ### 7.3 Conversation State Machine
 
@@ -256,12 +256,12 @@ Complete the conversation engine with full context management, conversation stat
 
 ### 7.5 Acceptance Criteria
 
-- [ ] New conversation → 2–3 natural questions → lead created with score
-- [ ] Hot lead gets product recommendation within same conversation
-- [ ] Lead appears in Airtable within 60 seconds (via Celery task)
-- [ ] Stage transitions logged in PostgreSQL
-- [ ] Opt-out keyword → immediate stop, confirmation message sent
-- [ ] Conversation status transitions follow state machine rules
+- [x] New conversation → 2–3 natural questions → lead created with score
+- [x] Hot lead gets product recommendation within same conversation
+- [x] Lead appears in Airtable within 60 seconds (via Celery task)
+- [x] Stage transitions logged in PostgreSQL
+- [x] Opt-out keyword → immediate stop, confirmation message sent
+- [x] Conversation status transitions follow state machine rules
 
 ---
 
@@ -269,27 +269,27 @@ Complete the conversation engine with full context management, conversation stat
 
 | # | Deliverable | Sprint | Status |
 |---|-------------|--------|--------|
-| 1 | M1 webhook endpoint (inbound + outbound) | 1.1 | ⬜ |
-| 2 | Payload normalizer (Baileys → InboundMessageEvent) | 1.1 | ⬜ |
-| 3 | Rate limiter (Redis token bucket) | 1.1 | ⬜ |
-| 4 | Idempotency key check | 1.1 | ⬜ |
-| 5 | Language detection (Claude + regex fallback) | 1.2 | ⬜ |
-| 6 | ClaudeAdapter implementation | 1.2 | ⬜ |
-| 7 | Conversation context manager (Redis) | 1.2 | ⬜ |
-| 8 | Circuit breaker for Claude API | 1.2 | ⬜ |
-| 9 | i18n message catalog (3 languages) | 1.2 | ⬜ |
-| 10 | System prompts (Lingala/French/Swahili) | 1.2 | ⬜ |
-| 11 | Blackout queue (Redis AOF) | 1.3 | ⬜ |
-| 12 | Queue drain Celery task | 1.3 | ⬜ |
-| 13 | Recovery message sender | 1.3 | ⬜ |
-| 14 | Health check endpoint | 1.3 | ⬜ |
-| 15 | Graceful shutdown | 1.3 | ⬜ |
-| 16 | Conversation state machine | 1.4 | ⬜ |
-| 17 | Opt-out detection | 1.4 | ⬜ |
-| 18 | Lead qualification entry (basic M5) | 1.4 | ⬜ |
-| 19 | Lead scoring engine (basic) | 1.4 | ⬜ |
-| 20 | AirtableAdapter CRM sync | 1.4 | ⬜ |
-| 21 | Unit + integration tests (> 80% coverage) | All | ⬜ |
+| 1 | M1 webhook endpoint (inbound + outbound) | 1.1 | ✅ |
+| 2 | Payload normalizer (Baileys → InboundMessageEvent) | 1.1 | ✅ |
+| 3 | Rate limiter (Redis token bucket) | 1.1 | ✅ |
+| 4 | Idempotency key check | 1.1 | ✅ |
+| 5 | Language detection (Claude + regex fallback) | 1.2 | ✅ |
+| 6 | ClaudeAdapter implementation | 1.2 | ✅ |
+| 7 | Conversation context manager (Redis) | 1.2 | ✅ |
+| 8 | Circuit breaker for Claude API | 1.2 | ✅ |
+| 9 | i18n message catalog (3 languages) | 1.2 | ✅ |
+| 10 | System prompts (Lingala/French/Swahili) | 1.2 | ✅ |
+| 11 | Blackout queue (Redis AOF) | 1.3 | ✅ |
+| 12 | Queue drain Celery task | 1.3 | ✅ |
+| 13 | Recovery message sender | 1.3 | ✅ |
+| 14 | Health check endpoint | 1.3 | ✅ |
+| 15 | Graceful shutdown | 1.3 | ✅ |
+| 16 | Conversation state machine | 1.4 | ✅ |
+| 17 | Opt-out detection | 1.4 | ✅ |
+| 18 | Lead qualification entry (basic M5) | 1.4 | ✅ |
+| 19 | Lead scoring engine (basic) | 1.4 | ✅ |
+| 20 | AirtableAdapter CRM sync | 1.4 | ✅ |
+| 21 | Unit + integration tests (> 80% coverage) | All | ✅ |
 
 ---
 

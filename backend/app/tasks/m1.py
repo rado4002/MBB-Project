@@ -15,69 +15,16 @@ from datetime import datetime, timezone
 import structlog
 from celery import Task
 
+from app.i18n.messages import t
 from app.tasks.celery_app import celery_app
 
 log = structlog.get_logger(__name__)
-
-# ── i18n acknowledgment messages ─────────────────────────────────────────────
-_VOICE_ACK = {
-    "lingala": (
-        "Mbote! 🎙️ Na-yoki voice note na yo. "
-        "Mosali na biso azali ko-vérifier surtout. "
-        "Tika nga nakozela yo mwa minuti."
-    ),
-    "swahili": (
-        "Habari! 🎙️ Nimepokea ujumbe wako wa sauti. "
-        "Mtu wa timu yetu atawasiliana nawe hivi karibuni. "
-        "Asante kwa subira yako."
-    ),
-    "french": (
-        "Salut! 🎙️ J'ai bien reçu ton message vocal. "
-        "Un membre de l'équipe va te contacter très bientôt. "
-        "Merci de ta patience! 🙏"
-    ),
-}
-
-_OPT_OUT_ACK = {
-    "lingala": "OK ndeko, nakosala te lisusu. Ozali libre kozongela nge ntango olingi. 🙏",
-    "swahili": "Sawa, sitawasiliana nawe tena. Unaweza kurudi wakati wowote. 🙏",
-    "french": "D'accord, je ne t'enverrai plus de messages. Tu peux revenir quand tu veux. 🙏",
-}
-
-_RECOVERY_MSG = {
-    "lingala": "Naza-zonga! Message na yo e-batelami ✓",
-    "swahili": "Namerudi! Ujumbe wako umehifadhiwa ✓",
-    "french": "Je suis de retour! Ton message a été conservé ✓",
-}
 
 
 class _BaseTask(Task):
     abstract = True
     max_retries = 3
     default_retry_delay = 30
-
-
-# ── System prompt template ────────────────────────────────────────────────────
-
-def _build_system_prompt(language: str, history: list[dict]) -> str:
-    """Build Claude system prompt with conversation history context."""
-    lang_label = {"lingala": "Lingala", "french": "Français", "swahili": "Swahili"}.get(
-        language, "Français"
-    )
-    history_text = ""
-    for h in history[-6:]:   # last 3 exchanges (6 messages max)
-        role = "Client" if h.get("direction") == "inbound" else "Moi (bot)"
-        history_text += f"{role}: {h.get('content', '')}\n"
-
-    return (
-        f"Tu es l'assistant commercial de MBB ya Kin — une boutique WhatsApp à Kinshasa.\n"
-        f"Langue du client: {lang_label}.\n"
-        f"Réponds TOUJOURS dans la langue du client ({lang_label}).\n"
-        f"Historique récent:\n{history_text}\n"
-        "Aide le client à trouver ce dont il a besoin. "
-        "Pose UNE question de qualification si le besoin n'est pas clair. "
-        "2-3 phrases maximum."
-    )
 
 
 # ── Main processing task ──────────────────────────────────────────────────────
@@ -170,8 +117,7 @@ async def _process(
 
         # ── Opt-out ────────────────────────────────────────────────────────────
         if inbound.is_opted_out:
-            ack = _OPT_OUT_ACK.get(language, _OPT_OUT_ACK["french"])
-            await _send_safe(customer_phone, ack)
+            await _send_safe(customer_phone, t("opt_out_ack", language))
             return {"status": "opt_out", "phone": customer_phone}
 
         # ── Voice note escalation ──────────────────────────────────────────────
@@ -182,8 +128,7 @@ async def _process(
                 conversation_id=inbound.conversation_id,
                 language=language,
             )
-            ack = _VOICE_ACK.get(language, _VOICE_ACK["french"])
-            await _send_safe(customer_phone, ack)
+            await _send_safe(customer_phone, t("voice_note_ack", language))
             return {"status": "escalated_voice_note", "conversation_id": conv_id}
 
         # ── Step 5: Load Redis session cache ──────────────────────────────────
@@ -214,8 +159,9 @@ async def _process(
             history = session_state.history
 
         # ── Step 6: Call Claude ───────────────────────────────────────────────
+        from app.modules.m2_language.prompts import get_system_prompt
         ai = get_ai_adapter()
-        system_prompt = _build_system_prompt(language, history)
+        system_prompt = get_system_prompt(language, history)
         try:
             ai_response = await ai.generate(
                 prompt=content,
@@ -224,12 +170,7 @@ async def _process(
             )
         except Exception as exc:
             log.error("m1.claude.error", conv_id=conv_id, error=str(exc))
-            # Fallback message in customer language
-            ai_response = {
-                "lingala": "Pole ndeko, na-zali na problème mwa moke. Kozongela ye mwa ntango. 🙏",
-                "swahili": "Pole, nina tatizo kidogo. Tafadhali jaribu tena baadaye. 🙏",
-                "french": "Désolé, j'ai un petit problème technique. Réessaie dans un moment. 🙏",
-            }.get(language, "Désolé, réessaie dans un moment. 🙏")
+            ai_response = t("error_fallback", language)
 
         processing_ms = int((time.monotonic() - t0) * 1000)
 
@@ -267,6 +208,38 @@ async def _process(
             )
         except Exception as exc:
             log.warning("m1.maps_dispatch.failed", conv_id=conv_id, error=str(exc))
+
+        # ── Step 8b: Lead qualification check ─────────────────────────────────
+        try:
+            from app.modules.m4_conversation.engine import detect_qualification_signals
+            from app.modules.m5_qualification.service import qualify_and_create_lead
+
+            if detect_qualification_signals(content):
+                async with async_session_factory() as session3:
+                    lead = await qualify_and_create_lead(
+                        session=session3,
+                        customer_phone=customer_phone,
+                        conversation_id=inbound.conversation_id,
+                        message_text=content,
+                        msg_count=session_state.msg_count,
+                    )
+                    if lead:
+                        # Transition conversation to qualifying
+                        from app.modules.m4_conversation.engine import can_transition
+                        from sqlalchemy import update as sa_update
+                        from app.models.conversation import Conversation as ConvModel
+
+                        current_status = session_state.stage
+                        if can_transition(current_status, "qualifying"):
+                            await session3.execute(
+                                sa_update(ConvModel)
+                                .where(ConvModel.conversation_id == inbound.conversation_id)
+                                .values(status="qualifying")
+                            )
+                            session_state.stage = "qualifying"
+                    await session3.commit()
+        except Exception as exc:
+            log.warning("m1.qualification.failed", conv_id=conv_id, error=str(exc))
 
         # ── Step 9: Update Redis session cache ────────────────────────────────
         session_state.language = language
@@ -360,15 +333,24 @@ def drain_blackout_queue(self: Task) -> dict:
 
 
 async def _drain(task: Task) -> dict:
+    from app.modules.m3_queue.recovery import send_recovery_message
     from app.redis_client import blackout_dequeue_batch
 
     processed = 0
     errors = 0
+    notified_phones: set[str] = set()
     MAX_BATCH = 50  # avoid hogging the worker for too long
 
     messages = await blackout_dequeue_batch(batch_size=MAX_BATCH)
     for payload in messages:
         try:
+            phone = payload.get("customer_phone", "")
+
+            # Send recovery message once per customer
+            if phone and phone not in notified_phones:
+                await send_recovery_message(phone)
+                notified_phones.add(phone)
+
             celery_app.send_task(
                 "m1.process_inbound_message",
                 kwargs=payload,
@@ -379,5 +361,10 @@ async def _drain(task: Task) -> dict:
             log.error("m1.drain.item_failed", error=str(exc))
             errors += 1
 
-    log.info("m1.drain_blackout_queue.done", processed=processed, errors=errors)
-    return {"processed": processed, "errors": errors}
+    log.info(
+        "m1.drain_blackout_queue.done",
+        processed=processed,
+        errors=errors,
+        recovery_sent=len(notified_phones),
+    )
+    return {"processed": processed, "errors": errors, "recovery_sent": len(notified_phones)}

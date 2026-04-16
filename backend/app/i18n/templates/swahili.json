@@ -1,0 +1,20 @@
+{
+  "opt_out_ack": "Sawa, sitawasiliana nawe tena. Unaweza kurudi wakati wowote. 🙏",
+  "voice_note_ack": "Habari! 🎙️ Nimepokea ujumbe wako wa sauti. Mtu wa timu yetu atawasiliana nawe hivi karibuni. Asante kwa subira yako.",
+  "recovery": "Tumerudi! Ujumbe wako umehifadhiwa ✓",
+  "rate_limit": "Pole, unatuma ujumbe mingi sana. Jaribu tena baadaye 🙏",
+  "error_fallback": "Pole, nina tatizo kidogo. Tafadhali jaribu tena baadaye. 🙏",
+  "welcome": "Habari! 👋 Mimi ni msaidizi wa MBB. Ninaweza kukusaidia nini leo?",
+  "qualification_q1": "Unatafuta nini hasa? Niambie, nitakusaidia 😊",
+  "qualification_q2": "Uko wapi Kinshasa? Tunapeleka kila mahali.",
+  "qualification_q3": "Unahitaji lini? Leo au unaweza subiri?",
+  "lead_created": "Sawa! Ninatafuta chaguo bora kwako... ⏳",
+  "nurturing_fallback": "Sawa ndugu! Tuna hiyo. Subiri kidogo, ninaangalia... 😊",
+  "product_suggestion_fallback": "Tuna bidhaa nyingi zinazoweza kukupendeza. Wasiliana nasi kwa maelezo! 📦",
+  "relance_fallback_1": "Habari! Bidhaa uliyotafuta bado ipo. Tunaweza kukusaidia? 😊",
+  "relance_fallback_2": "Rafiki! Watu wengi Kinshasa wanapenda hii sasa. Hutaki kuacha nafasi? 👀",
+  "relance_fallback_3": "Mara ya mwisho! Tuna ofa maalum kwako. Unapenda? 🎁",
+  "opt_out_confirm": "Unataka kusimama kweli? Andika 'ndiyo' kuthibitisha.",
+  "language_switch": "Sawa! Naendelea kwa Kiswahili! 🇨🇩",
+  "escalation_ack": "Ninapeleka ombi lako kwa mwenzangu ambaye atakusaidia vizuri zaidi. Subiri kidogo 🙏"
+}

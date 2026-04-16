@@ -24,6 +24,7 @@ from app.redis_client import blackout_enqueue
 from app.redis_utils import dedup_check_and_mark, rate_limit_check
 from app.schemas.messages import (
     InboundMessageRequest,
+    MessageHistoryResponse,
     QueuedMessageResponse,
 )
 
@@ -275,3 +276,68 @@ async def send_outbound(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"messaging_provider_error: {exc}",
         )
+
+
+# ── EP-03: Message history ───────────────────────────────────────────────────
+
+@router.get(
+    "/{conversation_id}",
+    status_code=status.HTTP_200_OK,
+    response_model=MessageHistoryResponse,
+    responses={
+        200: {"model": MessageHistoryResponse},
+        401: {"description": "Unauthorized"},
+        404: {"description": "Conversation not found"},
+    },
+    dependencies=[Depends(get_current_role)],
+    summary="Retrieve message history for a conversation",
+)
+async def get_message_history(
+    conversation_id: uuid.UUID,
+    db: DBSession,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """
+    Return paginated message history for a conversation.
+    Ordered by timestamp ascending (oldest first).
+    """
+    from sqlalchemy import func, select
+
+    from app.models.conversation import Conversation
+    from app.models.message import Message
+
+    # Verify conversation exists
+    conv_result = await db.execute(
+        select(Conversation).where(
+            Conversation.conversation_id == conversation_id
+        )
+    )
+    if conv_result.scalar_one_or_none() is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="conversation_not_found",
+        )
+
+    # Count total messages
+    count_result = await db.execute(
+        select(func.count()).where(Message.conversation_id == conversation_id)
+    )
+    total = count_result.scalar() or 0
+
+    # Fetch paginated messages
+    limit = min(limit, 100)  # cap at 100
+    msg_result = await db.execute(
+        select(Message)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.timestamp.asc())
+        .offset(offset)
+        .limit(limit)
+    )
+    messages = msg_result.scalars().all()
+
+    return MessageHistoryResponse(
+        conversation_id=conversation_id,
+        messages=messages,
+        total=total,
+    )

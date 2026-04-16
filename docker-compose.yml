@@ -66,7 +66,8 @@ services:
 
   api:
     <<: *api-common
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2 --timeout-graceful-shutdown 30
+    stop_grace_period: 35s
     expose:
       - "8000"
     secrets:

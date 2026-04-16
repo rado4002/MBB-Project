@@ -11,6 +11,7 @@ MessagingAdapterError to prevent cascading failures (DRC connectivity drops).
 from __future__ import annotations
 
 import asyncio
+import time
 
 import httpx
 import structlog
@@ -37,22 +38,32 @@ class BaileysAdapter(BaseMessagingAdapter):
         self._base_url = settings.baileys_url  # e.g. http://baileys:3000
         self._failures = 0
         self._circuit_open = False
+        self._circuit_opened_at: float = 0.0
 
     # ── Circuit breaker helpers ────────────────────────────────────────────────
+
+    _HALF_OPEN_AFTER_S = 60.0
 
     def _record_success(self) -> None:
         self._failures = 0
         self._circuit_open = False
+        self._circuit_opened_at = 0.0
 
     def _record_failure(self) -> None:
         self._failures += 1
         if self._failures >= _MAX_RETRIES:
             self._circuit_open = True
+            self._circuit_opened_at = time.monotonic()
             log.error("baileys.circuit_open", failures=self._failures)
 
     def _check_circuit(self) -> None:
-        if self._circuit_open:
-            raise MessagingAdapterError("Baileys circuit breaker open — too many failures")
+        if not self._circuit_open:
+            return
+        elapsed = time.monotonic() - self._circuit_opened_at
+        if elapsed >= self._HALF_OPEN_AFTER_S:
+            log.info("baileys.circuit_half_open", elapsed_s=round(elapsed, 1))
+            return
+        raise MessagingAdapterError("Baileys circuit breaker open — too many failures")
 
     # ── BaseMessagingAdapter interface ────────────────────────────────────────
 

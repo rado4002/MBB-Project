@@ -109,3 +109,6 @@ class Lead(Base):
     escalations: Mapped[list["EscalationTicket"]] = relationship(  # noqa: F821
         back_populates="lead"
     )
+    stage_transitions: Mapped[list["LeadStageTransition"]] = relationship(  # noqa: F821
+        back_populates="lead", cascade="all, delete-orphan"
+    )

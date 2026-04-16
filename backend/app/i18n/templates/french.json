@@ -1,0 +1,20 @@
+{
+  "opt_out_ack": "D'accord, je ne t'enverrai plus de messages. Tu peux revenir quand tu veux. 🙏",
+  "voice_note_ack": "Salut! 🎙️ J'ai bien reçu ton message vocal. Un membre de l'équipe va te contacter très bientôt. Merci de ta patience! 🙏",
+  "recovery": "Je suis de retour! Ton message a été conservé ✓",
+  "rate_limit": "Doucement, tu envoies trop de messages. Réessaie dans un moment 🙏",
+  "error_fallback": "Désolé, j'ai un petit problème technique. Réessaie dans un moment. 🙏",
+  "welcome": "Salut! 👋 Je suis ton assistant MBB. Comment je peux t'aider aujourd'hui?",
+  "qualification_q1": "Tu cherches quoi exactement? Dis-moi et je vais t'aider 😊",
+  "qualification_q2": "T'es dans quel coin? On livre partout à Kinshasa et dans les grandes villes.",
+  "qualification_q3": "T'en as besoin pour quand? Aujourd'hui ou tu prends ton temps?",
+  "lead_created": "Parfait! Je cherche les meilleures options pour toi... ⏳",
+  "nurturing_fallback": "Cool! On a ce qu'il te faut. Attends un instant, je vérifie... 😊",
+  "product_suggestion_fallback": "On a plusieurs produits qui pourraient t'intéresser. Contacte-nous pour les détails! 📦",
+  "relance_fallback_1": "Hey! Le produit que tu cherchais est toujours disponible. On peut t'aider? 😊",
+  "relance_fallback_2": "Ndeko! Batu mingi ba Kin ba-zali ko-prendre ça maintenant. Tu veux pas rater l'occasion? 👀",
+  "relance_fallback_3": "Dernière fois! On a une offre spéciale juste pour toi. Ça t'intéresse? 🎁",
+  "opt_out_confirm": "Tu veux vraiment arrêter? Tape 'oui' pour confirmer.",
+  "language_switch": "Pas de souci, je continue en français! 🇫🇷",
+  "escalation_ack": "Je transfère ta demande à un collègue qui va mieux t'aider. Patiente un moment 🙏"
+}

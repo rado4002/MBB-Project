@@ -111,7 +111,25 @@ async def process_inbound(
             .where(Customer.phone_number == customer_phone)
             .values(opt_out_flag=True, opt_out_at=now)
         )
-        log.info("m1.opt_out_registered", phone=customer_phone)
+        
+        # Cancel all pending relances for this customer's leads (Sprint 1.6)
+        from app.modules.m6_relance.service import cancel_all_relances
+        from sqlalchemy import select
+        from app.models.lead import Lead
+        
+        # Find all leads for this customer
+        leads_result = await session.execute(
+            select(Lead.lead_id).where(Lead.customer_id == customer_phone)
+        )
+        lead_ids = [row[0] for row in leads_result.all()]
+        
+        # Cancel relances for each lead
+        total_cancelled = 0
+        for lead_id in lead_ids:
+            cancelled_count = await cancel_all_relances(session, lead_id=lead_id)
+            total_cancelled += cancelled_count
+        
+        log.info("m1.opt_out_registered", phone=customer_phone, relances_cancelled=total_cancelled)
         return ProcessedInbound(
             customer_phone=customer_phone,
             conversation_id=uuid.uuid4(),  # dummy
