@@ -4,10 +4,7 @@
 
 FROM python:3.12-slim AS base
 
-# System dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl \
-    && rm -rf /var/lib/apt/lists/*
+# No system dependencies needed — healthcheck uses Python urllib
 
 WORKDIR /app
 

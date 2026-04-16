@@ -4,9 +4,7 @@
 
 FROM python:3.12-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl \
-    && rm -rf /var/lib/apt/lists/*
+# No system dependencies needed — healthcheck uses Python urllib
 
 WORKDIR /app
 
@@ -19,7 +17,7 @@ RUN useradd -m -u 1001 mbb && chown -R mbb:mbb /app
 USER mbb
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:8501/_stcore/health || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')" || exit 1
 
 CMD ["streamlit", "run", "app/main.py", \
      "--server.port=8501", \
