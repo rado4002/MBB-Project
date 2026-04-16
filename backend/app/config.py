@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     orange_money_base_url: str = "https://api.orange.com/orange-money-webpay/dev/v1"
     airtel_money_base_url: str = "https://openapiuat.airtel.africa"
     mpesa_base_url: str = "https://sandbox.safaricom.co.ke"
+    payment_webhook_secret: str = _read_secret("payment_webhook_secret", "")
 
     # ── Observability ─────────────────────────────────────────────────────────
     loki_url: str = "http://loki:3100"

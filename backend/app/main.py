@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 
@@ -39,7 +40,12 @@ async def lifespan(app: FastAPI):
         ai_adapter=settings.ai_adapter,
         crm_adapter=settings.crm_adapter,
     )
+    # Attach Redis client to app.state for middleware access
+    from app.redis_client import get_redis_pool
+    import redis.asyncio as aioredis
+    app.state.redis = aioredis.Redis(connection_pool=get_redis_pool())
     yield
+    await app.state.redis.aclose()
     log.info("mbb_shutdown")
 
 
@@ -89,3 +95,47 @@ async def health():
 @app.get("/api/v1/health", tags=["system"])
 async def api_health():
     return {"status": "ok", "version": "1.0.0"}
+
+
+# ── Routers ───────────────────────────────────────────────────────────────────
+from app.api.v1 import (  # noqa: E402  (after app creation intentional)
+    admin,
+    analytics,
+    conversations,
+    customers,
+    leads,
+    maps,
+    messages,
+    orders,
+    payments,
+    relances,
+)
+
+_V1_PREFIX = "/api/v1"
+
+app.include_router(messages.router, prefix=_V1_PREFIX)
+app.include_router(conversations.router, prefix=_V1_PREFIX)
+app.include_router(leads.router, prefix=_V1_PREFIX)
+app.include_router(relances.router, prefix=_V1_PREFIX)
+app.include_router(orders.router, prefix=_V1_PREFIX)
+app.include_router(payments.router, prefix=_V1_PREFIX)
+app.include_router(maps.router, prefix=_V1_PREFIX)
+app.include_router(customers.router, prefix=_V1_PREFIX)
+app.include_router(analytics.router, prefix=_V1_PREFIX)
+app.include_router(admin.router, prefix=_V1_PREFIX)
+
+
+# ── Middleware (added AFTER routers so order is correct) ──────────────────────
+from app.middleware import MaintenanceModeMiddleware, RequestTracingMiddleware  # noqa: E402
+
+app.add_middleware(MaintenanceModeMiddleware)
+app.add_middleware(RequestTracingMiddleware)
+
+# CORS — internal VPS only (Streamlit dashboard on same host)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8501", "http://dashboard:8501"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT"],
+    allow_headers=["*"],
+)
