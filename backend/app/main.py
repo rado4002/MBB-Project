@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
+from sqlalchemy import text
 
 from app.config import get_settings
 
@@ -81,20 +82,74 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 
 # ── System Endpoints ──────────────────────────────────────────────────────────
+async def _liveness_checks(request: Request) -> tuple[dict, list[str]]:
+    """Run Redis + PostgreSQL liveness probes. Returns (checks_dict, errors)."""
+    checks: dict = {"redis": False, "database": False}
+    errors: list[str] = []
+
+    # Redis ping (uses the pool attached during lifespan startup)
+    try:
+        await request.app.state.redis.ping()
+        checks["redis"] = True
+    except AttributeError:
+        errors.append("redis: not initialised (startup incomplete)")
+    except Exception as exc:
+        errors.append(f"redis: {exc}")
+
+    # PostgreSQL ping — lightweight SELECT 1
+    try:
+        from app.database import async_session_factory
+        async with async_session_factory() as session:
+            await session.execute(text("SELECT 1"))
+        checks["database"] = True
+    except Exception as exc:
+        errors.append(f"database: {exc}")
+
+    return checks, errors
+
+
 @app.get("/health", tags=["system"], include_in_schema=False)
-async def health():
-    return {
-        "status": "ok",
+async def health(request: Request):
+    """Docker Compose healthcheck target — returns 503 if Redis or PostgreSQL is down."""
+    from app.redis_client import blackout_queue_length
+
+    checks, errors = await _liveness_checks(request)
+    queue_depth = await blackout_queue_length()
+    all_ok = all(checks.values())
+
+    body = {
+        "status": "ok" if all_ok else "degraded",
         "env": settings.app_env,
         "whatsapp_mode": settings.whatsapp_mode,
         "ai_adapter": settings.ai_adapter,
         "crm_adapter": settings.crm_adapter,
+        "checks": checks,
+        "blackout_queue_depth": queue_depth,
     }
+    if not all_ok:
+        log.warning("health.degraded", errors=errors)
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content=body)
+    return body
 
 
 @app.get("/api/v1/health", tags=["system"])
-async def api_health():
-    return {"status": "ok", "version": "1.0.0"}
+async def api_health(request: Request):
+    """Structured health check for API consumers — mirrors /health."""
+    from app.redis_client import blackout_queue_length
+
+    checks, errors = await _liveness_checks(request)
+    queue_depth = await blackout_queue_length()
+    all_ok = all(checks.values())
+
+    body = {
+        "status": "ok" if all_ok else "degraded",
+        "version": "1.0.0",
+        "checks": checks,
+        "blackout_queue_depth": queue_depth,
+    }
+    if not all_ok:
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content=body)
+    return body
 
 
 # ── Routers ───────────────────────────────────────────────────────────────────

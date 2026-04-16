@@ -193,7 +193,7 @@ try:
         "/api/v1/messages", "/api/v1/conversations/{conversation_id}",
         "/api/v1/leads", "/api/v1/relances",
         "/api/v1/orders", "/api/v1/payments/callback",
-        "/api/v1/maps/tags", "/api/v1/customers/opt-out",
+        "/api/v1/maps/tags", "/api/v1/customers/{phone_number:path}/opt-out",
         "/api/v1/admin/system-health",
     ]
     # /metrics is exposed by Instrumentator and may not appear in app.routes

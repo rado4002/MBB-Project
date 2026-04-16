@@ -23,11 +23,20 @@ from typing import Any, AsyncGenerator
 
 import redis.asyncio as aioredis
 import structlog
+from prometheus_client import Gauge
 
 from app.config import get_settings
 
 log = structlog.get_logger(__name__)
 settings = get_settings()
+
+# Prometheus gauge — tracks live depth of the blackout recovery queue.
+# Updated on every enqueue, dequeue, and queue-length check so Prometheus
+# scrapes always reflect the current state without an extra Redis call.
+BLACKOUT_QUEUE_DEPTH: Gauge = Gauge(
+    "mbb_blackout_queue_depth",
+    "Number of messages waiting in the Redis blackout recovery queue (DB 3)",
+)
 
 # ── Broker pool (DB 0 — used by FastAPI endpoints for pub/sub checks) ─────────
 _pool: aioredis.ConnectionPool | None = None
@@ -92,6 +101,7 @@ async def blackout_enqueue(message: dict[str, Any]) -> bool:
         client = _blackout_client()
         await client.rpush(_BLACKOUT_KEY, json.dumps(message, default=str))
         await client.aclose()
+        BLACKOUT_QUEUE_DEPTH.inc()
         log.info("blackout.enqueued", wa_id=message.get("wa_id"))
         return True
     except Exception as exc:  # noqa: BLE001
@@ -120,6 +130,8 @@ async def blackout_dequeue_batch(batch_size: int = 50) -> list[dict[str, Any]]:
                 messages.append(json.loads(raw))
             except json.JSONDecodeError:
                 log.warning("blackout.invalid_payload", raw=raw)
+        if messages:
+            BLACKOUT_QUEUE_DEPTH.dec(len(messages))
     except Exception as exc:  # noqa: BLE001
         log.error("blackout.dequeue_failed", error=str(exc))
     return messages
@@ -131,6 +143,8 @@ async def blackout_queue_length() -> int:
         client = _blackout_client()
         length = await client.llen(_BLACKOUT_KEY)
         await client.aclose()
-        return int(length)
+        val = int(length)
+        BLACKOUT_QUEUE_DEPTH.set(val)  # authoritative sync from Redis
+        return val
     except Exception:  # noqa: BLE001
         return -1

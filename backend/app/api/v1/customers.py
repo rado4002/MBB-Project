@@ -1,7 +1,7 @@
 """
-EP-20: GET  /api/v1/customers/{phone_number}
-EP-21: POST /api/v1/customers/opt-out
-EP-22: PUT  /api/v1/customers/{phone_number}/language
+EP-20: GET /api/v1/customers/{phone_number}
+EP-21: PUT /api/v1/customers/{phone_number}/opt-out
+EP-22: PUT /api/v1/customers/{phone_number}/language
 """
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -11,7 +11,6 @@ from app.schemas.customers import (
     CustomerLanguageResponse,
     CustomerLanguageUpdate,
     CustomerResponse,
-    OptOutRequest,
     OptOutResponse,
 )
 
@@ -30,18 +29,18 @@ async def get_customer(phone_number: str, db: DBSession):
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="M4 not yet implemented")
 
 
-@router.post(
-    "/opt-out",
+@router.put(
+    "/{phone_number:path}/opt-out",
     response_model=OptOutResponse,
     status_code=status.HTTP_200_OK,
     dependencies=[Depends(get_current_role)],
 )
-async def opt_out_customer(body: OptOutRequest, db: DBSession):
+async def opt_out_customer(phone_number: str, db: DBSession):
     """
     Register customer opt-out. Immediately stops all automated messages.
     Signals: 'stop', 'arrête', 'yaka te', 'tika' are also auto-detected in M2.
     """
-    log.info("customer.opt_out", phone=body.phone_number)
+    log.info("customer.opt_out", phone=phone_number)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="M4 not yet implemented")
 
 
