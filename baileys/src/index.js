@@ -8,6 +8,7 @@ const {
 const axios = require("axios");
 const express = require("express");
 const pino = require("pino");
+const qrcode = require("qrcode-terminal");
 
 const log = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -76,7 +77,6 @@ async function connectToWhatsApp() {
   sock = makeWASocket({
     auth: state,
     logger: pino({ level: "silent" }),   // Suppress Baileys internal logs
-    printQRInTerminal: true,
     browser: ["MBB ya Kin", "Chrome", "1.0.0"],
     syncFullHistory: false,
     generateHighQualityLinkPreview: false,
@@ -87,6 +87,7 @@ async function connectToWhatsApp() {
 
     if (qr) {
       log.info("qr_code_generated — scan with WhatsApp on your phone");
+      qrcode.generate(qr, { small: true });
     }
 
     if (connection === "close") {
