@@ -1,0 +1,186 @@
+# ========== ENVIRONMENT & SECRETS ==========
+.env
+.env.local
+.env.*.local
+.env.production
+.env.staging
+*.pem
+*.key
+*.crt
+
+# ========== PYTHON & VIRTUALENV ==========
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# ========== IDE & EDITORS ==========
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.sublime-project
+.sublime-workspace
+*.sublime-project
+*.sublime-workspace
+*.iml
+*.iws
+*.ipr
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-syntax
+
+# ========== DOCKER & CONTAINERIZATION ==========
+docker-compose.override.yml
+*.dockerfile.local
+.docker/
+
+# ========== DATABASE ==========
+*.db
+*.sqlite
+*.sqlite3
+postgres_data/
+redis_data/
+pgadmin_data/
+alembic/versions/__pycache__/
+
+# ========== LOGS ==========
+*.log
+logs/
+*.log.*
+debug.log
+
+# ========== TEMPORARY FILES ==========
+*.tmp
+*.temp
+*.bak
+*.backup
+*.swp
+*~
+.DS_Store
+Thumbs.db
+.tmp/
+
+# ========== NODE & NPM (for Baileys bridge) ==========
+node_modules/
+npm-debug.log
+.npm/
+package-lock.json
+yarn.lock
+
+# ========== STREAMLIT DASHBOARD ==========
+.streamlit/
+streamlit_cache/
+.streamlit/secrets.toml
+
+# ========== JUPYTER NOTEBOOKS ==========
+.ipynb_checkpoints
+*.ipynb_checkpoints
+
+# ========== OS-SPECIFIC ==========
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumb.db
+
+# ========== PROJECT-SPECIFIC ==========
+config/products.json.bak
+config/test_data/
+uploads/
+downloads/
+exports/
+temp/
+
+# ========== AIRTABLE EXPORTS ==========
+airtable_exports/
+airtable_backups/
+
+# ========== WHATSAPP LOGS ==========
+whatsapp_logs/
+webhook_logs/
+integration_logs/
+
+# ========== CELERY (TASK QUEUE) ==========
+celerybeat-schedule
+celerybeat-schedule.db
+celery_data/
+
+# ========== MONITORING & METRICS ==========
+metrics/
+*.prometheus
+.grafana/
+monitoring_exports/
+
+# ========== BUILD & DIST ==========
+build/
+dist/
+*.whl
+*.tar.gz
+
+# ========== CI/CD & GITHUB ACTIONS ==========
+.github/workflows/secrets.yml
+
+# ========== COVERAGE & TEST REPORTS ==========
+coverage.xml
+test-results.xml
+htmlcov/
+.coverage.db
+
+# ========== IDE CACHE ==========
+*.cache
+.cache/
+
+# ========== DRC-SPECIFIC BACKUPS ==========
+backups/offline_mode_cache/
+emergency_leads_backup/
+network_failure_logs/
+
+# ========== KEEP THESE (IMPORTANT) ==========
+# DO NOT ignore these files:
+!.gitkeep
+!.env.example
+!.dockerignore
+!README.md
+!docker-compose.yml
+!requirements.txt
+!Dockerfile
+
+
+Implementation Roadmap & Workflow/
