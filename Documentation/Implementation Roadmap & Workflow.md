@@ -14,6 +14,40 @@ This document defines the implementation roadmap for MBB ya Kin, broken into **3
 
 The roadmap follows the principle: **infrastructure first → core conversation loop → business logic → intelligence → optimization**.
 
+### 1.1 Phase 1 Metrics Dashboard
+
+To track progress through Phase 1, monitor these **key performance indicators (KPIs)** at each stage gate:
+
+| Stage | Week | Metric Category | Target KPI | How to Measure |
+|-------|------|----------------|------------|----------------|
+| **1.A: Conversational Foundation** | 12 | Response Time | < 60s (95th percentile) | Prometheus histogram |
+| | | Language Detection | > 92% accuracy | Manual audit of 100 random messages |
+| | | Message Loss | 0% in blackout test | Simulate power outage, count recovered messages |
+| | | Context Memory | 5 messages retained | Test: send 10 messages, verify bot recalls message #5 |
+| | | Cultural Tone | Native approval | 3 native speakers approve 100+ responses |
+| **1.B: Lead Pipeline** | 16 | Qualification Rate | > 70% reach lead stage | `SELECT COUNT(*) FROM leads / COUNT(*) FROM conversations` |
+| | | Lead Score Accuracy | 80%+ manual alignment | Hub team reviews 50 random leads |
+| | | Relance Response | 35–45% reply to 1st relance | Track `replied_to_relance_1` field |
+| | | Opt-Out Rate | < 8% | Count "stop" keywords / total relances sent |
+| | | Cadence Compliance | 100% on-time relances | Celery Beat logs vs. expected schedule |
+| **1.C: Revenue Generation** | 18 | Payment Success | > 85% successful transactions | Mobile Money API logs |
+| | | Order Completion Time | < 10 min (median) | `orders.created_at - conversations.started_at` |
+| | | Payment Method Coverage | 3 methods (Orange/Airtel/M-Pesa) | Test each manually |
+| | | Order Accuracy | 0 incorrect orders | Manual review of first 20 orders |
+| | | CRM Sync Latency | < 2 min | Airtable API timestamp vs. order timestamp |
+| **1.D: Intelligence & Oversight** | 20 | MAPS Coverage | 100% conversations tagged | `SELECT COUNT(*) FROM maps_tags / COUNT(*) FROM conversations` |
+| | | Escalation SLA | < 3 min (voice notes) | `escalation_tickets.created_at - messages.created_at` |
+| | | Dashboard Accuracy | 100% metric match | Compare dashboard charts to raw SQL queries |
+| | | Admin Operations | 10+ actions logged | Count `admin_audit_log` entries |
+| | | Role Enforcement | 0 permission leaks | Attempt unauthorized actions with each role |
+| **1.E: Validation & Launch** | 24 | Concurrent Load | 100 conversations @ < 60s | Locust load test |
+| | | Security Audit | 0 critical vulnerabilities | External pen test or OWASP scan |
+| | | Automation Rate | 80–85% no-human-intervention | Track escalation rate: `escalations / total_conversations` |
+| | | Pilot Conversion | ≥ 15% qualified → order | `SELECT COUNT(*) FROM orders / COUNT(*) FROM leads WHERE score IN ('hot', 'warm')` |
+| | | Pilot Satisfaction | < 8% opt-out, 0 negative reviews | Track opt-outs + manual feedback collection |
+
+**Usage:** At the end of each stage, verify ALL metrics in that stage's row meet targets before proceeding. This is your **stage gate checklist**.
+
 ---
 
 ## 2. Phase Overview
@@ -39,6 +73,31 @@ The roadmap follows the principle: **infrastructure first → core conversation 
 └─────────────────┴──────────────────────┴────────────────────────────┴──────────┘
        ▲                   ▲                         ▲                     ▲
    Weeks 1–4          Weeks 5–24              Weeks 25–48            Weeks 49+
+```
+
+**Phase 1 Detailed Breakdown (5 Strategic Stages):**
+
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                      PHASE 1 — CORE SYSTEM (20 WEEKS)                          │
+├────────────────┬──────────────┬─────────────┬──────────────┬──────────────────┤
+│   STAGE 1.A    │  STAGE 1.B   │ STAGE 1.C   │  STAGE 1.D   │   STAGE 1.E      │
+│ Conversational │Lead Pipeline │  Revenue    │ Intelligence │ Validation       │
+│   Foundation   │              │ Generation  │ & Oversight  │ & Launch         │
+│   (8 weeks)    │  (4 weeks)   │  (2 weeks)  │  (2 weeks)   │  (4 weeks)       │
+├────────────────┼──────────────┼─────────────┼──────────────┼──────────────────┤
+│ M1: Gateway    │ M5: Qualify  │ M7: Payment │ M8: MAPS     │ Integration Test │
+│ M2: Language   │ M6: Relance  │ M7: Orders  │ M8: Escalate │ Security Audit   │
+│ M3: Queue      │              │             │ M9: Dashboard│ Load Test        │
+│ M4: Convo Eng  │              │             │ M9: Admin    │ Pilot Launch     │
+├────────────────┼──────────────┼─────────────┼──────────────┼──────────────────┤
+│ 📊 Metrics:    │ 📊 Metrics:  │ 📊 Metrics: │ 📊 Metrics:  │ 📊 Metrics:      │
+│ • < 60s resp   │ • 70%+ qual  │ • 85%+ pay  │ • 100% MAPS  │ • 100 concur     │
+│ • 92%+ lang    │ • 35–45% RR  │ • < 10m ord │ • < 3m SLA   │ • 80%+ auto      │
+│ • 0% msg loss  │ • < 8% optout│ • 3 methods │ • Role gates │ • 15%+ conv      │
+└────────────────┴──────────────┴─────────────┴──────────────┴──────────────────┘
+       ▲                ▲             ▲              ▲               ▲
+    Weeks 5–12      Weeks 13–16   Weeks 17–18   Weeks 19–20    Weeks 21–24
 ```
 
 ---
@@ -89,6 +148,124 @@ The roadmap follows the principle: **infrastructure first → core conversation 
 ## 4. Phase 1 — Core System (Weeks 5–24)
 
 **Goal:** Fully functional chatbot handling real conversations, qualifying leads, sending relances, processing orders, and capturing MAPS tags. Pilot with 100–150 real leads.
+
+---
+
+### 4.1 Phase 1 Stages — Strategic Breakdown
+
+Phase 1 is divided into **5 strategic stages**, each with a clear milestone and measurable success criteria. This allows for incremental validation and course correction.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          PHASE 1 — STAGE ROADMAP                            │
+├──────────────┬─────────────┬──────────────┬──────────────┬─────────────────┤
+│   STAGE 1.A  │  STAGE 1.B  │  STAGE 1.C   │  STAGE 1.D   │   STAGE 1.E     │
+│ Conversation │Lead Pipeline│   Revenue    │ Intelligence │ Validation      │
+│  Foundation  │             │  Generation  │  & Oversight │ & Launch        │
+│  (8 weeks)   │  (4 weeks)  │  (2 weeks)   │  (2 weeks)   │  (4 weeks)      │
+├──────────────┼─────────────┼──────────────┼──────────────┼─────────────────┤
+│ Sprint 1.1   │ Sprint 1.5  │ Sprint 1.7   │ Sprint 1.8   │ Sprint 1.9      │
+│ Sprint 1.2   │ Sprint 1.6  │              │              │ Sprint 1.10     │
+│ Sprint 1.3   │             │              │              │                 │
+│ Sprint 1.4   │             │              │              │                 │
+├──────────────┼─────────────┼──────────────┼──────────────┼─────────────────┤
+│ M1 Gateway   │ M5 Qualify  │ M7 Payment   │ M8 MAPS      │ Integration     │
+│ M2 Language  │ M6 Relance  │ M7 Order     │ M9 Dashboard │ Testing         │
+│ M3 Queue     │             │              │ M9 Admin Ops │ Security Audit  │
+│ M4 Convo Eng │             │              │              │ Pilot Launch    │
+└──────────────┴─────────────┴──────────────┴──────────────┴─────────────────┘
+```
+
+---
+
+#### **Stage 1.A — Conversational Foundation** (Weeks 5–12)
+
+**Modules:** M1 (Gateway), M2 (Language Detection), M3 (Queue & Resilience), M4 (Conversation Engine)
+
+**Milestone:** Bot can have coherent, multi-turn conversations in Lingala, French, and Swahili, surviving blackouts with zero message loss.
+
+**Success Metrics:**
+- ✅ **Response Time:** < 60s for 95% of messages
+- ✅ **Language Detection Accuracy:** > 92% correct language identification
+- ✅ **Blackout Recovery:** 0% message loss in simulated power outage
+- ✅ **Conversation Context:** Bot remembers last 5 messages in every conversation
+- ✅ **Cultural Tone:** Native speaker approval on 100+ sample responses
+
+**Exit Criteria:** Complete Sprint 1.1–1.4 acceptance criteria. Demo: Send 20 back-and-forth messages in mixed Lingala/French → bot responds coherently, simulate blackout → all messages recovered.
+
+---
+
+#### **Stage 1.B — Lead Pipeline** (Weeks 13–16)
+
+**Modules:** M5 (Lead Qualification), M6 (Relance Engine)
+
+**Milestone:** Bot autonomously qualifies leads through smart questions, scores them (hot/warm/cold), and sends up to 3 relances with different persuasion hooks.
+
+**Success Metrics:**
+- ✅ **Qualification Rate:** > 70% of conversations reach lead stage
+- ✅ **Lead Scoring Accuracy:** Manual review confirms score alignment in 80%+ cases
+- ✅ **Relance Response Rate:** 35–45% response to first relance
+- ✅ **Relance Cadence Compliance:** All relances respect +24h, +48–72h, +7–10d timing
+- ✅ **Opt-Out Rate:** < 8% (no more than 8 opt-outs per 100 leads)
+
+**Exit Criteria:** Complete Sprint 1.5–1.6 acceptance criteria. Demo: 50 simulated leads → bot qualifies, scores, sends relances automatically, no spam complaints.
+
+---
+
+#### **Stage 1.C — Revenue Generation** (Weeks 17–18)
+
+**Modules:** M7 (Conversion Engine — Payment + Order Management)
+
+**Milestone:** Bot processes first end-to-end order: product selection → Mobile Money payment → order confirmation → CRM sync.
+
+**Success Metrics:**
+- ✅ **Payment Success Rate:** > 85% successful Mobile Money transactions
+- ✅ **Order Completion Time:** < 10 min from intent to confirmation
+- ✅ **Payment Method Coverage:** Orange Money, Airtel Money, M-Pesa all functional
+- ✅ **Order Accuracy:** 0 incorrect orders (product, quantity, price)
+- ✅ **CRM Sync Latency:** Orders appear in Airtable within 2 minutes
+
+**Exit Criteria:** Complete Sprint 1.7 acceptance criteria. Demo: Place 10 test orders using all 3 payment methods → 100% success, all orders in CRM.
+
+---
+
+#### **Stage 1.D — Intelligence & Oversight** (Weeks 19–20)
+
+**Modules:** M8 (MAPS Intelligence + Escalation), M9 (Analytics Dashboard + Admin Operations)
+
+**Milestone:** MAPS tags capture demand signals and silence reasons. Dashboard shows full funnel. Admin and Hub teams can intervene (override lead status, reassign escalations, toggle handoff, edit templates).
+
+**Success Metrics:**
+- ✅ **MAPS Tag Coverage:** 100% of conversations generate ≥ 1 tag
+- ✅ **Escalation SLA:** Voice notes escalated in < 3 min
+- ✅ **Dashboard Accuracy:** Funnel metrics match database queries
+- ✅ **Admin Operations:** 10 admin actions (config edits, handoff toggles) completed with audit log entries
+- ✅ **Role-Based Access:** Lab/Hub/Admin roles enforced, no permission leaks
+
+**Exit Criteria:** Complete Sprint 1.8 acceptance criteria. Demo: Dashboard shows live metrics, admin toggles handoff for a conversation, Hub resolves escalation, all actions logged.
+
+---
+
+#### **Stage 1.E — Validation & Launch** (Weeks 21–24)
+
+**Modules:** All M1–M9
+
+**Milestone:** System passes integration tests, security audit, and load tests. Pilot launches with 100–150 real leads, achieving 80%+ automation rate.
+
+**Success Metrics:**
+- ✅ **Load Test:** 100 concurrent conversations with < 60s response time
+- ✅ **Security Audit:** Zero critical vulnerabilities
+- ✅ **Automation Rate:** 80–85% of conversations handled without human intervention
+- ✅ **Pilot Conversion Rate:** ≥ 15% of qualified leads convert to orders
+- ✅ **Pilot Satisfaction:** < 8% opt-out rate, no negative reviews
+
+**Exit Criteria:** Complete Sprint 1.9–1.10 acceptance criteria. Pilot runs for 2 weeks with daily monitoring, issue log shows < 5 critical bugs, all resolved within 24 hours.
+
+---
+
+### 4.2 Detailed Sprint Breakdown
+
+---
 
 ### Sprint 1.1 (Weeks 5–6): M1 — Message Gateway
 
@@ -526,19 +703,29 @@ Each sprint follows this exact workflow:
 
 ## 11. Success Milestones
 
+**Phase 0 & Phase 1 Milestones:**
+
 | Milestone | Target Date | Success Criteria |
 |-----------|------------|------------------|
 | **M0: Infrastructure Ready** | Week 4 | Docker stack running, DB seeded, Baileys connected, CI green |
-| **M1: First Bot Reply** | Week 6 | Real WhatsApp message → AI-generated reply in < 60s |
-| **M2: Lead Qualified** | Week 12 | Conversation → 2–3 questions → scored lead in PostgreSQL |
-| **M3: First Relance Sent** | Week 14 | Silent lead → automatic value-first relance on schedule |
-| **M4: First Order** | Week 16 | Full flow: message → qualification → order → Mobile Money payment |
-| **M5: MAPS Tag Captured** | Week 18 | Every interaction generates structured intelligence tags |
-| **M6: Dashboard Live** | Week 20 | Streamlit showing real funnel data with export + admin operations pages live |
-| **M7: Pilot Launch** | Week 24 | 100–150 real leads, 80% automation, < 60s response, Hub approval |
-| **M8: Voice Notes** | Week 28 | Voice notes transcribed and processed (not just escalated) |
-| **M9: Hub CRM Live** | Week 36 | MBBHubAdapter replaces Airtable in production |
-| **M10: Full Intelligence** | Week 48 | Dynamic relance, MAPS predictions, Gemini fallback active |
+| **M1.A: Conversational Foundation** | Week 12 | Bot converses in 3 languages, 0% message loss, < 60s response, native speaker approved |
+| **M1.B: Lead Pipeline Active** | Week 16 | Bot qualifies leads (70%+ rate), sends relances (35–45% response), < 8% opt-out |
+| **M1.C: Revenue Generation** | Week 18 | First end-to-end order: product → Mobile Money → CRM sync in < 10 min |
+| **M1.D: Intelligence & Oversight** | Week 20 | MAPS tags on 100% conversations, dashboard live, admin ops functional, role-based access enforced |
+| **M1.E: Pilot Validated** | Week 24 | 100–150 real leads, 80%+ automation, 15%+ conversion, security audit passed |
+
+**Phase 2+ Milestones:**
+
+| Milestone | Target Date | Success Criteria |
+|-----------|------------|------------------|
+| **M2.1: Voice Notes Handled** | Week 28 | Voice notes transcribed and processed (not just escalated) |
+| **M2.2: Dynamic Relance** | Week 32 | Relance timing and hooks adapt to customer behavior patterns |
+| **M2.3: Advanced MAPS** | Week 36 | Predictive lead scoring, demand forecasting, churn detection |
+| **M2.4: Hub CRM Live** | Week 40 | MBBHubAdapter replaces Airtable in production |
+| **M2.5: Box Integration** | Week 44 | Real-time inventory, dynamic pricing, stock reservation |
+| **M2.6: Multi-Model AI** | Week 48 | Gemini fallback active, A/B testing framework deployed |
+| **M3.1: K8s Migration** | Week 52 | Multi-city deployment on Kubernetes |
+| **M3.2: Multi-Channel Ready** | Week 60 | Telegram, SMS, Facebook Messenger infrastructure prepared |
 
 ---
 
