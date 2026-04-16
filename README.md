@@ -1,8 +1,8 @@
 # MBB ya Kin: Multi-Language Lead Nurturer Bot for DRC
 **"A Helpful Congolese Friend on WhatsApp"**
 
-![Status](https://img.shields.io/badge/Phase-1.0%20(Airtable%2FStatic)-blue)
-![Python](https://img.shields.io/badge/Python-3.11%2B-green)
+![Status](https://img.shields.io/badge/Phase-0%20(Foundation)-orange)
+![Python](https://img.shields.io/badge/Python-3.12-green)
 ![License](https://img.shields.io/badge/License-Internal-red)
 
 ---
@@ -48,56 +48,224 @@
 ## 🚀 Quick Start (Development Mode)
 
 ### Prerequisites
-- Docker & Docker Compose
-- Git
 
-### Run Locally (5 minutes)
+| Tool | Version | Check |
+|------|---------|-------|
+| **Docker Desktop** | 24+ | `docker --version` |
+| **Docker Compose** | v2.20+ | `docker compose version` |
+| **Git** | 2.40+ | `git --version` |
+| **Python** | 3.12 | `python --version` (for local tests only) |
+
+> **Windows users**: Use PowerShell. All commands below work on Windows, macOS, and Linux.
+
+---
+
+### Step 1 — Clone & Initial Setup
+
 ```bash
-# 1. Clone the repository
+# Clone the repository
 git clone https://github.com/rado4002/MBB-Project.git
 cd MBB-Project
 
-# 2. First-time setup (creates .env and ./secrets/*.txt with placeholders)
-make setup
-
-# 3. Edit configuration
-# - Edit .env (set AIRTABLE_BASE_ID, etc.)
-# - Edit ./secrets/claude_api_key.txt (add your Claude API key)
-# - Edit ./secrets/airtable_api_key.txt (add your Airtable PAT)
-# - Other secrets can stay as placeholders for now
-
-# 4. Start development environment (Baileys WhatsApp mode)
-make up
-
-# 5. Scan QR code to connect WhatsApp
-docker compose -f docker-compose.yml -f docker-compose.dev.yml logs baileys
-
-# 6. Verify services are running
-make ps
-
-# 7. Check API health
-make health
-
-# 8. View logs
-make logs
+# (Optional) Generate secrets with defaults — or manually create them
+bash scripts/init_secrets.sh
 ```
 
-### Available Commands
+This creates `./secrets/*.txt` files with placeholder values. For **dev/testing**, the defaults work fine. For production, replace each placeholder with real credentials.
+
+**Secrets files created** (in `./secrets/`):
+
+| File | Purpose | Dev Default |
+|------|---------|-------------|
+| `postgres_db.txt` | PostgreSQL database name | `mbb` |
+| `postgres_user.txt` | PostgreSQL username | `mbb` |
+| `postgres_password.txt` | PostgreSQL password | `CHANGE_ME_strong_db_password` |
+| `jwt_secret.txt` | JWT signing key (auto-generated) | Random 64-char hex |
+| `claude_api_key.txt` | Claude AI API key | `CHANGE_ME_sk-ant-...` |
+| `airtable_api_key.txt` | Airtable Personal Access Token | `CHANGE_ME_pat...` |
+| `whatsapp_api_token.txt` | WhatsApp Cloud API token (prod only) | Placeholder |
+| `orange_money_key.txt` | Orange Money API key | Placeholder |
+| `airtel_money_key.txt` | Airtel Money API key | Placeholder |
+| `mpesa_key.txt` | M-Pesa API key | Placeholder |
+| `payment_webhook_secret.txt` | HMAC key for payment callbacks | Placeholder |
+| `grafana_admin_password.txt` | Grafana dashboard login | Placeholder |
+| `redis_password.txt` | Redis auth (optional) | Placeholder |
+
+### Step 2 — Environment Configuration
+
+```bash
+# Copy the environment template
+cp .env.example .env
+```
+
+The `.env` file controls adapter selection and service addresses. Key settings for development:
+
+```ini
+APP_ENV=development
+WHATSAPP_MODE=baileys          # Uses Baileys bridge (no WhatsApp Business account needed)
+AI_ADAPTER=claude              # claude | gemini
+CRM_ADAPTER=airtable           # airtable | mbb_hub
+TZ=Africa/Kinshasa
+```
+
+> **Note**: Secrets (passwords, API keys) are stored in `./secrets/*.txt`, NOT in `.env`. The `.env` file is committed to git; the `secrets/` directory is gitignored.
+
+### Step 3 — Start the Dev Environment
+
+```bash
+# Build and start all 11 services
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+```
+
+First run takes 3–5 minutes (pulling images + building). Subsequent starts take < 10 seconds.
+
+**What starts:**
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| **postgres** | `localhost:5433` | PostgreSQL 16 database |
+| **redis** | `localhost:6379` | Cache + task broker (AOF persistence) |
+| **api** | Internal `:8000` | FastAPI backend (behind nginx) |
+| **celery_worker** | — | 4 async workers, 5 task queues |
+| **celery_beat** | — | RedBeat periodic scheduler |
+| **baileys** | `localhost:3000` | WhatsApp bridge (Baileys) |
+| **dashboard** | Internal `:8501` | Streamlit analytics (behind nginx) |
+| **nginx** | `localhost:80` | Reverse proxy (routes to api + dashboard) |
+| **prometheus** | `localhost:9090` | Metrics collection |
+| **grafana** | `localhost:3001` | Metrics dashboards |
+| **loki** | Internal `:3100` | Log aggregation |
+
+### Step 4 — Verify Everything Is Running
+
+```bash
+# Check all container statuses
+docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
+
+# Check API health (should return {"status":"ok",...})
+curl http://localhost/health
+
+# Or directly (bypassing nginx)
+curl http://localhost:8000/health    # Won't work — api is not port-mapped
+# Use: docker exec bot-api-1 python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8000/health').read().decode())"
+```
+
+**Expected healthy output:**
+```json
+{
+  "status": "ok",
+  "checks": {"redis": true, "database": true},
+  "blackout_queue_depth": 0
+}
+```
+
+### Step 5 — Connect WhatsApp (Optional — requires phone + internet)
+
+```bash
+# Watch logs for the QR code (renders as ASCII art)
+docker logs bot-baileys-1 -f
+```
+
+1. Open WhatsApp on your phone
+2. Go to **Settings → Linked Devices → Link a Device**
+3. Scan the QR code from the terminal output
+4. Once connected, the log shows: `whatsapp_connected` with your JID
+
+> **Note**: The QR refreshes every ~20 seconds. Scan it quickly. If your internet is unstable, restart baileys: `docker compose -f docker-compose.yml -f docker-compose.dev.yml restart baileys`
+
+### Step 6 — Check Baileys Health (no phone needed)
+
+```bash
+# Health endpoint — works without WhatsApp connection
+curl http://localhost:3000/health
+# Returns: {"status":"ok","connected":false,"jid":null}
+
+# After scanning QR:
+# Returns: {"status":"ok","connected":true,"jid":"243XXXXXXXXX@s.whatsapp.net"}
+```
+
+---
+
+### Available Commands (Makefile)
+
 ```bash
 make help          # Show all available commands
-make up            # Start dev environment
+make up            # Start dev environment (all 11 services)
 make down          # Stop dev environment
 make restart       # Restart all services
-make logs          # Follow all logs
+make logs          # Follow all container logs
 make logs-api      # Follow API logs only
+make logs-celery   # Follow Celery worker + beat logs
+make build         # Build all Docker images
+make rebuild       # Force rebuild (no cache)
 make shell-api     # Bash shell inside API container
-make shell-db      # PostgreSQL shell
-make migrate       # Run database migrations
-make up-prod       # Start production (3 API replicas, WhatsApp Official API)
+make shell-db      # PostgreSQL shell (psql)
+make redis-cli     # Redis CLI inside container
+make migrate       # Run Alembic database migrations
+make seed          # Seed test data into database
+make up-prod       # Start production (3 API replicas, WhatsApp Official)
+make down-prod     # Stop production
 ```
 
-### Access Points
-- **API Docs**: http://localhost/api/docs
+### Access Points (Dev Mode)
+
+| Service | URL | Auth |
+|---------|-----|------|
+| **API Docs** (Swagger) | http://localhost/api/docs | None |
+| **API Health** | http://localhost/health | None |
+| **Streamlit Dashboard** | http://localhost/dashboard/ | None |
+| **Baileys Health** | http://localhost:3000/health | None |
+| **Grafana** | http://localhost:3001 | admin / (see `secrets/grafana_admin_password.txt`) |
+| **Prometheus** | http://localhost:9090 | None |
+| **PostgreSQL** | `localhost:5433` | user/pass from `secrets/` |
+| **Redis** | `localhost:6379` | None (dev) |
+
+---
+
+### Running Tests (Local — No Docker Required)
+
+Tests run directly with Python, using a local PostgreSQL + Redis:
+
+```powershell
+# Navigate to backend
+cd backend
+
+# Install Python dependencies (one-time)
+pip install -r requirements.txt
+
+# Set environment variables (PowerShell)
+$env:APP_ENV="development"
+$env:POSTGRES_HOST="localhost"
+$env:POSTGRES_PORT="5433"         # Docker-mapped port
+$env:POSTGRES_DB="mbb"
+$env:POSTGRES_USER="mbb"
+$env:POSTGRES_PASSWORD="mbb_postgres_change_me"  # From secrets/postgres_password.txt
+$env:REDIS_HOST="localhost"
+$env:JWT_SECRET="testsecret32charslongpadding12345"
+$env:CLAUDE_API_KEY="test"
+$env:AIRTABLE_API_KEY="test"
+$env:PAYMENT_WEBHOOK_SECRET="test"
+
+# Run test suites
+python tests/test_project_setup.py          # 15 checks — project structure & imports
+python tests/test_schema_api_validation.py  # 12 checks — Pydantic schemas & API routes
+python tests/test_blackout_simulation.py    # 6 checks  — Redis blackout queue
+python tests/test_resilience.py             # 7 checks  — circuit breakers & idempotency
+```
+
+**Linux/macOS equivalent:**
+```bash
+export APP_ENV=development POSTGRES_HOST=localhost POSTGRES_PORT=5433 \
+  POSTGRES_DB=mbb POSTGRES_USER=mbb POSTGRES_PASSWORD=mbb_postgres_change_me \
+  REDIS_HOST=localhost JWT_SECRET=testsecret32charslongpadding12345 \
+  CLAUDE_API_KEY=test AIRTABLE_API_KEY=test PAYMENT_WEBHOOK_SECRET=test
+
+python tests/test_project_setup.py
+python tests/test_schema_api_validation.py
+python tests/test_blackout_simulation.py
+python tests/test_resilience.py
+```
+
+> **Note**: `test_blackout_simulation.py` and `test_resilience.py` require Docker services running (PostgreSQL on `:5433`, Redis on `:6379`). `test_project_setup.py` and `test_schema_api_validation.py` work offline.
 - **Dashboard**: http://localhost/dashboard/
 - **Grafana**: http://localhost:3001/ (dev mode)
 - **Health Check**: http://localhost/health
@@ -209,49 +377,56 @@ mbb-ya-kin/
 
 ## ⚙️ Configuration
 
-Copy `.env.example` to `.env` and customize:
+The system is configured through three layers:
 
-```bash
-# ========== WHATSAPP ==========
-WHATSAPP_API_VERSION=v21.0
-WHATSAPP_PHONE_ID=your_phone_id
-WEBHOOK_VERIFY_TOKEN=your_webhook_token
+### 1. Environment Variables (`.env`)
+Non-secret configuration. Committed to git as `.env.example`.
 
-# ========== AI MODEL ==========
-# Options: ANTHROPIC_CLAUDE, GOOGLE_GEMINI, LOCAL_LLAMA
-AI_ADAPTER=ANTHROPIC_CLAUDE
-ANTHROPIC_API_KEY=sk-ant-...
+```ini
+# Core
+APP_ENV=development              # development | production
+WHATSAPP_MODE=baileys            # baileys (dev) | official (prod)
+TZ=Africa/Kinshasa
 
-# ========== CRM BACKEND ==========
-# Options: AIRTABLE, MBB_HUB, LOCAL_MOCK
-CRM_ADAPTER=AIRTABLE
-AIRTABLE_BASE_ID=appXXX
-AIRTABLE_API_KEY=key_XXX
+# Adapter Selection — switch providers without code changes
+AI_ADAPTER=claude                # claude | gemini
+CRM_ADAPTER=airtable             # airtable | mbb_hub
+INVENTORY_ADAPTER=static         # static | mbb_box
+PAYMENT_ADAPTER=mobile_money     # mobile_money
 
-# ========== INVENTORY ==========
-# Options: STATIC_JSON, MBB_BOX
-INVENTORY_ADAPTER=STATIC_JSON
-PRODUCTS_JSON_PATH=/app/config/products.json
+# Service addresses (Docker internal — don't change for dev)
+POSTGRES_HOST=postgres
+REDIS_HOST=redis
 
-# ========== PAYMENTS ==========
-# Options: ORANGE_MONEY, AIRTEL_MONEY, MBB_PAYMENTS
-PAYMENT_ADAPTER=ORANGE_MONEY
-ORANGE_MERCHANT_ID=your_merchant_id
-ORANGE_API_KEY=your_api_key
-
-# ========== DATABASE ==========
-DATABASE_URL=postgresql://user:password@db:5432/mbb
-REDIS_URL=redis://redis:6379/0
-
-# ========== SYSTEM ==========
-ENVIRONMENT=production
-LOG_LEVEL=INFO
+# AI tuning
+CLAUDE_MODEL=claude-sonnet-4-5
+CLAUDE_MAX_TOKENS=1024
+CLAUDE_TIMEOUT_S=25
 ```
 
-**For DRC Context:**
-- Use `AIRTABLE` initially for fast setup
-- Switch to `MBB_HUB` when ready (no code changes)
-- Use `ORANGE_MONEY` for Kinshasa; `AIRTEL_MONEY` for Eastern DRC
+### 2. Docker Secrets (`./secrets/*.txt`)
+Passwords and API keys. Gitignored. Each file contains a single raw value (no trailing newline).
+
+```bash
+# View current secrets (placeholders)
+cat secrets/postgres_password.txt
+
+# Replace with real values before production
+echo -n "my_real_password" > secrets/postgres_password.txt
+```
+
+### 3. Docker Compose Overrides
+- `docker-compose.yml` — Base: all 11 services defined
+- `docker-compose.dev.yml` — Dev: hot-reload, Baileys, exposed debug ports
+- `docker-compose.prod.yml` — Prod: 3 API replicas, SSL, resource limits
+
+```bash
+# Dev (Baileys + hot-reload + debug ports)
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+
+# Prod (WhatsApp Official + 3 replicas + SSL)
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
 
 ---
 
@@ -340,14 +515,13 @@ For full details, see [Adapter Architecture Guide](Documentation/Architecture/Ad
 
 ### Running Tests
 ```bash
-# Unit tests for adapters
-pytest tests/adapters/
+# From the backend/ directory with env vars set (see Quick Start)
+python tests/test_project_setup.py          # Structure + imports (15 checks)
+python tests/test_schema_api_validation.py  # Schemas + routes (12 checks)
+python tests/test_blackout_simulation.py    # Redis queue (6 checks, needs Docker)
+python tests/test_resilience.py             # Circuit breakers (7 checks, needs Docker)
 
-# Integration tests (requires .env)
-pytest tests/integration/ --require-docker
-
-# Test 3G latency
-pytest tests/resilience/ -k "3g_simulation"
+# Total: 40 checks across 4 test files
 ```
 
 ### Adding a New Adapter (e.g., Telegram)
@@ -441,11 +615,17 @@ docker exec bot tail -f /app/logs/latency_report.json
 
 | Issue | Solution |
 | :--- | :--- |
-| Bot not responding | Check logs: `docker-compose logs app` |
-| WhatsApp webhook not triggering | Verify WEBHOOK_VERIFY_TOKEN in .env |
-| Airtable sync failing | Test API key: `curl -H "Authorization: Bearer $AIRTABLE_API_KEY" ...` |
-| High latency from DRC | Switch AI_ADAPTER to GOOGLE_GEMINI |
-| Database connection error | Ensure PostgreSQL is running: `docker-compose ps db` |
+| `Cannot connect to Docker daemon` | Start Docker Desktop, wait for it to be fully ready |
+| Containers fail to start | Run `docker compose -f docker-compose.yml -f docker-compose.dev.yml logs <service>` |
+| Port 80 conflict (nginx) | Stop Apache/IIS or any other service on port 80 |
+| Port 5432 conflict (postgres) | Local PostgreSQL running — dev compose maps to `5433` instead |
+| Baileys QR not showing | Check logs: `docker logs bot-baileys-1`. Needs internet to reach WhatsApp servers |
+| Baileys 405/408 errors | Outdated WA version — the code auto-fetches latest. Restart: `docker compose ... restart baileys` |
+| `apt-get` fails during build | Flaky network — retry the build, or use `--no-cache` flag |
+| API health returns unhealthy | Check postgres & redis are healthy first: `docker compose ... ps` |
+| Celery tasks fail with ImportError | Expected — module services (M2–M9) are not built yet (Phase 1 work) |
+| Dashboard not loading | Access via nginx: `http://localhost/dashboard/` (trailing slash required) |
+| Docker pull fails (EOF) | Network instability — retry: `docker pull <image>` then rebuild |
 
 ---
 
@@ -463,12 +643,34 @@ Internal MBB Project. Not for external distribution.
 
 ---
 
-## 🎉 Next Steps
+## 🎉 Current Status & Next Steps
 
-1. **Phase 1 (Now)**: Airtable + Claude + Orange Money launch
-2. **Phase 2 (Q3 2026)**: Migrate to MBB HUB + MBB Payments (adapter swap)
-3. **Phase 2+ (Q4 2026)**: Add MBB BOX inventory API
-4. **Phase 3 (2027)**: Local Llama edge computing + SMS fallback
+### Phase 0 — Foundation ✅ (Complete)
+- [x] Docker Compose stack (11 services running)
+- [x] PostgreSQL schema with 15+ tables, indexes, materialized views
+- [x] Redis AOF persistence + Celery 5-queue configuration
+- [x] FastAPI app with health checks, middleware, security
+- [x] Pydantic schemas for all 10 API domains
+- [x] Adapter pattern (AI, CRM, Inventory, Payment, Messaging)
+- [x] Baileys WhatsApp bridge with QR code + auto-version-fetch
+- [x] Streamlit dashboard skeleton
+- [x] Nginx reverse proxy
+- [x] Monitoring stack (Prometheus, Grafana, Loki)
+- [x] CI/CD pipeline (GitHub Actions: lint, test, docker-build)
+- [x] 40 passing test checks (structure, schemas, blackout, resilience)
+
+### Phase 1 — Core System 🔜 (Next)
+1. **Stage 1.A**: M1 Gateway + M2 Conversation Engine + M3 Queue (8 weeks)
+2. **Stage 1.B**: M5 Lead Qualification + M6 Relance Engine (4 weeks)
+3. **Stage 1.C**: M7 Conversion + Payment Integration (2 weeks)
+4. **Stage 1.D**: M8 MAPS Intelligence + M9 Dashboard (2 weeks)
+5. **Stage 1.E**: Integration testing + Security audit + Pilot (4 weeks)
+
+### Phase 2 — Advanced Intelligence (Q3–Q4 2026)
+- Voice note handling, Gemini fallback, MBB HUB/BOX adapters
+
+### Phase 3 — Scale (2027)
+- Kubernetes, multi-city deployment, predictive AI
 
 ---
 
