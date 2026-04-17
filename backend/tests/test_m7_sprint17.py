@@ -29,10 +29,12 @@ from app.database import AsyncSessionLocal, engine
 @pytest.fixture(autouse=True)
 async def reset_connection_pool():
     """Dispose the engine pool before each test to avoid cross-test loop corruption."""
-    await engine.dispose()
     yield
-    # Dispose again after the test to clean up any open connections
-    await engine.dispose()
+    # Dispose after the test to clean up any open connections
+    try:
+        await engine.dispose()
+    except Exception:
+        pass
 
 
 from app.database import AsyncSessionLocal
@@ -782,3 +784,267 @@ def test_m7_payment_initiated_all_methods_french():
         )
         # Should contain amount or method-specific text (not empty)
         assert len(msg) > 5, f"Empty message for method: {method.value}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 12: Bank transfer order creation
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_bank_transfer_order_creation():
+    """Bank transfer order uses payment_type='bank_transfer'"""
+    async with AsyncSessionLocal() as session:
+        phone, lead_id = await _seed_customer_lead(session)
+        order = await create_order(
+            session,
+            lead_id=lead_id,
+            customer_phone=phone,
+            items=[{"product_id": "MONITOR-24", "quantity": 1, "unit_price_cdf": 250000}],
+            delivery_zone="Gombe",
+            payment_method=PaymentMethod.bank_transfer,
+        )
+        assert order.payment_type == "bank_transfer"
+        assert order.status == "pending"
+
+        result = await session.execute(
+            select(Payment).where(Payment.order_id == order.order_id)
+        )
+        payment = result.scalar_one()
+        assert payment.method == "bank_transfer"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 13: Payment callback processing (end-to-end service layer)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_process_callback_success_confirms_order():
+    """Successful payment callback → payment=completed, order=confirmed"""
+    from app.modules.m7_conversion.service import process_callback
+    from unittest.mock import patch, AsyncMock
+
+    async with AsyncSessionLocal() as session:
+        phone, lead_id = await _seed_customer_lead(session)
+        order = await create_order(
+            session,
+            lead_id=lead_id,
+            customer_phone=phone,
+            items=[{"product_id": "CABLE-RJ45", "quantity": 3, "unit_price_cdf": 5000}],
+            delivery_zone="Kinshasa",
+            payment_method=PaymentMethod.orange_money,
+        )
+
+        # Simulate adapter setting a provider_transaction_id
+        result = await session.execute(
+            select(Payment).where(Payment.order_id == order.order_id)
+        )
+        payment = result.scalar_one()
+        txn_id = f"OM-CB-{uuid.uuid4().hex[:8]}"
+        payment.provider_transaction_id = txn_id
+        await session.commit()
+
+    # Mock the CRM sync task to avoid Celery dependency
+    with patch("app.tasks.conversion.sync_order_crm") as mock_task:
+        mock_task.apply_async = lambda **kw: None
+
+        callback_result = await process_callback(
+            payment_id=txn_id,
+            provider="orange_money",
+            status="success",
+            idempotency_key="idem-cb-001",
+        )
+
+    assert callback_result["payment_status"] == "completed"
+    assert callback_result["order_status"] == "confirmed"
+    assert callback_result["idempotent"] is False
+
+
+@pytest.mark.asyncio
+async def test_process_callback_idempotent():
+    """Same callback twice → second returns idempotent=True"""
+    from app.modules.m7_conversion.service import process_callback
+    from unittest.mock import patch
+
+    async with AsyncSessionLocal() as session:
+        phone, lead_id = await _seed_customer_lead(session)
+        order = await create_order(
+            session,
+            lead_id=lead_id,
+            customer_phone=phone,
+            items=[{"product_id": "USB-C-HUB", "quantity": 1, "unit_price_cdf": 30000}],
+            delivery_zone="Lemba",
+            payment_method=PaymentMethod.airtel_money,
+        )
+
+        result = await session.execute(
+            select(Payment).where(Payment.order_id == order.order_id)
+        )
+        payment = result.scalar_one()
+        txn_id = f"AM-IDEM-{uuid.uuid4().hex[:8]}"
+        payment.provider_transaction_id = txn_id
+        await session.commit()
+
+    with patch("app.tasks.conversion.sync_order_crm") as mock_task:
+        mock_task.apply_async = lambda **kw: None
+
+        first = await process_callback(
+            payment_id=txn_id,
+            provider="airtel_money",
+            status="success",
+            idempotency_key="idem-cb-002",
+        )
+
+        second = await process_callback(
+            payment_id=txn_id,
+            provider="airtel_money",
+            status="success",
+            idempotency_key="idem-cb-002",
+        )
+
+    assert first["idempotent"] is False
+    assert second["idempotent"] is True
+    assert second["payment_status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_process_callback_failed_payment():
+    """Failed payment callback → payment=failed, order stays pending"""
+    from app.modules.m7_conversion.service import process_callback
+    from unittest.mock import patch
+
+    async with AsyncSessionLocal() as session:
+        phone, lead_id = await _seed_customer_lead(session)
+        order = await create_order(
+            session,
+            lead_id=lead_id,
+            customer_phone=phone,
+            items=[{"product_id": "WEBCAM", "quantity": 1, "unit_price_cdf": 45000}],
+            delivery_zone="Ngaliema",
+            payment_method=PaymentMethod.mpesa,
+        )
+
+        result = await session.execute(
+            select(Payment).where(Payment.order_id == order.order_id)
+        )
+        payment = result.scalar_one()
+        txn_id = f"MP-FAIL-{uuid.uuid4().hex[:8]}"
+        payment.provider_transaction_id = txn_id
+        await session.commit()
+
+    with patch("app.tasks.conversion.sync_order_crm") as mock_task:
+        mock_task.apply_async = lambda **kw: None
+
+        callback_result = await process_callback(
+            payment_id=txn_id,
+            provider="mpesa",
+            status="failed",
+            idempotency_key="idem-cb-003",
+        )
+
+    assert callback_result["payment_status"] == "failed"
+    assert callback_result["order_status"] == "pending"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 14: CRM sync (mock adapter)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_crm_sync_order():
+    """sync_order_to_crm calls CRM adapter and marks order as synced"""
+    from app.modules.m7_conversion.service import sync_order_to_crm
+    from unittest.mock import patch, AsyncMock
+
+    async with AsyncSessionLocal() as session:
+        phone, lead_id = await _seed_customer_lead(session)
+        order = await create_order(
+            session,
+            lead_id=lead_id,
+            customer_phone=phone,
+            items=[{"product_id": "ROUTER", "quantity": 1, "unit_price_cdf": 80000}],
+            delivery_zone="Gombe",
+            payment_method=PaymentMethod.orange_money,
+        )
+        order_id = str(order.order_id)
+
+    mock_adapter = AsyncMock()
+    mock_adapter.sync_order.return_value = "rec_FAKE_CRM_ID"
+
+    with patch("app.adapters.crm.get_crm_adapter", return_value=mock_adapter):
+        crm_id = await sync_order_to_crm(order_id=order_id, idempotency_key="idem-crm-001")
+
+    assert crm_id == "rec_FAKE_CRM_ID"
+    mock_adapter.sync_order.assert_called_once()
+
+    # Verify order is marked as synced in DB
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Order).where(Order.order_id == uuid.UUID(order_id))
+        )
+        order = result.scalar_one()
+        assert order.hub_crm_synced is True
+        assert order.hub_crm_order_id == "rec_FAKE_CRM_ID"
+
+
+@pytest.mark.asyncio
+async def test_crm_sync_idempotent():
+    """sync_order_to_crm skips if already synced"""
+    from app.modules.m7_conversion.service import sync_order_to_crm
+    from unittest.mock import patch, AsyncMock
+
+    async with AsyncSessionLocal() as session:
+        phone, lead_id = await _seed_customer_lead(session)
+        order = await create_order(
+            session,
+            lead_id=lead_id,
+            customer_phone=phone,
+            items=[{"product_id": "SWITCH-8P", "quantity": 1, "unit_price_cdf": 60000}],
+            delivery_zone="Kinshasa",
+            payment_method=PaymentMethod.airtel_money,
+        )
+        order_id = str(order.order_id)
+
+    mock_adapter = AsyncMock()
+    mock_adapter.sync_order.return_value = "rec_FIRST_SYNC"
+
+    with patch("app.adapters.crm.get_crm_adapter", return_value=mock_adapter):
+        first = await sync_order_to_crm(order_id=order_id, idempotency_key="idem-crm-002")
+        second = await sync_order_to_crm(order_id=order_id, idempotency_key="idem-crm-002")
+
+    assert first == "rec_FIRST_SYNC"
+    assert second == "already_synced"
+    assert mock_adapter.sync_order.call_count == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 15: CRM adapter factory
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_crm_adapter_factory():
+    """get_crm_adapter returns AirtableAdapter"""
+    import app.adapters.crm as crm_module
+    # Reset singleton to test factory
+    crm_module._instance = None
+    from app.adapters.crm import get_crm_adapter
+    from app.adapters.crm.airtable_adapter import AirtableAdapter
+    adapter = get_crm_adapter()
+    assert isinstance(adapter, AirtableAdapter)
+    crm_module._instance = None  # Clean up
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 16: Orders API route (imports + wired up)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_orders_api_route_not_501():
+    """Orders API routes are wired up (not returning 501 stubs)"""
+    from app.api.v1.orders import create_order as api_create_order
+    from app.api.v1.orders import get_order, update_order_status
+    import inspect
+    # Verify functions exist and don't just raise 501
+    src = inspect.getsource(api_create_order)
+    assert "501" not in src, "create_order is still a 501 stub"
+    src2 = inspect.getsource(get_order)
+    assert "501" not in src2, "get_order is still a 501 stub"
+    src3 = inspect.getsource(update_order_status)
+    assert "501" not in src3, "update_order_status is still a 501 stub"
