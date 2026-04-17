@@ -1,6 +1,8 @@
 """
 EP-01: POST /api/v1/messages          — Production / Official WA API path
 EP-01b: POST /api/v1/messages/baileys — Dev/Baileys bridge path
+EP-01c: POST /api/v1/messages/webhook — Universal webhook (dual-mode)
+EP-01d: GET  /api/v1/messages/webhook — Webhook verification (Official API)
 EP-02: POST /api/v1/messages/send     — Internal outbound dispatch
 
 M1 Message Gateway router. Handles inbound WhatsApp messages, applies DRC
@@ -9,17 +11,20 @@ M1 Celery worker for AI processing.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import re
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, field_validator
 
 from app.api.deps import DBSession, IdempotencyKey, get_current_role
 from app.config import get_settings
+from app.modules.m1_gateway.normalizer import normalize_webhook
 from app.redis_client import blackout_enqueue
 from app.redis_utils import dedup_check_and_mark, rate_limit_check
 from app.schemas.messages import (
@@ -218,6 +223,144 @@ async def receive_from_baileys(
     )
     inbound = payload.to_inbound_request()
     return await _handle_inbound(payload=inbound, source="baileys")
+
+
+# ── EP-01c: Universal webhook (dual-mode) ────────────────────────────────────
+
+@router.get(
+    "/webhook",
+    status_code=status.HTTP_200_OK,
+    summary="Webhook verification (Official WhatsApp API)",
+)
+async def verify_webhook(
+    hub_mode: Annotated[str | None, Query(alias="hub.mode")] = None,
+    hub_challenge: Annotated[str | None, Query(alias="hub.challenge")] = None,
+    hub_verify_token: Annotated[str | None, Query(alias="hub.verify_token")] = None,
+):
+    """
+    Webhook verification endpoint for Official WhatsApp Business API.
+
+    When Meta sets up the webhook, it sends a GET request with:
+      - hub.mode=subscribe
+      - hub.verify_token=<your_token>
+      - hub.challenge=<random_string>
+
+    You must respond with the challenge string to verify ownership.
+    """
+    expected_token = getattr(settings, "whatsapp_verify_token", "mbb_webhook_verify_2026")
+
+    if hub_mode == "subscribe" and hub_verify_token == expected_token:
+        log.info("webhook.verified", mode=hub_mode)
+        return int(hub_challenge) if hub_challenge and hub_challenge.isdigit() else hub_challenge
+    else:
+        log.warning("webhook.verification_failed", mode=hub_mode, token_match=(hub_verify_token == expected_token))
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="verification_failed")
+
+
+@router.post(
+    "/webhook",
+    status_code=status.HTTP_200_OK,
+    summary="Universal webhook for WhatsApp (dual-mode: Baileys or Official API)",
+)
+async def receive_webhook(
+    request: Request,
+    x_hub_signature_256: Annotated[str | None, Header()] = None,
+    x_webhook_secret: Annotated[str | None, Header()] = None,
+):
+    """
+    Universal webhook endpoint that handles both Baileys and Official API formats.
+
+    Mode detection:
+      - Baileys: X-Webhook-Secret header present
+      - Official API: X-Hub-Signature-256 header present (HMAC-SHA256)
+
+    Returns 200 immediately (WhatsApp expects 200, not 202).
+    Processing is async via Celery.
+    """
+    body_bytes = await request.body()
+
+    # Detect mode based on headers
+    is_baileys = x_webhook_secret is not None
+    is_official = x_hub_signature_256 is not None
+
+    if is_baileys:
+        # Baileys mode: verify shared secret
+        expected_secret = getattr(settings, "baileys_webhook_secret", "")
+        if not expected_secret or x_webhook_secret != expected_secret:
+            log.warning("webhook.baileys.invalid_secret", remote=request.client.host if request.client else "unknown")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_webhook_secret")
+
+        # Parse and normalize Baileys payload
+        import json
+        try:
+            payload_dict = json.loads(body_bytes)
+            normalized = normalize_webhook(payload_dict, source="baileys")
+        except Exception as exc:
+            log.error("webhook.baileys.parse_error", error=str(exc))
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    elif is_official:
+        # Official API mode: verify HMAC-SHA256 signature
+        expected_secret = getattr(settings, "whatsapp_api_secret", "")
+        if not expected_secret:
+            log.error("webhook.official.no_secret_configured")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="webhook_secret_not_configured")
+
+        # Verify signature
+        signature = x_hub_signature_256.replace("sha256=", "") if x_hub_signature_256 else ""
+        expected_signature = hmac.new(
+            expected_secret.encode(),
+            body_bytes,
+            hashlib.sha256,
+        ).hexdigest()
+
+        if not hmac.compare_digest(signature, expected_signature):
+            log.warning("webhook.official.invalid_signature", remote=request.client.host if request.client else "unknown")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_signature")
+
+        # Parse and normalize Official API payload
+        import json
+        try:
+            payload_dict = json.loads(body_bytes)
+            normalized = normalize_webhook(payload_dict, source="official")
+        except Exception as exc:
+            log.error("webhook.official.parse_error", error=str(exc))
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    else:
+        # No auth header found
+        log.warning("webhook.no_auth_header", remote=request.client.host if request.client else "unknown")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="missing_auth_header")
+
+    # Convert normalized dict to InboundMessageRequest
+    try:
+        from app.schemas.common import ContentType
+        inbound = InboundMessageRequest(
+            message_id=uuid.UUID(normalized["message_id"]),
+            customer_phone=normalized["customer_phone"],
+            content=normalized["content"],
+            content_type=ContentType(normalized["content_type"]),
+            timestamp=datetime.fromisoformat(normalized["timestamp"]),
+            whatsapp_message_id=normalized["whatsapp_message_id"],
+        )
+    except Exception as exc:
+        log.error("webhook.normalization_error", error=str(exc), normalized=normalized)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"normalization_error: {exc}") from exc
+
+    # Dispatch to M1 processing
+    source = "baileys" if is_baileys else "official"
+    log.info(
+        "webhook.received",
+        wa_id=inbound.whatsapp_message_id,
+        phone=inbound.customer_phone,
+        content_type=inbound.content_type,
+        source=source,
+    )
+
+    await _handle_inbound(payload=inbound, source=source)
+
+    # WhatsApp expects 200 OK (not 202)
+    return {"status": "received"}
 
 
 # ── EP-02: Internal outbound send ────────────────────────────────────────────

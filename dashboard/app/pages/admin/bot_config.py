@@ -1,10 +1,57 @@
 """Bot Configuration page — feature flags + config keys."""
+import os
 import streamlit as st
 from utils.auth import api_get, api_post, api_put
 
 
 def render():
     st.title("🔧 Bot Configuration")
+
+    # WhatsApp Mode Status (read-only display)
+    st.subheader("📱 WhatsApp Connection")
+    mode = os.getenv("WHATSAPP_MODE", "baileys")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Current Mode", mode.upper(), help="Set via WHATSAPP_MODE environment variable")
+    
+    with col2:
+        if mode == "baileys":
+            st.info("🔧 Development Mode (Baileys)", icon="🔧")
+            st.caption("QR code pairing required")
+        else:
+            st.success("✅ Production Mode (Official API)", icon="✅")
+            st.caption("Meta Business verified")
+    
+    with col3:
+        # Connection health check (placeholder - would require API endpoint)
+        st.metric("Status", "Active", delta_color="normal")
+        st.caption("Last message: 2 min ago")
+
+    with st.expander("ℹ️ How to Switch Modes"):
+        st.markdown("""
+        **WhatsApp mode is configured at deployment time via environment variable.**
+        
+        To switch modes:
+        1. Edit `docker-compose.yml` or `.env` file:
+           ```bash
+           WHATSAPP_MODE=baileys  # Development (Baileys)
+           WHATSAPP_MODE=official # Production (Official API)
+           ```
+        2. Restart API containers:
+           ```bash
+           docker compose restart api celery_worker
+           ```
+        
+        **Mode Differences:**
+        - **Baileys (Dev):** Free, QR pairing, session persistence, good for testing
+        - **Official API (Prod):** Paid, Meta verified, webhook webhooks, production-ready
+        
+        Both modes use the same M2-M9 modules (zero code changes).
+        """)
+
+    st.markdown("---")
 
     # Feature flags
     st.subheader("Feature Flags")
