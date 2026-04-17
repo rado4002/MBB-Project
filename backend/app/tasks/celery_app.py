@@ -11,6 +11,8 @@ celery_app = Celery(
     backend=settings.celery_result_backend,
     include=[
         "app.tasks.m1",
+        "app.tasks.m5",
+        "app.tasks.qualification",
         "app.tasks.relance",
         "app.tasks.maps",
         "app.tasks.escalation",
@@ -39,12 +41,14 @@ celery_app.conf.update(
 
     # Named queues (one per business domain)
     task_routes={
-        "m1.*":                   {"queue": "default"},
-        "app.tasks.m1.*":         {"queue": "default"},
-        "app.tasks.relance.*":    {"queue": "relance"},
-        "app.tasks.maps.*":       {"queue": "maps"},
-        "app.tasks.escalation.*": {"queue": "escalation"},
-        "app.tasks.conversion.*": {"queue": "conversion"},
+        "m1.*":                          {"queue": "default"},
+        "app.tasks.m1.*":                {"queue": "default"},
+        "app.tasks.m5.*":                {"queue": "default"},
+        "app.tasks.qualification.*":     {"queue": "default"},
+        "app.tasks.relance.*":           {"queue": "relance"},
+        "app.tasks.maps.*":              {"queue": "maps"},
+        "app.tasks.escalation.*":        {"queue": "escalation"},
+        "app.tasks.conversion.*":        {"queue": "conversion"},
     },
     task_default_queue="default",
 

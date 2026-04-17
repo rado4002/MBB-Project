@@ -71,48 +71,173 @@ def initiate_payment(
 @celery_app.task(
     bind=True,
     base=_BaseTask,
-    name="app.tasks.conversion.process_payment_callback",
+    name="m7.process_payment_callback",
     queue="conversion",
     acks_late=True,
 )
 def process_payment_callback(
     self: Task,
-    payment_id: str,
+    transaction_id: str,
+    order_id: str,
     provider: str,
     status: str,
-    idempotency_key: str,
+    amount_cdf: str,
+    customer_phone: str,
+    timestamp: str,
 ) -> dict:
     """
     Handle a Mobile Money provider callback.
 
-    Idempotent: re-delivering the same callback (same idempotency_key)
+    Idempotent: re-delivering the same callback (same transaction_id + provider)
     returns the existing result without double-processing.
 
     Args:
-        payment_id:       Provider-assigned payment reference.
+        transaction_id:   Provider-assigned payment reference.
+        order_id:         UUID of Order record.
         provider:         "orange" | "airtel" | "mpesa".
         status:           "success" | "failed" | "pending".
-        idempotency_key:  Deduplication key (from webhook header or payload).
+        amount_cdf:       Payment amount in CDF.
+        customer_phone:   Customer's phone number.
+        timestamp:        Payment timestamp (ISO format).
     """
     import asyncio
 
-    from app.modules.m7_conversion import service as conversion_svc  # type: ignore[import]
-
-    log.info("conversion.callback.start", payment_id=payment_id, provider=provider, status=status)
+    log.info(
+        "conversion.callback.start",
+        transaction_id=transaction_id,
+        order_id=order_id,
+        provider=provider,
+        status=status,
+    )
     try:
         result = asyncio.run(
-            conversion_svc.process_callback(
-                payment_id=payment_id,
+            _process_payment_callback(
+                transaction_id=transaction_id,
+                order_id=order_id,
                 provider=provider,
                 status=status,
-                idempotency_key=idempotency_key,
+                amount_cdf=amount_cdf,
+                customer_phone=customer_phone,
+                timestamp=timestamp,
             )
         )
-        log.info("conversion.callback.done", payment_id=payment_id, result=result)
+        log.info("conversion.callback.done", transaction_id=transaction_id, result=result)
         return result
     except Exception as exc:
-        log.error("conversion.callback.error", payment_id=payment_id, error=str(exc))
+        log.error("conversion.callback.error", transaction_id=transaction_id, error=str(exc))
         raise self.retry(exc=exc, countdown=2 ** self.request.retries * 30)
+
+
+async def _process_payment_callback(
+    transaction_id: str,
+    order_id: str,
+    provider: str,
+    status: str,
+    amount_cdf: str,
+    customer_phone: str,
+    timestamp: str,
+) -> dict:
+    """
+    Core logic for processing payment callback.
+
+    Returns:
+        Dict with processing status
+    """
+    from app.database import AsyncSessionLocal
+    from app.models.order import Order
+    from app.models.payment import Payment
+    from datetime import datetime, timezone
+    from decimal import Decimal
+    import uuid
+
+    order_uuid = uuid.UUID(order_id)
+
+    async with AsyncSessionLocal() as session:
+        # Check if payment already processed (idempotency via transaction_id)
+        from sqlalchemy import select
+
+        existing_payment = await session.execute(
+            select(Payment).where(
+                Payment.transaction_id == transaction_id,
+                Payment.provider == provider,
+            )
+        )
+        if existing_payment.scalar_one_or_none() is not None:
+            log.debug(
+                "conversion.callback.already_processed",
+                transaction_id=transaction_id,
+            )
+            return {
+                "status": "already_processed",
+                "transaction_id": transaction_id,
+            }
+
+        # Load order
+        order = await session.get(Order, order_uuid)
+        if not order:
+            log.error("conversion.callback.order_not_found", order_id=order_id)
+            return {
+                "status": "failed",
+                "reason": "order_not_found",
+            }
+
+        # Create payment record
+        payment = Payment(
+            payment_id=uuid.uuid4(),
+            order_id=order_uuid,
+            transaction_id=transaction_id,
+            provider=provider,
+            amount_cdf=Decimal(amount_cdf),
+            status=status,
+            customer_phone=customer_phone,
+            callback_timestamp=datetime.fromisoformat(timestamp),
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        session.add(payment)
+
+        # Update order status based on payment status
+        if status == "success":
+            order.status = "paid"
+            order.updated_at = datetime.now(timezone.utc)
+            log.info(
+                "conversion.order_paid",
+                order_id=order_id,
+                transaction_id=transaction_id,
+            )
+        elif status == "failed":
+            order.status = "payment_failed"
+            order.updated_at = datetime.now(timezone.utc)
+            log.warning(
+                "conversion.payment_failed",
+                order_id=order_id,
+                transaction_id=transaction_id,
+            )
+
+        await session.commit()
+
+        # Send customer notification via WhatsApp
+        from app.adapters.messaging import get_messaging_adapter
+
+        messaging = get_messaging_adapter()
+        if status == "success":
+            await messaging.send_message(
+                phone_number=customer_phone,
+                message=f"Paiement reçu ✅ Commande #{order_id[:8]} confirmée. Livraison en cours!",
+            )
+        else:
+            await messaging.send_message(
+                phone_number=customer_phone,
+                message=f"Paiement échoué ❌ Commande #{order_id[:8]}. Veuillez réessayer.",
+            )
+
+        return {
+            "status": "processed",
+            "transaction_id": transaction_id,
+            "order_id": order_id,
+            "payment_status": status,
+            "order_status": order.status,
+        }
 
 
 # ── Task: drain the blackout queue (Beat-triggered + on-startup) ──────────────
