@@ -54,7 +54,7 @@ def escalate_conversation(
     """
     import asyncio
 
-    from app.modules.m9_dashboard import service as escalation_svc  # type: ignore[import]
+    from app.modules.m8_maps import escalation as escalation_svc  # type: ignore[import]
 
     log.info(
         "escalation.task.start",
@@ -64,7 +64,7 @@ def escalate_conversation(
     )
     try:
         result = asyncio.run(
-            escalation_svc.escalate(
+            escalation_svc.create_ticket_from_task(
                 conversation_id=conversation_id,
                 reason=reason,
                 lead_id=lead_id,
@@ -93,11 +93,11 @@ def check_stale_escalations() -> dict:
     """
     import asyncio
 
-    from app.modules.m9_dashboard import service as escalation_svc  # type: ignore[import]
+    from app.modules.m8_maps import escalation as escalation_svc  # type: ignore[import]
 
     log.info("escalation.check_stale.start")
     result = asyncio.run(
-        escalation_svc.check_stale_escalations()
+        escalation_svc.check_stale_from_task()
     )
     log.info("escalation.check_stale.done", reminders_sent=result.get("reminders_sent", 0))
     return result

@@ -5,9 +5,10 @@ EP-24: GET /api/v1/analytics/relance-performance
 from datetime import date
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import DBSession, get_current_role
+from app.modules.m9_dashboard import analytics as analytics_svc
 from app.schemas.analytics import FunnelMetrics, RelancePerformance
 
 log = structlog.get_logger()
@@ -29,7 +30,8 @@ async def get_funnel_metrics(
     stage breakdown, language breakdown.
     """
     log.info("analytics.funnel", start=str(period_start), end=str(period_end))
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="M9 not yet implemented")
+    result = await analytics_svc.get_funnel_metrics(db, period_start, period_end)
+    return FunnelMetrics(**result)
 
 
 @router.get(
@@ -47,4 +49,5 @@ async def get_relance_performance(
     opt-outs triggered.
     """
     log.info("analytics.relance", start=str(period_start), end=str(period_end))
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="M9 not yet implemented")
+    result = await analytics_svc.get_relance_performance(db, period_start, period_end)
+    return RelancePerformance(**result)
