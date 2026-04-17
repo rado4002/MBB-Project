@@ -38,7 +38,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 @pytest.fixture
 async def db_session():
-    """Session-scoped DB session for integration test"""
+    """Function-scoped DB session for test isolation (each test gets fresh session)"""
     async with AsyncSessionLocal() as session:
         yield session
 
@@ -202,23 +202,26 @@ async def test_seed_50_leads(db_session: AsyncSession):
 
 async def test_lead_scoring_accuracy(db_session: AsyncSession):
     """✅ Verify lead scoring matches expected distribution"""
-    await seed_conversations(db_session, count=50)
+    conversations = await seed_conversations(db_session, count=50)
     
-    # Query all leads
-    result = await db_session.execute(select(Lead).where(Lead.score.isnot(None)))
+    # Use the leads from this test run only (avoid accumulation across tests)
+    lead_ids = [c["lead_id"] for c in conversations]
+    result = await db_session.execute(
+        select(Lead).where(Lead.lead_id.in_(lead_ids))
+    )
     leads = result.scalars().all()
     
-    assert len(leads) == 50
+    assert len(leads) == 50, f"Expected 50 leads, got {len(leads)}"
     
-    # Verify distribution
-    hot = [l for l in leads if l.score >= 70]
-    warm = [l for l in leads if 40 <= l.score < 70]
-    cold = [l for l in leads if l.score < 40]
+    # Verify distribution using score_value
+    hot = [l for l in leads if l.score_value >= 70]
+    warm = [l for l in leads if 40 <= l.score_value < 70]
+    cold = [l for l in leads if l.score_value < 40]
     
     print(f"\n✅ Lead scoring distribution:")
-    print(f"   HOT (≥70):   {len(hot)} leads, avg score: {sum(l.score for l in hot) / len(hot):.1f}")
-    print(f"   WARM (40-69): {len(warm)} leads, avg score: {sum(l.score for l in warm) / len(warm):.1f}")
-    print(f"   COLD (<40):  {len(cold)} leads, avg score: {sum(l.score for l in cold) / len(cold):.1f}")
+    print(f"   HOT (≥70):   {len(hot)} leads, avg score: {sum(l.score_value for l in hot) / len(hot):.1f}")
+    print(f"   WARM (40-69): {len(warm)} leads, avg score: {sum(l.score_value for l in warm) / len(warm):.1f}")
+    print(f"   COLD (<40):  {len(cold)} leads, avg score: {sum(l.score_value for l in cold) / len(cold):.1f}")
     
     assert len(hot) >= 8, f"Expected ~10 hot leads, got {len(hot)}"
     assert len(warm) >= 15, f"Expected ~20 warm leads, got {len(warm)}"
@@ -261,24 +264,33 @@ async def test_relance_scheduling_cadence(db_session: AsyncSession):
     base_msg_time = datetime(2026, 4, 17, 14, 0, 0, tzinfo=timezone.utc)
     
     # Test attempt 1 (+24h)
-    attempt1_scheduled = calculate_next_relance_time(base_msg_time, attempt_number=1)
+    attempt1_scheduled = calculate_next_relance_time(
+        last_customer_message_time=base_msg_time, 
+        attempt_number=1
+    )
     expected_attempt1 = base_msg_time + timedelta(hours=24)
     assert attempt1_scheduled == expected_attempt1, \
         f"Attempt 1: expected {expected_attempt1}, got {attempt1_scheduled}"
     
-    # Test attempt 2 (+48h, but with quiet hours)
-    attempt2_scheduled = calculate_next_relance_time(base_msg_time, attempt_number=2)
+    # Test attempt 2 (+60h, with quiet hours adjustment)
+    attempt2_scheduled = calculate_next_relance_time(
+        last_customer_message_time=base_msg_time,
+        attempt_number=2
+    )
     # +60h from 2026-04-17 14:00 UTC = 2026-04-20 02:00 UTC
-    # Kinshasa is UTC+1, so 02:00 UTC = 03:00 Kinshasa (past quiet hours 22:00-07:00)
+    # Kinshasa is UTC+1, so 02:00 UTC = 03:00 Kinshasa (inside quiet hours 22:00-07:00)
     # So it gets rescheduled to 07:00 Kinshasa = 06:00 UTC
     expected_attempt2 = datetime(2026, 4, 20, 6, 0, 0, tzinfo=timezone.utc)
     assert attempt2_scheduled == expected_attempt2, \
         f"Attempt 2: expected {expected_attempt2}, got {attempt2_scheduled}"
     
-    # Test attempt 3 (+7-10d, expect 8.5d with quiet hours)
-    attempt3_scheduled = calculate_next_relance_time(base_msg_time, attempt_number=3)
-    # +7 days from 2026-04-17 14:00 UTC = 2026-04-24 14:00 UTC
-    # Further +1.5d adjustment to land outside quiet hours = 2026-04-26 06:00 UTC
+    # Test attempt 3 (+8.5d, with quiet hours adjustment)
+    attempt3_scheduled = calculate_next_relance_time(
+        last_customer_message_time=base_msg_time,
+        attempt_number=3
+    )
+    # +8.5d from 2026-04-17 14:00 UTC = 2026-04-26 02:00 UTC
+    # 02:00 UTC = 03:00 Kinshasa (inside quiet hours) → reschedule to 06:00 UTC
     expected_attempt3 = datetime(2026, 4, 26, 6, 0, 0, tzinfo=timezone.utc)
     assert attempt3_scheduled == expected_attempt3, \
         f"Attempt 3: expected {expected_attempt3}, got {attempt3_scheduled}"
@@ -286,7 +298,7 @@ async def test_relance_scheduling_cadence(db_session: AsyncSession):
     print(f"\n✅ Relance cadence scheduling:")
     print(f"   Attempt 1 (+24h):   {attempt1_scheduled}")
     print(f"   Attempt 2 (+60h):   {attempt2_scheduled}")
-    print(f"   Attempt 3 (+7-10d): {attempt3_scheduled}")
+    print(f"   Attempt 3 (+8.5d): {attempt3_scheduled}")
 
 
 async def test_max_3_relance_hard_limit(db_session: AsyncSession):
@@ -300,6 +312,8 @@ async def test_max_3_relance_hard_limit(db_session: AsyncSession):
     
     # Manually create 3 relances
     base_time = datetime.now(timezone.utc)
+    # Valid hook_type values: 'reciprocity', 'social_proof', 'scarcity', 'loyalty'
+    hook_types = ["reciprocity", "social_proof", "scarcity"]
     for attempt in range(1, 4):
         relance = Relance(
             relance_id=uuid.uuid4(),
@@ -307,7 +321,7 @@ async def test_max_3_relance_hard_limit(db_session: AsyncSession):
             attempt_number=attempt,
             scheduled_at=base_time + timedelta(hours=24*attempt),
             value_hook=f"Hook #{attempt}",
-            hook_type="value_reminder",
+            hook_type=hook_types[attempt - 1],
         )
         db_session.add(relance)
     

@@ -105,7 +105,8 @@ async def _has_pending_relance(session: AsyncSession, lead_id: uuid.UUID) -> boo
         )
     )
     result = await session.execute(query)
-    pending = result.scalar_one_or_none()
+    # Use first() instead of scalar_one_or_none() since multiple pending relances can exist
+    pending = result.scalars().first()
     return pending is not None
 
 
