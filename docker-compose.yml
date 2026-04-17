@@ -37,6 +37,8 @@ services:
       - postgres_db
       - postgres_user
       - postgres_password
+    ports:
+      - "5433:5432"
     networks:
       - mbb_internal
     restart: unless-stopped
