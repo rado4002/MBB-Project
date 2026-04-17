@@ -16,5 +16,19 @@
   "relance_fallback_3": "Mara ya mwisho! Tuna ofa maalum kwako. Unapenda? 🎁",
   "opt_out_confirm": "Unataka kusimama kweli? Andika 'ndiyo' kuthibitisha.",
   "language_switch": "Sawa! Naendelea kwa Kiswahili! 🇨🇩",
-  "escalation_ack": "Ninapeleka ombi lako kwa mwenzangu ambaye atakusaidia vizuri zaidi. Subiri kidogo 🙏"
+  "escalation_ack": "Ninapeleka ombi lako kwa mwenzangu ambaye atakusaidia vizuri zaidi. Subiri kidogo 🙏",
+  "payment_menu": "Vizuri! Unataka kulipa vipi?\n1️⃣ Orange Money\n2️⃣ Airtel Money\n3️⃣ M-Pesa\n4️⃣ Pesa taslimu wakati wa uwasilishaji\n5️⃣ Uhamisho wa benki",
+  "order_confirm_product": "{product} x{qty} = {price} ✓",
+  "order_confirm_question": "Tunathibitisha agizo? 😊",
+  "payment_initiated_orange_money": "Sawa! Utapata arifa ya Orange Money kwenye simu yako. Thibitisha malipo ya {amount} kukamilisha agizo lako. 📱",
+  "payment_initiated_airtel_money": "Sawa! Utapata push ya Airtel Money. Thibitisha malipo ya {amount} kukamilisha agizo. 📱",
+  "payment_initiated_mpesa": "Vizuri! Ingiza PIN yako ya M-Pesa kuthibitisha malipo ya {amount}. 📱",
+  "payment_initiated_bank_transfer": "Vizuri! Hapa maelezo ya benki kwa uhamisho wa {amount}. Tutakuthibitishia baada ya kupokea. 🏦",
+  "payment_initiated_cash": "Vizuri! Utalipa wakati wa uwasilishaji. Hakuna wasiwasi! 😊",
+  "payment_initiated_fallback": "Vizuri! Malipo yako ya {amount} yanashughulikiwa. Tutakuarifu hivi karibuni. ⏳",
+  "order_confirmed": "Asante! Malipo yamethibitishwa ✓\nAgizo #{order_id} — {product}\nUwasilishaji: {zone}\nTutakuarifu agizo lako litakapofika! 🎉",
+  "delivery_guidance": "Agizo lako #{order_id} liko njiani kwenda {zone}! Muda wa uwasilishaji: {eta}. Tutakuarifu mjumbe akikaribia. 🛵",
+  "payment_patience": "Malipo yako yanakaguliwa. Inachukua dakika chache. Tutakuarifu hivi karibuni! 🙏",
+  "cod_instructions": "Agizo #{order_id} limethibitishwa! Mjumbe wetu atakuja {zone} ndani ya {eta}. Utalipa wakati wa uwasilishaji. 💪",
+  "bank_transfer_details": "Maelezo ya benki ya MBB ya Kin:\nBenki: Rawbank\nAkaunti: 00123-456789-01\nKumbukumbu: {order_id}\nKiasi: {amount}"
 }

@@ -158,3 +158,83 @@ def drain_blackout_queue() -> dict:
 
     log.info("blackout.drain.done", processed=processed, total=len(messages))
     return {"drained": processed, "total": len(messages)}
+
+
+# ── Task: sync confirmed order to CRM ─────────────────────────────────────────
+
+@celery_app.task(
+    bind=True,
+    base=_BaseTask,
+    name="app.tasks.conversion.sync_order_crm",
+    queue="conversion",
+    acks_late=True,
+)
+def sync_order_crm(self: Task, *, order_id: str, idempotency_key: str) -> dict:
+    """
+    Sync a confirmed order to the Airtable CRM.
+
+    Idempotent: safe to retry. If already synced, returns early.
+    Target latency: < 2 minutes after order confirmation.
+    """
+    import asyncio
+
+    from app.modules.m7_conversion import service as conversion_svc  # type: ignore[import]
+
+    log.info("conversion.crm_sync.start", order_id=order_id)
+    try:
+        crm_id = asyncio.run(
+            conversion_svc.sync_order_to_crm(
+                order_id=order_id,
+                idempotency_key=idempotency_key,
+            )
+        )
+        log.info("conversion.crm_sync.done", order_id=order_id, crm_id=crm_id)
+        return {"crm_id": crm_id, "order_id": order_id}
+    except Exception as exc:
+        log.error("conversion.crm_sync.error", order_id=order_id, error=str(exc))
+        raise self.retry(exc=exc, countdown=2 ** self.request.retries * 30)
+
+
+# ── Task: update order status ─────────────────────────────────────────────────
+
+@celery_app.task(
+    bind=True,
+    base=_BaseTask,
+    name="app.tasks.conversion.update_order_status",
+    queue="conversion",
+    acks_late=True,
+)
+def update_order_status(
+    self: Task,
+    *,
+    order_id: str,
+    new_status: str,
+    idempotency_key: str,
+) -> dict:
+    """
+    Advance an order through the state machine.
+
+    Valid transitions:
+      pending → confirmed → preparing → delivering → delivered
+      Any (except delivered) → cancelled
+    """
+    import asyncio
+    import uuid as _uuid
+
+    from app.modules.m7_conversion import service as conversion_svc  # type: ignore[import]
+
+    log.info("conversion.status_update.start", order_id=order_id, new_status=new_status)
+    try:
+        async def _run():
+            from app.database import AsyncSessionLocal
+            async with AsyncSessionLocal() as session:
+                return await conversion_svc.update_order_status(
+                    session, order_id=_uuid.UUID(order_id), new_status=new_status
+                )
+
+        order = asyncio.run(_run())
+        log.info("conversion.status_update.done", order_id=order_id, status=order.status)
+        return {"order_id": order_id, "status": order.status}
+    except Exception as exc:
+        log.error("conversion.status_update.error", order_id=order_id, error=str(exc))
+        raise self.retry(exc=exc, countdown=2 ** self.request.retries * 30)

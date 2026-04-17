@@ -16,5 +16,19 @@
   "relance_fallback_3": "Dernière fois! On a une offre spéciale juste pour toi. Ça t'intéresse? 🎁",
   "opt_out_confirm": "Tu veux vraiment arrêter? Tape 'oui' pour confirmer.",
   "language_switch": "Pas de souci, je continue en français! 🇫🇷",
-  "escalation_ack": "Je transfère ta demande à un collègue qui va mieux t'aider. Patiente un moment 🙏"
+  "escalation_ack": "Je transfère ta demande à un collègue qui va mieux t'aider. Patiente un moment 🙏",
+  "payment_menu": "Parfait! Comment tu veux payer?\n1️⃣ Orange Money\n2️⃣ Airtel Money\n3️⃣ M-Pesa\n4️⃣ Cash à la livraison\n5️⃣ Virement bancaire",
+  "order_confirm_product": "{product} x{qty} = {price} ✓",
+  "order_confirm_question": "On confirme la commande? 😊",
+  "payment_initiated_orange_money": "OK! Tu vas recevoir une notification Orange Money sur ton téléphone. Confirme le paiement de {amount} pour finaliser ta commande. 📱",
+  "payment_initiated_airtel_money": "OK! Tu vas recevoir un push Airtel Money. Confirme le paiement de {amount} pour finaliser ta commande. 📱",
+  "payment_initiated_mpesa": "OK! Tape ton PIN M-Pesa pour confirmer le paiement de {amount}. 📱",
+  "payment_initiated_bank_transfer": "Super! Voici nos coordonnées bancaires pour le virement de {amount}. Notre équipe va confirmer dès réception. 🏦",
+  "payment_initiated_cash": "Parfait! On passe récupérer le paiement à la livraison. Pas de souci! 😊",
+  "payment_initiated_fallback": "Super! Ton paiement de {amount} est en cours. On te confirme dès que c'est bon. ⏳",
+  "order_confirmed": "Merci! Paiement confirmé ✓\nCommande #{order_id} — {product}\nLivraison: {zone}\nNa-ko-yebisa yo tango ekokóma! 🎉",
+  "delivery_guidance": "Ta commande #{order_id} est en route vers {zone}! Livraison estimée: {eta}. On te prévient quand le livreur est proche. 🛵",
+  "payment_patience": "Ton paiement est en cours de vérification. Ça prend parfois quelques minutes. On te confirme très bientôt! 🙏",
+  "cod_instructions": "Commande #{order_id} confirmée! Notre livreur passera à {zone} dans {eta}. Tu paieras à la réception. 💪",
+  "bank_transfer_details": "Coordonnées bancaires MBB ya Kin:\nBanque: Rawbank\nCompte: 00123-456789-01\nRéférence: {order_id}\nMontant: {amount}"
 }

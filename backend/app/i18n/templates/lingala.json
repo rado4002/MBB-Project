@@ -16,5 +16,19 @@
   "relance_fallback_3": "Mbala ya suka! To-zali na offre spécial mpo na yo. Olingi? 🎁",
   "opt_out_confirm": "Olingi kotika solo? Koma 'iyo' pona ko-confirmer.",
   "language_switch": "Soki! Nakokoba na Lingala! 🇨🇩",
-  "escalation_ack": "Nazali ko-tindela demande na yo epai ya ndeko moko oyo akosalisa yo malamu. Zela moke 🙏"
+  "escalation_ack": "Nazali ko-tindela demande na yo epai ya ndeko moko oyo akosalisa yo malamu. Zela moke 🙏",
+  "payment_menu": "Malamu! Na-leli kopay ndenge nini?\n1️⃣ Orange Money\n2️⃣ Airtel Money\n3️⃣ M-Pesa\n4️⃣ Cash na livraison\n5️⃣ Virement ya banque",
+  "order_confirm_product": "{product} x{qty} = {price} ✓",
+  "order_confirm_question": "Tokomitisa commande? 😊",
+  "payment_initiated_orange_money": "OK ndeko! Ozoki notification ya Orange Money na telefone na yo. Landa instructions pona ko-payer {amount}. 📱",
+  "payment_initiated_airtel_money": "OK! Ozoki push ya Airtel Money. Ko-confirmer paiement ya {amount} pona ko-finaliser commande na yo. 📱",
+  "payment_initiated_mpesa": "Malamu! Koma PIN ya M-Pesa na yo pona ko-confirmer paiement ya {amount}. 📱",
+  "payment_initiated_bank_transfer": "Super! Tala ba-coordonnées ya banque na biso pona virement ya {amount}. Biso tokozwa yo tango topesi confirmation. 🏦",
+  "payment_initiated_cash": "Malamu ndeko! Topay na tango ya livraison. Soucis ezali te! 😊",
+  "payment_initiated_fallback": "Malamu! Paiement ya {amount} e-zali en cours. Tokoyebisa yo tango ekosala. ⏳",
+  "order_confirmed": "Matondo ndeko! Paiement e-batelami ✓\nCommande #{order_id} — {product}\nLivraison: {zone}\nTokoyebisa yo tango ekokóma! 🎉",
+  "delivery_guidance": "Commande #{order_id} e-zali na nzela pona {zone}! Livraison: {eta}. Tokoyebisa yo livreur akokóma. 🛵",
+  "payment_patience": "Paiement na yo e-zali ko-vérifier. Bofimbo moke, ekosala malamu. Tokoyebisa yo sawa! 🙏",
+  "cod_instructions": "Commande #{order_id} e-batelami! Livreur na biso akoya {zone} na {eta}. Topay na tango ya livraison. 💪",
+  "bank_transfer_details": "Ba-coordonnées ya banque MBB ya Kin:\nBanque: Rawbank\nCompte: 00123-456789-01\nRéférence: {order_id}\nMontant: {amount}"
 }
