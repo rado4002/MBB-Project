@@ -24,6 +24,9 @@ async_session_factory = async_sessionmaker(
     class_=AsyncSession,
 )
 
+# Alias used by Celery tasks and test modules
+AsyncSessionLocal = async_session_factory
+
 
 # ── Declarative Base ──────────────────────────────────────────────────────────
 class Base(DeclarativeBase):

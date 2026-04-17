@@ -9,6 +9,7 @@ from app.models.order import Order
 from app.models.payment import Payment
 from app.models.escalation_ticket import EscalationTicket
 from app.models.admin_audit_log import AdminAuditLog
+from app.models.lead_stage_transition import LeadStageTransition
 
 __all__ = [
     "Customer",
@@ -21,4 +22,5 @@ __all__ = [
     "Payment",
     "EscalationTicket",
     "AdminAuditLog",
+    "LeadStageTransition",
 ]

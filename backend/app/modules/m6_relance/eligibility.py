@@ -64,7 +64,7 @@ async def find_eligible_leads(
                 # Max relances not reached
                 Lead.relance_count < max_relances,
                 # Not opted out
-                Customer.opted_out == False,  # noqa: E712
+                Customer.opt_out_flag == False,  # noqa: E712
                 # Not converted
                 Lead.converted_at.is_(None),
                 # Not in "dormant" conversation state

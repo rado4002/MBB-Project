@@ -19,6 +19,9 @@ import pytest
 from sqlalchemy import select
 
 from app.database import AsyncSessionLocal
+
+# All async tests in this module share a session-scoped event loop
+pytestmark = pytest.mark.asyncio(loop_scope="session")
 from app.models.conversation import Conversation
 from app.models.customer import Customer
 from app.models.lead import Lead
@@ -44,8 +47,8 @@ from app.schemas.common import Language
 
 def test_is_quiet_hours_22h():
     """22:00 Kinshasa time → is_quiet_hours = True"""
-    # 22:00 Kinshasa = 20:00 UTC (Kinshasa is UTC+2)
-    dt_utc = datetime(2026, 4, 17, 20, 0, 0, tzinfo=timezone.utc)
+    # 22:00 Kinshasa = 21:00 UTC (Kinshasa is UTC+1 / WAT)
+    dt_utc = datetime(2026, 4, 17, 21, 0, 0, tzinfo=timezone.utc)
     assert is_quiet_hours(dt_utc) is True
 
 
@@ -115,8 +118,10 @@ def test_calculate_next_relance_time_attempt2():
         last_customer_message_time=last_msg,
         attempt_number=2,
     )
-    
-    expected = last_msg + timedelta(hours=60)
+
+    # +60h = 2026-04-19 22:00 UTC = 23:00 Kinshasa → quiet hours
+    # → rescheduled to 07:00 next day Kinshasa = 06:00 UTC
+    expected = datetime(2026, 4, 20, 6, 0, 0, tzinfo=timezone.utc)
     assert scheduled == expected
 
 
@@ -127,8 +132,10 @@ def test_calculate_next_relance_time_attempt3():
         last_customer_message_time=last_msg,
         attempt_number=3,
     )
-    
-    expected = last_msg + timedelta(days=8, hours=12)
+
+    # +8.5 days = 2026-04-25 22:00 UTC = 23:00 Kinshasa → quiet hours
+    # → rescheduled to 07:00 next day Kinshasa = 06:00 UTC
+    expected = datetime(2026, 4, 26, 6, 0, 0, tzinfo=timezone.utc)
     assert scheduled == expected
 
 
@@ -147,12 +154,12 @@ def test_calculate_next_relance_time_invalid_attempt():
 # Test 3: Value hook generation
 # ─────────────────────────────────────────────────────────────────────────────
 
-@pytest.mark.asyncio
+
 async def test_generate_relance_hook_attempt1():
     """Relance #1 hook: reciprocity angle"""
     hook_text, hook_type = await generate_relance_hook(
         attempt_number=1,
-        language=Language.FRENCH,
+        language=Language.french,
         product_interest="câble HDMI",
         city="Kinshasa",
         customer_name="Jean",
@@ -166,12 +173,12 @@ async def test_generate_relance_hook_attempt1():
     assert len(hook_text) < 500
 
 
-@pytest.mark.asyncio
+
 async def test_generate_relance_hook_attempt2():
     """Relance #2 hook: social_proof angle"""
     hook_text, hook_type = await generate_relance_hook(
         attempt_number=2,
-        language=Language.FRENCH,
+        language=Language.french,
         product_interest="powerbank",
         city="Lubumbashi",
         customer_name=None,
@@ -183,12 +190,12 @@ async def test_generate_relance_hook_attempt2():
     assert len(hook_text) > 0
 
 
-@pytest.mark.asyncio
+
 async def test_generate_relance_hook_attempt3():
     """Relance #3 hook: scarcity angle"""
     hook_text, hook_type = await generate_relance_hook(
         attempt_number=3,
-        language=Language.LINGALA,
+        language=Language.lingala,
         product_interest="écouteurs",
         city="Kinshasa",
         customer_name="Marie",
@@ -204,12 +211,12 @@ async def test_generate_relance_hook_attempt3():
 # Test 4: Eligibility detection (database integration)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@pytest.mark.asyncio
+
 async def test_find_eligible_leads_silent_24h():
     """Lead silent for 24+ hours → eligible for relance"""
     async with AsyncSessionLocal() as session:
-        # Create test customer
-        customer_phone = f"+243999{uuid.uuid4().hex[:6]}"
+        # Create test customer (all-numeric phone to pass chk_phone_format)
+        customer_phone = f"+243{uuid.uuid4().int % 10**9:09d}"
         customer = Customer(
             phone_number=customer_phone,
             city="Kinshasa",
@@ -217,11 +224,11 @@ async def test_find_eligible_leads_silent_24h():
             opt_out_flag=False,
         )
         session.add(customer)
-        
+
         # Create conversation (last message 25h ago)
         now = datetime.now(timezone.utc)
         last_msg_time = now - timedelta(hours=25)
-        
+
         conversation = Conversation(
             conversation_id=uuid.uuid4(),
             customer_id=customer_phone,
@@ -232,16 +239,18 @@ async def test_find_eligible_leads_silent_24h():
         )
         session.add(conversation)
         await session.flush()
-        
+
         # Create lead (0 relances, not converted)
         lead = Lead(
             lead_id=uuid.uuid4(),
             customer_id=customer_phone,
             conversation_id=conversation.conversation_id,
+            score="warm",
             score_value=50,
-            score_label="warm",
             stage="consideration",
-            product_interest="câble",
+            intent="buy",
+            product_interest=["câble"],
+            source="whatsapp",
             relance_count=0,
         )
         session.add(lead)
@@ -261,11 +270,11 @@ async def test_find_eligible_leads_silent_24h():
         await session.commit()
 
 
-@pytest.mark.asyncio
+
 async def test_find_eligible_leads_max_relances_reached():
     """Lead with 3 relances → NOT eligible"""
     async with AsyncSessionLocal() as session:
-        customer_phone = f"+243999{uuid.uuid4().hex[:6]}"
+        customer_phone = f"+243{uuid.uuid4().int % 10**9:09d}"
         customer = Customer(
             phone_number=customer_phone,
             city="Kinshasa",
@@ -273,7 +282,7 @@ async def test_find_eligible_leads_max_relances_reached():
             opt_out_flag=False,
         )
         session.add(customer)
-        
+
         now = datetime.now(timezone.utc)
         conversation = Conversation(
             conversation_id=uuid.uuid4(),
@@ -285,16 +294,18 @@ async def test_find_eligible_leads_max_relances_reached():
         )
         session.add(conversation)
         await session.flush()
-        
+
         # Lead with 3 relances already sent (max reached)
         lead = Lead(
             lead_id=uuid.uuid4(),
             customer_id=customer_phone,
             conversation_id=conversation.conversation_id,
+            score="warm",
             score_value=50,
-            score_label="warm",
             stage="consideration",
-            product_interest="câble",
+            intent="buy",
+            product_interest=["câble"],
+            source="whatsapp",
             relance_count=3,  # Max reached
         )
         session.add(lead)
@@ -313,11 +324,11 @@ async def test_find_eligible_leads_max_relances_reached():
         await session.commit()
 
 
-@pytest.mark.asyncio
+
 async def test_find_eligible_leads_opted_out():
     """Customer opted out → lead NOT eligible"""
     async with AsyncSessionLocal() as session:
-        customer_phone = f"+243999{uuid.uuid4().hex[:6]}"
+        customer_phone = f"+243{uuid.uuid4().int % 10**9:09d}"
         customer = Customer(
             phone_number=customer_phone,
             city="Kinshasa",
@@ -325,7 +336,7 @@ async def test_find_eligible_leads_opted_out():
             opt_out_flag=True,  # Opted out
         )
         session.add(customer)
-        
+
         now = datetime.now(timezone.utc)
         conversation = Conversation(
             conversation_id=uuid.uuid4(),
@@ -337,15 +348,17 @@ async def test_find_eligible_leads_opted_out():
         )
         session.add(conversation)
         await session.flush()
-        
+
         lead = Lead(
             lead_id=uuid.uuid4(),
             customer_id=customer_phone,
             conversation_id=conversation.conversation_id,
+            score="warm",
             score_value=50,
-            score_label="warm",
             stage="consideration",
-            product_interest="câble",
+            intent="buy",
+            product_interest=["câble"],
+            source="whatsapp",
             relance_count=0,
         )
         session.add(lead)
@@ -367,12 +380,12 @@ async def test_find_eligible_leads_opted_out():
 # Test 5: Relance service operations
 # ─────────────────────────────────────────────────────────────────────────────
 
-@pytest.mark.asyncio
+
 async def test_create_and_schedule_relance():
     """Create relance record and schedule send time"""
     async with AsyncSessionLocal() as session:
         # Setup test data
-        customer_phone = f"+243999{uuid.uuid4().hex[:6]}"
+        customer_phone = f"+243{uuid.uuid4().int % 10**9:09d}"
         customer = Customer(
             phone_number=customer_phone,
             city="Kinshasa",
@@ -380,7 +393,7 @@ async def test_create_and_schedule_relance():
             opt_out_flag=False,
         )
         session.add(customer)
-        
+
         now = datetime.now(timezone.utc)
         conversation = Conversation(
             conversation_id=uuid.uuid4(),
@@ -392,15 +405,17 @@ async def test_create_and_schedule_relance():
         )
         session.add(conversation)
         await session.flush()
-        
+
         lead = Lead(
             lead_id=uuid.uuid4(),
             customer_id=customer_phone,
             conversation_id=conversation.conversation_id,
+            score="warm",
             score_value=50,
-            score_label="warm",
             stage="consideration",
-            product_interest="câble HDMI",
+            intent="buy",
+            product_interest=["câble HDMI"],
+            source="whatsapp",
             relance_count=0,
         )
         session.add(lead)
@@ -434,11 +449,11 @@ async def test_create_and_schedule_relance():
         await session.commit()
 
 
-@pytest.mark.asyncio
+
 async def test_create_and_schedule_relance_max_reached():
     """Attempting to create relance #4 → returns None"""
     async with AsyncSessionLocal() as session:
-        customer_phone = f"+243999{uuid.uuid4().hex[:6]}"
+        customer_phone = f"+243{uuid.uuid4().int % 10**9:09d}"
         customer = Customer(
             phone_number=customer_phone,
             city="Kinshasa",
@@ -446,7 +461,7 @@ async def test_create_and_schedule_relance_max_reached():
             opt_out_flag=False,
         )
         session.add(customer)
-        
+
         now = datetime.now(timezone.utc)
         conversation = Conversation(
             conversation_id=uuid.uuid4(),
@@ -458,15 +473,17 @@ async def test_create_and_schedule_relance_max_reached():
         )
         session.add(conversation)
         await session.flush()
-        
+
         lead = Lead(
             lead_id=uuid.uuid4(),
             customer_id=customer_phone,
             conversation_id=conversation.conversation_id,
+            score="warm",
             score_value=50,
-            score_label="warm",
             stage="consideration",
-            product_interest="câble",
+            intent="buy",
+            product_interest=["câble"],
+            source="whatsapp",
             relance_count=3,  # Already at max
         )
         session.add(lead)
@@ -489,12 +506,12 @@ async def test_create_and_schedule_relance_max_reached():
         await session.commit()
 
 
-@pytest.mark.asyncio
+
 async def test_cancel_all_relances():
     """Cancel all pending relances for a lead"""
     async with AsyncSessionLocal() as session:
         # Setup test data
-        customer_phone = f"+243999{uuid.uuid4().hex[:6]}"
+        customer_phone = f"+243{uuid.uuid4().int % 10**9:09d}"
         customer = Customer(
             phone_number=customer_phone,
             city="Kinshasa",
@@ -502,7 +519,7 @@ async def test_cancel_all_relances():
             opt_out_flag=False,
         )
         session.add(customer)
-        
+
         now = datetime.now(timezone.utc)
         conversation = Conversation(
             conversation_id=uuid.uuid4(),
@@ -514,15 +531,17 @@ async def test_cancel_all_relances():
         )
         session.add(conversation)
         await session.flush()
-        
+
         lead = Lead(
             lead_id=uuid.uuid4(),
             customer_id=customer_phone,
             conversation_id=conversation.conversation_id,
+            score="warm",
             score_value=50,
-            score_label="warm",
             stage="consideration",
-            product_interest="câble",
+            intent="buy",
+            product_interest=["câble"],
+            source="whatsapp",
             relance_count=2,
         )
         session.add(lead)

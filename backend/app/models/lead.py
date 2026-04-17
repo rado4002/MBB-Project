@@ -32,7 +32,7 @@ class Lead(Base):
             "relance_count BETWEEN 0 AND 3", name="chk_lead_relance"
         ),
         CheckConstraint(
-            "score_value BETWEEN 0 AND 10", name="chk_score_value"
+            "score_value BETWEEN 0 AND 100", name="chk_score_value"
         ),
         UniqueConstraint("conversation_id", name="uq_lead_conversation"),
         Index("idx_leads_customer", "customer_id"),

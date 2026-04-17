@@ -66,10 +66,10 @@ async def create_and_schedule_relance(
     # Generate value hook using Claude
     hook_text, hook_type = await generate_relance_hook(
         attempt_number=next_attempt,
-        language=conversation.language,
-        product_interest=lead.product_interest,
-        city=lead.city,
-        customer_name=conversation.customer_name,
+        language=conversation.language_detected,
+        product_interest=lead.product_interest[0] if lead.product_interest else None,
+        city=None,
+        customer_name=None,
         previous_hooks=previous_hooks,
     )
 
