@@ -107,7 +107,7 @@ async def get_conversation(
             for m in msgs
         ],
         lead=lead_info,
-        pagination=PaginationMeta(total=total_msgs, limit=limit, offset=offset),
+        pagination=PaginationMeta(total=total_msgs, limit=limit, offset=offset, has_more=(offset + limit) < total_msgs),
     )
 
 

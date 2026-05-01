@@ -1,9 +1,22 @@
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import worker_process_init
 
 from app.config import get_settings
 
 settings = get_settings()
+
+
+@worker_process_init.connect
+def reset_db_pool(**kwargs):
+    """Dispose SQLAlchemy async engine pool after Celery worker fork.
+
+    Without this, forked workers inherit the parent's connection pool whose
+    internal asyncpg Futures are bound to the parent's event loop — causing
+    'Future attached to a different loop' errors on every task.
+    """
+    from app.database import engine
+    engine.sync_engine.dispose(close=False)
 
 celery_app = Celery(
     "mbb",

@@ -495,7 +495,7 @@ async def _seed_customer_lead(session) -> tuple[str, uuid.UUID]:
         conversation_id=uuid.uuid4(),
         customer_id=phone,
         language_detected="french",
-        message_count=5,
+        message_count=0,
     )
     session.add(conv)
 

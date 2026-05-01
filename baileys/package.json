@@ -12,6 +12,7 @@
     "express": "^4.21.1",
     "pino": "^9.5.0",
     "pino-pretty": "^11.2.2",
+    "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0"
   }
 }

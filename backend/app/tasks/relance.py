@@ -162,7 +162,7 @@ async def _send_relance_message(relance_id_str: str) -> dict:
     Returns:
         Dict with status and details
     """
-    from app.adapters.messaging import get_messaging_adapter
+    from app.adapters import get_messaging_adapter
     from app.modules.m6_relance.scheduler import is_quiet_hours
 
     relance_id = uuid.UUID(relance_id_str)

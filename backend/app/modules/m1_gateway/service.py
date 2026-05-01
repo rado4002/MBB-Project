@@ -114,7 +114,6 @@ async def process_inbound(
         
         # Cancel all pending relances for this customer's leads (Sprint 1.6)
         from app.modules.m6_relance.service import cancel_all_relances
-        from sqlalchemy import select
         from app.models.lead import Lead
         
         # Find all leads for this customer
@@ -171,7 +170,7 @@ async def process_inbound(
             status="active",
             language_detected=language,
             context={},
-            message_count=0,
+            message_count=1,
         )
         session.add(conversation)
         await session.flush()  # get the PK

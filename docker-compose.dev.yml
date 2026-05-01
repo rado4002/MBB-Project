@@ -20,6 +20,7 @@ services:
       WHATSAPP_MODE: baileys
       DEBUG: "true"
       LOG_LEVEL: DEBUG
+      BAILEYS_WEBHOOK_SECRET: dev-webhook-secret-do-not-use-in-production
 
   celery_worker:
     volumes:
@@ -39,6 +40,8 @@ services:
       - ./dashboard:/app
     environment:
       WHATSAPP_MODE: baileys
+    ports:
+      - "8501:8501"
 
   # ── Baileys Bridge (dev-only WhatsApp connection) ────────────────────────────
 
@@ -50,7 +53,8 @@ services:
       - baileys_session:/app/sessions
       - ./baileys/src:/app/src
     environment:
-      FASTAPI_WEBHOOK_URL: http://api:8000/api/v1/messages/inbound
+      FASTAPI_WEBHOOK_URL: http://api:8000/api/v1/messages/baileys
+      BAILEYS_WEBHOOK_SECRET: dev-webhook-secret-do-not-use-in-production
       PORT: "3000"
       LOG_LEVEL: info
     networks:

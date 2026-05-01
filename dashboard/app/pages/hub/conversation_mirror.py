@@ -152,8 +152,15 @@ def render():
 
         # Chat area with WhatsApp-style bubbles
         messages = conv_data.get("messages", [])
+        stored_count = conv_data.get("message_count", 0)
         if not messages:
-            st.info("No messages in this conversation yet.")
+            if stored_count > 0:
+                st.warning(
+                    f"Message history unavailable — {stored_count} messages are recorded "
+                    "but could not be loaded. Try refreshing or check the database."
+                )
+            else:
+                st.info("No messages in this conversation yet.")
         else:
             # Chat container with scrollable area
             chat_container = st.container(height=500)

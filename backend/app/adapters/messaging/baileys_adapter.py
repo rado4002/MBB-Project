@@ -73,12 +73,12 @@ class BaileysAdapter(BaseMessagingAdapter):
         Returns the bridge-assigned message ID.
         """
         self._check_circuit()
-        payload = {"phone": phone, "text": text}
+        payload = {"phone": phone, "message": text}
 
         for attempt, delay in enumerate((*_RETRY_DELAYS, None), start=1):
             try:
                 async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-                    resp = await client.post(f"{self._base_url}/send/text", json=payload)
+                    resp = await client.post(f"{self._base_url}/send", json=payload)
                     resp.raise_for_status()
                     data = resp.json()
                     self._record_success()
