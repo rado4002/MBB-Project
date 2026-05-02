@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import structlog
 
-from app.adapters.ai.claude_adapter import ClaudeAdapter
+from app.adapters import get_ai_adapter
 from app.i18n import messages as i18n
 from app.schemas.common import Language
 
@@ -73,11 +73,13 @@ async def generate_relance_hook(
     )
 
     # Call Claude API
-    ai_adapter = ClaudeAdapter()
+    ai_adapter = get_ai_adapter()
+    system_instruction = "You are a friendly Congolese sales assistant. Generate warm, persuasive WhatsApp messages. 2-3 sentences MAX. No emojis unless natural for the language."
     try:
-        hook_text = await ai_adapter.generate_response(
-            conversation_history=[{"role": "user", "content": prompt}],
-            system_prompt="You are a friendly Congolese sales assistant. Generate warm, persuasive WhatsApp messages. 2-3 sentences MAX. No emojis unless natural for the language.",
+        hook_text = await ai_adapter.generate(
+            prompt=prompt,
+            system=system_instruction,
+            max_tokens=300,
         )
     except Exception as e:
         log.error("m6.hooks.claude_error", error=str(e), attempt=attempt_number)

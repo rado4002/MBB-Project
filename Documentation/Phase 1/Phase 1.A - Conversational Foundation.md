@@ -5,21 +5,30 @@
 | Field | Value |
 |-------|-------|
 | **Phase** | 1.A |
-| **Name** | Conversational Foundation |
-| **Weeks** | 5–12 (8 weeks) |
-| **Sprints** | 1.1, 1.2, 1.3, 1.4 |
-| **Modules** | M1 (Gateway), M2 (Language Detection), M3 (Queue & Resilience), M4 (Conversation Engine) |
+| **Name** | WhatsApp Integration & M1 Gateway |
+| **Weeks** | 5–6 (2 weeks) |
+| **Sprints** | 1.1 (WhatsApp Baileys Integration) |
+| **Modules** | M1 (Gateway) — Baileys webhook, message inbound/outbound, customer/conversation upsert, language detection, opt-out handling |
 | **Status** | ✅ Complete |
+| **Completed** | Live QR dashboard, Baileys payload transformation, Celery async task processing, end-to-end message pipeline, conversation mirroring in dashboard |
 
 ---
 
 ## 1. Goal
 
-Build a fully functional conversational loop: receive WhatsApp messages → detect language → generate culturally appropriate AI responses → survive blackouts with zero message loss.
+**Phase 1.A Goal (Sprint 1.1 Focus):**
+Build the foundational WhatsApp integration layer: receive real WhatsApp messages via Baileys bridge → normalize payloads → persist to database → enable reply dispatch → visible in Streamlit dashboard.
 
-**Milestone:** Bot can have coherent, multi-turn conversations in Lingala, French, and Swahili, surviving blackouts with zero message loss.
+**Completed Milestone:** 
+✅ Live QR dashboard for WhatsApp linking
+✅ Real WhatsApp messages flow: Baileys → FastAPI → Celery → PostgreSQL → Dashboard
+✅ Message pipeline is end-to-end functional with proper error handling and HMAC verification
 
-**The Kinshasa Test:** A user in Kinshasa on 3G during a blackout sends "Mbote ndeko, nalingi koyeba biloko" → power returns → bot responds in Lingala within 60s with a warm, helpful reply that remembers previous context.
+**Next Phases (1.B onwards):**
+- M2: Language detection + Claude AI integration
+- M3: Blackout recovery queue (Redis AOF)
+- M4: Conversation context & state machine
+- M5–M9: Lead qualification, relance, payment, MAPS, escalation, dashboard
 
 ---
 

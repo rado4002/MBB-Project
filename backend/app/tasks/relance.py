@@ -221,8 +221,8 @@ async def _send_relance_message(relance_id_str: str) -> dict:
         messaging_adapter = get_messaging_adapter()
         try:
             await messaging_adapter.send_message(
-                phone_number=conversation.phone_number,
-                message=relance.value_hook,
+                phone=conversation.customer_id,
+                text=relance.value_hook,
             )
         except Exception as e:
             log.error("relance.send.messaging_error", error=str(e))

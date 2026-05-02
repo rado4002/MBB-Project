@@ -11,7 +11,6 @@ Uses Claude AI to generate contextual, persuasive responses in the customer's la
 from __future__ import annotations
 
 import structlog
-from anthropic import Anthropic
 
 from app.adapters import get_ai_adapter
 from app.i18n.messages import t
@@ -63,9 +62,14 @@ async def generate_nurturing_response(
     })
 
     try:
-        response = await ai.generate_response(
-            system_prompt=system_prompt,
-            messages=context_messages,
+        # Build prompt from system + context messages
+        prompt_text = "\n".join(
+            f"{msg['role'].upper()}: {msg['content']}"
+            for msg in context_messages
+        )
+        response = await ai.generate(
+            prompt=prompt_text,
+            system=system_prompt,
             max_tokens=300,  # Keep responses concise (2-3 sentences)
         )
         log.info(
@@ -183,19 +187,18 @@ async def generate_product_suggestion(
     """
     ai = get_ai_adapter()
 
-    prompt = f"""Suggest ONE specific tech accessory product (with price in CDF) that matches:
+    system = """You are a helpful product advisor for MBB ya Kin, a tech accessories shop in Kinshasa, DRC.
+Suggest ONE specific product with price in CDF. Keep it short (1-2 sentences)."""
+
+    prompt = f"""Suggest a product for:
 - Interest: {', '.join(product_interest) if product_interest else 'general tech accessories'}
 - Budget: {budget_range or 'any'}
-- Market: Kinshasa, DRC
-
-Respond in {language.title()} in 1-2 sentences. Include product name and price.
-Be specific (e.g., "Câble USB-C 1.5m — 3000 CDF").
-"""
+- Language: {language.title()}"""
 
     try:
-        response = await ai.generate_response(
-            system_prompt=prompt,
-            messages=[],
+        response = await ai.generate(
+            prompt=prompt,
+            system=system,
             max_tokens=150,
         )
         log.info(

@@ -1,7 +1,7 @@
 # MBB ya Kin: Multi-Language Lead Nurturer Bot for DRC
 **"A Helpful Congolese Friend on WhatsApp"**
 
-![Status](https://img.shields.io/badge/Phase-0%20(Foundation)-orange)
+![Status](https://img.shields.io/badge/Phase-1.A%20(Core%20System)-blue)
 ![Python](https://img.shields.io/badge/Python-3.12-green)
 ![License](https://img.shields.io/badge/License-Internal-red)
 
@@ -160,15 +160,28 @@ curl http://localhost:8000/health    # Won't work — api is not port-mapped
 
 ### Step 5 — Connect WhatsApp (Optional — requires phone + internet)
 
+**Option A: Live QR Dashboard (Browser)**
+
+Open **http://localhost:3000/qr** in your browser. The dashboard polls for the QR code every 10 seconds and displays it as a high-res PNG image that's easy to scan with your phone.
+
+**Features:**
+- ✅ Auto-refresh every 10 seconds (no manual refresh needed)
+- ✅ Server-side QR generation (fast, no external CDN)
+- ✅ Shows "WhatsApp Connected!" once logged in
+- ✅ Logout button to reset the session
+
+**Option B: Terminal QR Code**
+
 ```bash
 # Watch logs for the QR code (renders as ASCII art)
 docker logs bot-baileys-1 -f
 ```
 
+**Steps (both options):**
 1. Open WhatsApp on your phone
 2. Go to **Settings → Linked Devices → Link a Device**
-3. Scan the QR code from the terminal output
-4. Once connected, the log shows: `whatsapp_connected` with your JID
+3. Scan the QR code
+4. Once connected, the dashboard shows: "✅ WhatsApp Connected!" with your JID
 
 > **Note**: The QR refreshes every ~20 seconds. Scan it quickly. If your internet is unstable, restart baileys: `docker compose -f docker-compose.yml -f docker-compose.dev.yml restart baileys`
 
@@ -210,10 +223,11 @@ make down-prod     # Stop production
 
 | Service | URL | Auth |
 |---------|-----|------|
+| **WhatsApp QR Dashboard** | http://localhost:3000/qr | None |
+| **Baileys Health** | http://localhost:3000/health | None |
 | **API Docs** (Swagger) | http://localhost/api/docs | None |
 | **API Health** | http://localhost/health | None |
 | **Streamlit Dashboard** | http://localhost/dashboard/ | None |
-| **Baileys Health** | http://localhost:3000/health | None |
 | **Grafana** | http://localhost:3001 | admin / (see `secrets/grafana_admin_password.txt`) |
 | **Prometheus** | http://localhost:9090 | None |
 | **PostgreSQL** | `localhost:5433` | user/pass from `secrets/` |
@@ -511,9 +525,107 @@ For full details, see [Adapter Architecture Guide](Documentation/Architecture/Ad
 
 ---
 
+## 🔌 WhatsApp Integration Details (Baileys)
+
+### Message Inbound Flow
+
+The complete pipeline from phone message to database:
+
+```
+WhatsApp Phone
+    ↓ (WhatsApp Web protocol)
+Baileys Bridge (/messages.upsert event)
+    ↓ (HTTP POST with payload transformation)
+FastAPI POST /api/v1/messages/baileys
+    ↓ (M1 service layer: upsert customer, conversation, message)
+PostgreSQL (tables: customers, conversations, messages)
+    ↓ (Celery task processes async)
+Streamlit Dashboard (Conversation Mirror page)
+    ↓ (Auto-refresh shows new conversations)
+User sees real WhatsApp conversation in UI
+```
+
+### Baileys Webhook Payload Schema
+
+The Baileys bridge (`baileys/src/index.js`) transforms incoming WhatsApp events into this schema:
+
+```json
+{
+  "customer_phone": "+243682126391",          // E.164 format (+ prefix required)
+  "whatsapp_message_id": "wamid.XXXX",       // WhatsApp's message ID (for idempotency)
+  "content": "Mbote! Habari...",              // Text content (empty string for media)
+  "content_type": "text",                     // "text" | "audio" | "image" | "voice_note"
+  "timestamp": "2026-05-01T14:23:45.123Z"    // ISO 8601 format (UTC)
+}
+```
+
+**Key Transformations:**
+- Phone number: `243682126391` → `+243682126391` (E.164 format)
+- Field mapping: `message_id` → `whatsapp_message_id`, `type` → `content_type`
+- WhatsApp JID: Phone is stored as normalized: `243682126391@s.whatsapp.net` (no +)
+
+### Baileys Endpoints
+
+| Endpoint | Method | Purpose | Response |
+|----------|--------|---------|----------|
+| `/qr` | GET | HTML dashboard with live QR code | HTML with auto-refresh JS |
+| `/qr.json` | GET | JSON status (QR code as data URL) | `{connected, jid, qrDataUrl, ts}` |
+| `/health` | GET | Health check | `{status: "ok", connected, jid}` |
+| `/send` | POST | Send outbound message | `{success: true}` |
+| `/logout` | POST | Disconnect & reset session | `{success: true, message}` |
+
+### Celery Async Pool Management (Important!)
+
+**Problem**: SQLAlchemy async engine's `asyncpg` connection pool is inherited by forked Celery workers. The pool's Futures are bound to the parent process's event loop, causing "Future attached to a different loop" errors.
+
+**Solution**: In `backend/app/tasks/celery_app.py`, we use the `@worker_process_init` signal to reset the pool after fork:
+
+```python
+from celery.signals import worker_process_init
+
+@worker_process_init.connect
+def reset_db_pool(**kwargs):
+    from app.database import engine
+    engine.sync_engine.dispose(close=False)  # Close stale connections, allow new ones
+```
+
+This ensures each worker gets fresh connections bound to its own event loop.
+
+---
+
 ## 👨‍💻 For Developers
 
-### Running Tests
+### Testing the Complete WhatsApp → Dashboard Pipeline
+
+To verify end-to-end message flow works:
+
+```bash
+# 1. Open the QR dashboard in browser
+open http://localhost:3000/qr
+
+# 2. Scan QR from phone (WhatsApp → Settings → Linked Devices → Link a Device)
+
+# 3. Send a test message from the linked WhatsApp phone
+
+# 4. Check Docker logs for successful webhook processing
+docker logs bot-api-1 | grep "m1.inbound_persisted"
+
+# 5. Check Celery task execution
+docker logs bot-celery_worker-1 | grep "m1_process_inbound_task"
+
+# 6. Verify message was saved to database
+docker exec bot-postgres-1 psql -U mbb -d mbb -c "SELECT * FROM mbb.messages ORDER BY created_at DESC LIMIT 5;"
+
+# 7. Check Streamlit dashboard shows the conversation
+open http://localhost/dashboard/
+
+# Expected output:
+# - QR dashboard shows "✅ WhatsApp Connected!" with your JID
+# - Message appears in Conversation Mirror page within seconds
+# - Database query returns the message row with correct content_type and language
+```
+
+### Running Unit Tests
 ```bash
 # From the backend/ directory with env vars set (see Quick Start)
 python tests/test_project_setup.py          # Structure + imports (15 checks)
@@ -621,6 +733,9 @@ docker exec bot tail -f /app/logs/latency_report.json
 | Port 5432 conflict (postgres) | Local PostgreSQL running — dev compose maps to `5433` instead |
 | Baileys QR not showing | Check logs: `docker logs bot-baileys-1`. Needs internet to reach WhatsApp servers |
 | Baileys 405/408 errors | Outdated WA version — the code auto-fetches latest. Restart: `docker compose ... restart baileys` |
+| Messages not appearing in dashboard | Check: (1) API logs for `m1.inbound_persisted`, (2) Celery logs for task execution, (3) PostgreSQL for message records. Refresh dashboard browser window. |
+| Celery "Future attached to different loop" errors | Worker pool not reset after fork. Verify `@worker_process_init` signal handler is running in `celery_app.py`. Restart workers: `docker compose ... restart celery_worker` |
+| Message inbound webhook returns 422 | Baileys payload schema mismatch. Verify `customer_phone` (with +), `whatsapp_message_id`, and `content_type` fields match Pydantic schema in `schemas/message.py`. |
 | `apt-get` fails during build | Flaky network — retry the build, or use `--no-cache` flag |
 | API health returns unhealthy | Check postgres & redis are healthy first: `docker compose ... ps` |
 | Celery tasks fail with ImportError | Expected — module services (M2–M9) are not built yet (Phase 1 work) |
@@ -659,12 +774,36 @@ Internal MBB Project. Not for external distribution.
 - [x] CI/CD pipeline (GitHub Actions: lint, test, docker-build)
 - [x] 40 passing test checks (structure, schemas, blackout, resilience)
 
-### Phase 1 — Core System 🔜 (Next)
-1. **Stage 1.A**: M1 Gateway + M2 Conversation Engine + M3 Queue (8 weeks)
-2. **Stage 1.B**: M5 Lead Qualification + M6 Relance Engine (4 weeks)
-3. **Stage 1.C**: M7 Conversion + Payment Integration (2 weeks)
-4. **Stage 1.D**: M8 MAPS Intelligence + M9 Dashboard (2 weeks)
-5. **Stage 1.E**: Integration testing + Security audit + Pilot (4 weeks)
+### Phase 1 — Core System 🚀 (In Progress)
+
+#### **Stage 1.A: M1 Gateway + WhatsApp Integration** ✅ (Complete)
+- [x] **Live QR Dashboard** — http://localhost:3000/qr with 10-second auto-refresh
+- [x] **Baileys WhatsApp Bridge** — Webhook payload transformation + E.164 formatting
+- [x] **Message Inbound Pipeline** — Baileys → FastAPI webhook → Celery task → PostgreSQL
+- [x] **Conversation Mirroring** — Real WhatsApp conversations visible in Streamlit dashboard
+- [x] **Celery Async Tasks** — Worker process initialization for async engine pool management
+- [x] **M1 Message Processing** — Customer upsert, conversation management, language detection
+- [x] **Error Handling** — HMAC verification, circuit breakers, DRC resilience
+
+#### **Stage 1.B: M2 Conversation Engine + M5 Lead Qualification** 🔜 (Next)
+- [ ] M2: AI response generation (Claude integration)
+- [ ] M5: Lead scoring (hot/warm/cold classification)
+- [ ] M6: Relance scheduling (max 3 follow-ups)
+
+#### **Stage 1.C: M7 Conversion + Payment Integration** 🔜 (Planned)
+- [ ] Mobile Money payment handling (Orange/Airtel)
+- [ ] Order creation + fulfillment tracking
+- [ ] COD payment flow
+
+#### **Stage 1.D: M8 MAPS Intelligence + M9 Dashboard** 🔜 (Planned)
+- [ ] MAPS metrics aggregation
+- [ ] Escalation system for voice notes
+- [ ] Admin dashboard endpoints (M9)
+
+#### **Stage 1.E: Integration Testing + Security Audit + Pilot** 🔜 (Planned)
+- [ ] End-to-end testing across all modules
+- [ ] Security penetration testing
+- [ ] Pilot deployment to 500 leads
 
 ### Phase 2 — Advanced Intelligence (Q3–Q4 2026)
 - Voice note handling, Gemini fallback, MBB HUB/BOX adapters

@@ -140,104 +140,37 @@ async def _process_payment_callback(
     """
     Core logic for processing payment callback.
 
+    Delegates to service.process_callback() which handles all DB logic correctly.
+
     Returns:
         Dict with processing status
     """
-    from app.database import AsyncSessionLocal
-    from app.models.order import Order
-    from app.models.payment import Payment
-    from datetime import datetime, timezone
-    from decimal import Decimal
-    import uuid
+    from app.modules.m7_conversion import service as conversion_svc  # type: ignore[import]
 
-    order_uuid = uuid.UUID(order_id)
+    # Use the correct service implementation instead of broken inline logic
+    result = await conversion_svc.process_callback(
+        payment_id=transaction_id,
+        provider=provider,
+        status=status,
+        idempotency_key=f"{transaction_id}:{provider}",
+    )
 
-    async with AsyncSessionLocal() as session:
-        # Check if payment already processed (idempotency via transaction_id)
-        from sqlalchemy import select
+    # Send customer notification via WhatsApp
+    from app.adapters.messaging import get_messaging_adapter
 
-        existing_payment = await session.execute(
-            select(Payment).where(
-                Payment.transaction_id == transaction_id,
-                Payment.provider == provider,
-            )
+    messaging = get_messaging_adapter()
+    if status == "success":
+        await messaging.send_message(
+            phone=customer_phone,
+            text=f"Paiement reçu ✅ Commande #{order_id[:8]} confirmée. Livraison en cours!",
         )
-        if existing_payment.scalar_one_or_none() is not None:
-            log.debug(
-                "conversion.callback.already_processed",
-                transaction_id=transaction_id,
-            )
-            return {
-                "status": "already_processed",
-                "transaction_id": transaction_id,
-            }
-
-        # Load order
-        order = await session.get(Order, order_uuid)
-        if not order:
-            log.error("conversion.callback.order_not_found", order_id=order_id)
-            return {
-                "status": "failed",
-                "reason": "order_not_found",
-            }
-
-        # Create payment record
-        payment = Payment(
-            payment_id=uuid.uuid4(),
-            order_id=order_uuid,
-            transaction_id=transaction_id,
-            provider=provider,
-            amount_cdf=Decimal(amount_cdf),
-            status=status,
-            customer_phone=customer_phone,
-            callback_timestamp=datetime.fromisoformat(timestamp),
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc),
+    else:
+        await messaging.send_message(
+            phone=customer_phone,
+            text=f"Paiement échoué ❌ Commande #{order_id[:8]}. Veuillez réessayer.",
         )
-        session.add(payment)
 
-        # Update order status based on payment status
-        if status == "success":
-            order.status = "paid"
-            order.updated_at = datetime.now(timezone.utc)
-            log.info(
-                "conversion.order_paid",
-                order_id=order_id,
-                transaction_id=transaction_id,
-            )
-        elif status == "failed":
-            order.status = "payment_failed"
-            order.updated_at = datetime.now(timezone.utc)
-            log.warning(
-                "conversion.payment_failed",
-                order_id=order_id,
-                transaction_id=transaction_id,
-            )
-
-        await session.commit()
-
-        # Send customer notification via WhatsApp
-        from app.adapters.messaging import get_messaging_adapter
-
-        messaging = get_messaging_adapter()
-        if status == "success":
-            await messaging.send_message(
-                phone_number=customer_phone,
-                message=f"Paiement reçu ✅ Commande #{order_id[:8]} confirmée. Livraison en cours!",
-            )
-        else:
-            await messaging.send_message(
-                phone_number=customer_phone,
-                message=f"Paiement échoué ❌ Commande #{order_id[:8]}. Veuillez réessayer.",
-            )
-
-        return {
-            "status": "processed",
-            "transaction_id": transaction_id,
-            "order_id": order_id,
-            "payment_status": status,
-            "order_status": order.status,
-        }
+    return result
 
 
 # ── Task: drain the blackout queue (Beat-triggered + on-startup) ──────────────
@@ -363,3 +296,4 @@ def update_order_status(
     except Exception as exc:
         log.error("conversion.status_update.error", order_id=order_id, error=str(exc))
         raise self.retry(exc=exc, countdown=2 ** self.request.retries * 30)
+

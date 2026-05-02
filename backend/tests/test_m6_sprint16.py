@@ -47,15 +47,15 @@ from app.schemas.common import Language
 
 def test_is_quiet_hours_22h():
     """22:00 Kinshasa time → is_quiet_hours = True"""
-    # 22:00 Kinshasa = 21:00 UTC (Kinshasa is UTC+1 / WAT)
+    # 22:00 Kinshasa = 21:00 UTC (Kinshasa is UTC+1)
     dt_utc = datetime(2026, 4, 17, 21, 0, 0, tzinfo=timezone.utc)
     assert is_quiet_hours(dt_utc) is True
 
 
 def test_is_quiet_hours_03h():
     """03:00 Kinshasa time → is_quiet_hours = True"""
-    # 03:00 Kinshasa = 01:00 UTC
-    dt_utc = datetime(2026, 4, 17, 1, 0, 0, tzinfo=timezone.utc)
+    # 03:00 Kinshasa = 02:00 UTC (Kinshasa is UTC+1)
+    dt_utc = datetime(2026, 4, 17, 2, 0, 0, tzinfo=timezone.utc)
     assert is_quiet_hours(dt_utc) is True
 
 
