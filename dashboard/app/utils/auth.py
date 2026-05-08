@@ -20,6 +20,7 @@ def api_get(path: str, params: dict | None = None):
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
+        print(f"[api_get] {path} → {e}")
         st.error(f"API error: {e}")
         return None
 

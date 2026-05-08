@@ -32,6 +32,7 @@ app.use(express.json({ limit: "10kb" }));   // DRC payload constraint
 let sock = null;
 let currentQR = null;   // latest QR string from connection.update, cleared on connect
 let qrTimestamp = 0;    // epoch ms of last QR update — used by polling endpoint
+let isReconnecting = false;
 
 /**
  * Root endpoint — service info and connection status.
@@ -78,7 +79,7 @@ app.post("/send", async (req, res) => {
   if (!phone || !message) {
     return res.status(400).json({ error: "phone and message are required" });
   }
-  if (!sock?.user) {
+  if (!sock?.user || isReconnecting) {
     return res.status(503).json({ error: "WhatsApp not connected" });
   }
 
@@ -231,7 +232,11 @@ app.post("/logout", async (req, res) => {
   }
 
   try {
-    await sock.logout();
+    if (sock.user) {
+      await sock.logout();
+    }
+
+    isReconnecting = true;
     sock = null;
     currentQR = null;
 
@@ -246,9 +251,9 @@ app.post("/logout", async (req, res) => {
 
     // Trigger reconnect — new QR will appear on /qr shortly
     setTimeout(() => {
-      connectToWhatsApp().catch((err) =>
-        log.error({ err: err.message }, "post_logout_reconnect_failed")
-      );
+      connectToWhatsApp()
+        .catch((err) => log.error({ err: err.message }, "post_logout_reconnect_failed"))
+        .finally(() => { isReconnecting = false; });
     }, 1000);
 
     log.info("user_logged_out");

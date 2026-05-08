@@ -257,4 +257,9 @@ async def persist_outbound(
     )
     session.add(msg)
     await session.flush()
+    await session.execute(
+        update(Conversation)
+        .where(Conversation.conversation_id == conversation_id)
+        .values(message_count=Conversation.message_count + 1)
+    )
     return msg_id
