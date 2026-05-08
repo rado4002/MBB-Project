@@ -1,0 +1,15 @@
+{
+  "attempt": 2,
+  "language": "french",
+  "hook_type": "social_proof",
+  "angle": "fomo_social",
+  "templates": [
+    "Ndeko! Batu mingi ba Kin ba-zali ko-prendre {product} maintenant. Tu veux pas rater l'occasion? 👀",
+    "Hey {name}! Beaucoup de clients à {city} ont commandé {product} cette semaine. Il en reste peu! 📦",
+    "Salut! Les {product} partent vite à Kinshasa en ce moment. Tu veux sécuriser le tien? 😊",
+    "{name}, d'autres clients de {city} ont adoré {product}. C'est ton tour? 🌟"
+  ],
+  "default": "Ndeko! Batu mingi ba Kin ba-zali ko-prendre ça maintenant. Tu veux pas rater l'occasion? 👀",
+  "native_approved": false,
+  "notes": "Social proof with gentle FOMO. Mix French/Lingala is natural in Kinshasa."
+}

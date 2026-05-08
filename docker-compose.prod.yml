@@ -6,9 +6,12 @@
 # Changes vs base:
 #   - WhatsApp Official API (no Baileys)
 #   - 3 API replicas via --scale api=3
-#   - SSL via Nginx (certificates must be placed in nginx/certs/)
-#   - Stricter resource limits
-#   - DEBUG disabled
+#   - SSL via Nginx (Let's Encrypt certs in /etc/letsencrypt)
+#   - Resource limits on all services
+#   - DEBUG disabled, LOG_LEVEL INFO
+#   - PostgreSQL production tuning
+#   - Redis AOF + maxmemory policy
+#   - Automated pg_dump backup sidecar (every 6h, 7-day retention)
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
@@ -17,51 +20,144 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
     environment:
       WHATSAPP_MODE: official
+      APP_ENV: production
       DEBUG: "false"
       LOG_LEVEL: INFO
     deploy:
+      replicas: 3
       restart_policy:
         condition: on-failure
         max_attempts: 5
         delay: 10s
       resources:
         limits:
+          cpus: "1.0"
           memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   celery_worker:
+    command: >
+      celery -A app.tasks.celery_app worker
+      --loglevel=info
+      --concurrency=4
+      --max-tasks-per-child=1000
+      --queues=default,relance,maps
     environment:
       WHATSAPP_MODE: official
+      APP_ENV: production
       DEBUG: "false"
       LOG_LEVEL: INFO
     deploy:
+      replicas: 2
       resources:
         limits:
-          memory: 512M
+          cpus: "1.5"
+          memory: 768M
 
   celery_beat:
     environment:
       WHATSAPP_MODE: official
+      APP_ENV: production
       DEBUG: "false"
     deploy:
+      replicas: 1
       resources:
         limits:
+          cpus: "0.5"
           memory: 256M
 
   dashboard:
     environment:
       WHATSAPP_MODE: official
+      APP_ENV: production
       DEBUG: "false"
     deploy:
       resources:
         limits:
+          cpus: "0.5"
           memory: 512M
 
   nginx:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/conf.d/mbb.ssl.conf:/etc/nginx/conf.d/mbb.conf:ro
-      - ./nginx/certs:/etc/nginx/certs:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - ./nginx/certbot/www:/var/www/certbot:ro
       - nginx_logs:/var/log/nginx
     ports:
       - "80:80"
       - "443:443"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+
+  postgres:
+    command: >
+      postgres
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c effective_cache_size=768MB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c work_mem=4MB
+      -c log_min_duration_statement=1000
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+
+  redis:
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  # Automated pg_dump backup — runs every 6h, retains 7 days of dumps
+  postgres_backup:
+    image: postgres:16-alpine
+    volumes:
+      - ./backups:/backups
+    secrets:
+      - postgres_password
+    entrypoint: >
+      sh -c "
+        while true; do
+          PGPASSWORD=$$(cat /run/secrets/postgres_password) \
+          pg_dump -h postgres -U mbb -d mbb -Fc -Z 9 \
+            -f /backups/mbb_$$(date +%Y%m%d_%H%M%S).dump;
+          echo 'Backup completed';
+          find /backups -name '*.dump' -mtime +7 -delete;
+          sleep 21600;
+        done
+      "
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - mbb_internal
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+    restart: unless-stopped

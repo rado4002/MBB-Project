@@ -1,0 +1,15 @@
+{
+  "attempt": 3,
+  "language": "swahili",
+  "hook_type": "scarcity",
+  "angle": "last_chance_offer",
+  "templates": [
+    "Mara ya mwisho {name}! Tuna ofa maalum kwako kwa {product}. Unapenda? 🎁",
+    "Ndugu {name}! Hii ndiyo ujumbe wetu wa mwisho. Tunakuwekea {product} masaa 24 zaidi. 🕐",
+    "Ofa ya mwisho {name}: uwasilishaji bila malipo kwa {product} ukiagiza leo. Kwako tu! 🎁",
+    "Nafasi ya mwisho {name}! Bei maalum ya {product} — inaisha kesho tu. Agiza sasa! 🔥"
+  ],
+  "default": "Mara ya mwisho! Tuna ofa maalum kwako. Unapenda? 🎁",
+  "native_approved": false,
+  "notes": "Final Swahili attempt. 'Mara ya mwisho' = last time. Warm but with urgency."
+}

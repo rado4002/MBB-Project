@@ -1,0 +1,15 @@
+{
+  "attempt": 2,
+  "language": "swahili",
+  "hook_type": "social_proof",
+  "angle": "fomo_social",
+  "templates": [
+    "Rafiki {name}! Watu wengi Kinshasa wanapenda {product} sasa. Hutaki kuacha nafasi? 👀",
+    "Habari {name}! Wateja wengi wa {city} wamenunua {product} wiki hii. Inakwisha! 📦",
+    "Ndugu! {product} inaisha haraka Kinshasa leo. Yako bado ipo. Unataka? 😊",
+    "{name}, marafiki wako wa {city} wanapenda {product}. Wakati wako umefika! 🌟"
+  ],
+  "default": "Rafiki! Watu wengi Kinshasa wanapenda hii sasa. Hutaki kuacha nafasi? 👀",
+  "native_approved": false,
+  "notes": "Swahili social proof. 'Rafiki' = friend. 'Nafasi' = opportunity/chance."
+}

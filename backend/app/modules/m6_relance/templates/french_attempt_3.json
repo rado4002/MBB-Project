@@ -1,0 +1,15 @@
+{
+  "attempt": 3,
+  "language": "french",
+  "hook_type": "scarcity",
+  "angle": "last_chance_offer",
+  "templates": [
+    "Dernière fois {name}! On a une offre spéciale juste pour toi sur {product}. Ça t'intéresse? 🎁",
+    "Hey {name}! C'est notre dernier message. On garde ton {product} encore 24h. Après, on remet en stock général. 🕐",
+    "Offre finale {name}: livraison gratuite sur {product} si tu commandes aujourd'hui. C'est pour toi! 🎁",
+    "Dernière chance {name}! Prix spécial sur {product} — valable jusqu'à demain seulement. 🔥"
+  ],
+  "default": "Dernière fois! On a une offre spéciale juste pour toi. Ça t'intéresse? 🎁",
+  "native_approved": false,
+  "notes": "Final attempt, scarcity + exclusive offer. Keep friendly tone, never aggressive."
+}

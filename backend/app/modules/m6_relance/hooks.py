@@ -145,14 +145,29 @@ def _build_hook_prompt(
 
 def get_fallback_hook(attempt_number: int, language: Language) -> str:
     """
-    Get fallback hook from i18n if Claude fails.
+    Get fallback hook — tries static template file first, then i18n.
 
-    Args:
-        attempt_number: 1, 2, or 3
-        language: Customer's language
-
-    Returns:
-        Fallback hook text
+    Static templates in templates/ are curated and native-reviewed.
+    i18n strings serve as last-resort backstop.
     """
+    import json
+    from pathlib import Path
+
+    lang_name = {
+        Language.french: "french",
+        Language.lingala: "lingala",
+        Language.swahili: "swahili",
+    }[language]
+
+    template_path = (
+        Path(__file__).parent / "templates" / f"{lang_name}_attempt_{attempt_number}.json"
+    )
+    if template_path.exists():
+        try:
+            data = json.loads(template_path.read_text(encoding="utf-8"))
+            return data.get("default", "")
+        except Exception:
+            pass
+
     key = f"relance_fallback_{attempt_number}"
     return i18n.t(key, language)

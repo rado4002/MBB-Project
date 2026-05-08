@@ -1,0 +1,15 @@
+{
+  "attempt": 1,
+  "language": "french",
+  "hook_type": "reciprocity",
+  "angle": "value_reminder",
+  "templates": [
+    "Hey {name}! 👋 Le produit que tu avais regardé est toujours disponible. Tu veux qu'on finalise ça ensemble?",
+    "Salut {name}! Le {product} est encore en stock. On peut t'aider à commander aujourd'hui? 😊",
+    "Hey {name}! Tu nous avais contacté pour {product}. On est là si tu as des questions! 👋",
+    "Bonjour {name}! Ton intérêt pour {product} n'est pas passé inaperçu. On peut te donner plus de détails?"
+  ],
+  "default": "Hey! Le produit que tu cherchais est toujours disponible. On peut t'aider? 😊",
+  "native_approved": false,
+  "notes": "Friendly check-in, no pressure. Use customer name if available."
+}

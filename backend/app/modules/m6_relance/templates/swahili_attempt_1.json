@@ -1,0 +1,15 @@
+{
+  "attempt": 1,
+  "language": "swahili",
+  "hook_type": "reciprocity",
+  "angle": "value_reminder",
+  "templates": [
+    "Habari {name}! 👋 Bidhaa uliyotafuta bado ipo. Tunaweza kukusaidia?",
+    "Habari {name}! {product} ipo bado. Unataka tuimalise leo? 😊",
+    "Habari {name}! Ulikuwa ukitafuta {product}. Tuko hapa kama una maswali! 👋",
+    "Habari {name}! Tulijua unaitafuta. Unataka maelezo zaidi kuhusu {product}?"
+  ],
+  "default": "Habari! Bidhaa uliyotafuta bado ipo. Tunaweza kukusaidia? 😊",
+  "native_approved": false,
+  "notes": "Swahili greeting. 'Habari' = hello/how are you. Polite, warm tone."
+}

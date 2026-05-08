@@ -1,0 +1,15 @@
+{
+  "attempt": 3,
+  "language": "lingala",
+  "hook_type": "scarcity",
+  "angle": "last_chance_offer",
+  "templates": [
+    "Mbala ya suka {name}! To-zali na offre spécial mpo na yo na {product}. Olingi? 🎁",
+    "Ndeko {name}! Oyo nde message na biso ya suka. To-batelaka {product} na yo heure 24 lisusu. 🕐",
+    "Offre ya suka {name}: livraison ya ofele na {product} soki o-komanda lelo. Mpo na yo! 🎁",
+    "Libaku ya suka {name}! Prix ya spéciale na {product} — valid te na lobi. Ko-koma sikawa! 🔥"
+  ],
+  "default": "Mbala ya suka! To-zali na offre spécial mpo na yo. Olingi? 🎁",
+  "native_approved": false,
+  "notes": "Final Lingala attempt. 'Mbala ya suka' = last time. Keep tone warm, never rude."
+}

@@ -1,0 +1,15 @@
+{
+  "attempt": 2,
+  "language": "lingala",
+  "hook_type": "social_proof",
+  "angle": "fomo_social",
+  "templates": [
+    "Ndeko {name}! Batu mingi na Kin ba-zali ko-zua {product} sikawa. Olingi ko-kanga libaku? 👀",
+    "Mbote {name}! Batu mingi ya {city} ba-sepelisi na {product}. Ozali ko-zela nini? 🌟",
+    "Ndeko! {product} e-kwea mingi na Kin lelo. Stock e-zali moke. Olingi? 📦",
+    "Mbote {name}! Ba-ndeko mingi ya {city} ba-zui {product} na mposo oyo. Libaku ezali awa!"
+  ],
+  "default": "Ndeko! Batu mingi na Kin ba-zali ko-zua yango sikawa. Olingi ko-kanga libaku? 👀",
+  "native_approved": false,
+  "notes": "Lingala social proof. 'Libaku' = opportunity/chance. Natural DRC market talk."
+}

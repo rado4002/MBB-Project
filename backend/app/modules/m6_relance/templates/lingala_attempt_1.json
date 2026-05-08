@@ -1,0 +1,15 @@
+{
+  "attempt": 1,
+  "language": "lingala",
+  "hook_type": "reciprocity",
+  "angle": "value_reminder",
+  "templates": [
+    "Mbote ndeko {name}! 👋 Eloko oyo ozalaki ko-luka ezali nanu. To-ko-salisa yo?",
+    "Mbote {name}! {product} ezali nanu na stock. Olingi tó-finaliser lelo? 😊",
+    "Mbote {name}! Ozalaki ko-luka {product}. To-zali awa soki ozali na pertanyaan! 👋",
+    "Mbote {name}! Biso to-yeba oyo ozalaki ko-luka. Olingi makambo mingi na {product}?"
+  ],
+  "default": "Mbote ndeko! Eloko oyo ozalaki ko-luka ezali nanu. To-ko-salisa yo? 😊",
+  "native_approved": false,
+  "notes": "Warm Lingala greeting. 'Ndeko' = friend/sibling, very natural in Kinshasa."
+}
