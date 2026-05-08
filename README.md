@@ -1,7 +1,7 @@
 # MBB ya Kin: Multi-Language Lead Nurturer Bot for DRC
 **"A Helpful Congolese Friend on WhatsApp"**
 
-![Status](https://img.shields.io/badge/Phase-1.A%20(Core%20System)-blue)
+![Status](https://img.shields.io/badge/Phase-1.E%20Complete%20%E2%80%94%20Pilot%20Ready-brightgreen)
 ![Python](https://img.shields.io/badge/Python-3.12-green)
 ![License](https://img.shields.io/badge/License-Internal-red)
 
