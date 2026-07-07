@@ -6,12 +6,10 @@ Tasks:
 """
 from __future__ import annotations
 
-import asyncio
-
 import structlog
 from celery import Task
 
-from app.tasks.celery_app import celery_app
+from app.tasks.celery_app import celery_app, run_async
 
 log = structlog.get_logger(__name__)
 
@@ -39,7 +37,7 @@ def sync_lead_to_crm(
     intent: str,
 ) -> dict:
     """Sync a lead to the CRM adapter (Airtable). Retries on failure."""
-    return asyncio.run(
+    return run_async(
         _sync(
             task=self,
             lead_id=lead_id,

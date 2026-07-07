@@ -26,7 +26,7 @@ from app.modules.m6_relance.service import (
     create_and_schedule_relance,
     mark_relance_delivered,
 )
-from app.tasks.celery_app import celery_app
+from app.tasks.celery_app import celery_app, run_async
 
 log = structlog.get_logger(__name__)
 
@@ -56,12 +56,10 @@ def scan_eligible_leads(self: Task) -> dict:
     Returns:
         Dict with scan results (eligible_count, scheduled_count)
     """
-    import asyncio
-
     log.info("relance.scan.start")
 
     try:
-        result = asyncio.run(_scan_and_schedule_relances())
+        result = run_async(_scan_and_schedule_relances())
         log.info(
             "relance.scan.complete",
             eligible=result["eligible_count"],
@@ -142,12 +140,10 @@ def send_relance(self: Task, relance_id: str) -> dict:
     Returns:
         Dict with status (sent, skipped, failed)
     """
-    import asyncio
-
     log.info("relance.send.start", relance_id=relance_id)
 
     try:
-        result = asyncio.run(_send_relance_message(relance_id))
+        result = run_async(_send_relance_message(relance_id))
         log.info("relance.send.complete", relance_id=relance_id, status=result["status"])
         return result
     except Exception as exc:
@@ -262,12 +258,10 @@ def process_due_relances() -> dict:
 
     Safe to run multiple times (idempotent — each relance row has a status).
     """
-    import asyncio
-
     from app.modules.m6_relance import service as relance_svc  # type: ignore[import]
 
     log.info("relance.process_due.start")
-    result = asyncio.run(
+    result = run_async(
         relance_svc.process_due_relances()
     )
     log.info("relance.process_due.done", dispatched=result.get("dispatched", 0))

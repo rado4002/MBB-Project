@@ -16,7 +16,7 @@ from __future__ import annotations
 import structlog
 from celery import Task
 
-from app.tasks.celery_app import celery_app
+from app.tasks.celery_app import celery_app, run_async
 
 log = structlog.get_logger(__name__)
 
@@ -52,8 +52,6 @@ def escalate_conversation(
 
     Returns dict with {"escalated": bool, "escalation_id": str}.
     """
-    import asyncio
-
     from app.modules.m8_maps import escalation as escalation_svc  # type: ignore[import]
 
     log.info(
@@ -63,7 +61,7 @@ def escalate_conversation(
         lead_id=lead_id,
     )
     try:
-        result = asyncio.run(
+        result = run_async(
             escalation_svc.create_ticket_from_task(
                 conversation_id=conversation_id,
                 reason=reason,
@@ -91,12 +89,10 @@ def check_stale_escalations() -> dict:
     Finds escalations that have been pending > 2 hours and sends a reminder
     to the Hub Team. Prevents leads from being forgotten during busy periods.
     """
-    import asyncio
-
     from app.modules.m8_maps import escalation as escalation_svc  # type: ignore[import]
 
     log.info("escalation.check_stale.start")
-    result = asyncio.run(
+    result = run_async(
         escalation_svc.check_stale_from_task()
     )
     log.info("escalation.check_stale.done", reminders_sent=result.get("reminders_sent", 0))

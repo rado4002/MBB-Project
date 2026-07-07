@@ -7,7 +7,6 @@ Tasks:
 """
 from __future__ import annotations
 
-import asyncio
 import time
 import uuid
 from datetime import datetime, timezone
@@ -16,7 +15,7 @@ import structlog
 from celery import Task
 
 from app.i18n.messages import t
-from app.tasks.celery_app import celery_app
+from app.tasks.celery_app import celery_app, run_async
 
 log = structlog.get_logger(__name__)
 
@@ -60,7 +59,7 @@ def process_inbound_message(
     9. Update Redis session cache
     10. Send response via messaging adapter
     """
-    return asyncio.run(
+    return run_async(
         _process(
             task=self,
             message_id=message_id,
@@ -329,7 +328,7 @@ def drain_blackout_queue(self: Task) -> dict:
     Each item is a JSON-serialised inbound message payload.
     Beat-scheduled every 5 minutes.
     """
-    return asyncio.run(_drain(self))
+    return run_async(_drain(self))
 
 
 async def _drain(task: Task) -> dict:

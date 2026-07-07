@@ -6,7 +6,6 @@ Tasks:
 """
 from __future__ import annotations
 
-import asyncio
 import uuid
 
 import structlog
@@ -16,7 +15,7 @@ from app.database import AsyncSessionLocal
 from app.models.conversation import Conversation
 from app.models.lead import Lead
 from app.modules.m5_qualification.service import qualify_and_create_lead
-from app.tasks.celery_app import celery_app
+from app.tasks.celery_app import celery_app, run_async
 
 log = structlog.get_logger(__name__)
 
@@ -73,7 +72,7 @@ def score_conversation(
     )
 
     try:
-        result = asyncio.run(
+        result = run_async(
             _score_and_qualify(
                 conversation_id=conversation_id,
                 message_text=message_text,
@@ -224,7 +223,7 @@ def rescore_lead(
     log.info("qualification.rescore.start", lead_id=lead_id)
 
     try:
-        result = asyncio.run(
+        result = run_async(
             _rescore_lead(
                 lead_id=lead_id,
                 new_message_text=new_message_text,

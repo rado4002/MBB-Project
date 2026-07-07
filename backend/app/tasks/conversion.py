@@ -13,7 +13,7 @@ from __future__ import annotations
 import structlog
 from celery import Task
 
-from app.tasks.celery_app import celery_app
+from app.tasks.celery_app import celery_app, run_async
 
 log = structlog.get_logger(__name__)
 
@@ -47,13 +47,11 @@ def initiate_payment(
 
     Returns dict with {"status": "pending" | "failed", "payment_id": str}.
     """
-    import asyncio
-
     from app.modules.m7_conversion import service as conversion_svc  # type: ignore[import]
 
     log.info("conversion.initiate_payment.start", order_id=order_id)
     try:
-        result = asyncio.run(
+        result = run_async(
             conversion_svc.initiate_payment(
                 order_id=order_id,
                 idempotency_key=idempotency_key,
@@ -100,8 +98,6 @@ def process_payment_callback(
         customer_phone:   Customer's phone number.
         timestamp:        Payment timestamp (ISO format).
     """
-    import asyncio
-
     log.info(
         "conversion.callback.start",
         transaction_id=transaction_id,
@@ -110,7 +106,7 @@ def process_payment_callback(
         status=status,
     )
     try:
-        result = asyncio.run(
+        result = run_async(
             _process_payment_callback(
                 transaction_id=transaction_id,
                 order_id=order_id,
@@ -191,23 +187,21 @@ def drain_blackout_queue() -> dict:
     triggers the standard conversation flow, then sends the DRC recovery
     confirmation: "Naza-zonga! Message na yo e-batelami ✓"
     """
-    import asyncio
-
     from app.redis_client import blackout_dequeue_batch, blackout_queue_length
     from app.modules.m1_gateway import service as gateway_svc  # type: ignore[import]
 
-    queue_len = asyncio.run(blackout_queue_length())
+    queue_len = run_async(blackout_queue_length())
     if queue_len <= 0:
         return {"drained": 0, "queue_was_empty": True}
 
     log.info("blackout.drain.start", queue_length=queue_len)
-    messages = asyncio.run(
+    messages = run_async(
         blackout_dequeue_batch(batch_size=50)
     )
     processed = 0
     for msg in messages:
         try:
-            asyncio.run(
+            run_async(
                 gateway_svc.reprocess_blackout_message(msg)
             )
             processed += 1
@@ -234,13 +228,11 @@ def sync_order_crm(self: Task, *, order_id: str, idempotency_key: str) -> dict:
     Idempotent: safe to retry. If already synced, returns early.
     Target latency: < 2 minutes after order confirmation.
     """
-    import asyncio
-
     from app.modules.m7_conversion import service as conversion_svc  # type: ignore[import]
 
     log.info("conversion.crm_sync.start", order_id=order_id)
     try:
-        crm_id = asyncio.run(
+        crm_id = run_async(
             conversion_svc.sync_order_to_crm(
                 order_id=order_id,
                 idempotency_key=idempotency_key,
@@ -276,7 +268,6 @@ def update_order_status(
       pending → confirmed → preparing → delivering → delivered
       Any (except delivered) → cancelled
     """
-    import asyncio
     import uuid as _uuid
 
     from app.modules.m7_conversion import service as conversion_svc  # type: ignore[import]
@@ -290,7 +281,7 @@ def update_order_status(
                     session, order_id=_uuid.UUID(order_id), new_status=new_status
                 )
 
-        order = asyncio.run(_run())
+        order = run_async(_run())
         log.info("conversion.status_update.done", order_id=order_id, status=order.status)
         return {"order_id": order_id, "status": order.status}
     except Exception as exc:

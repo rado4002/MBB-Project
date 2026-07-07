@@ -1,3 +1,5 @@
+import asyncio
+
 from celery import Celery
 from celery.schedules import crontab
 from celery.signals import worker_process_init
@@ -5,6 +7,7 @@ from celery.signals import worker_process_init
 from app.config import get_settings
 
 settings = get_settings()
+_worker_loop: asyncio.AbstractEventLoop | None = None
 
 
 @worker_process_init.connect
@@ -15,8 +18,20 @@ def reset_db_pool(**kwargs):
     internal asyncpg Futures are bound to the parent's event loop — causing
     'Future attached to a different loop' errors on every task.
     """
+    global _worker_loop
+    _worker_loop = None
     from app.database import engine
     engine.sync_engine.dispose(close=False)
+
+
+def run_async(coro):
+    """Run async Celery work on one event loop per worker process."""
+    global _worker_loop
+    if _worker_loop is None or _worker_loop.is_closed():
+        _worker_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_worker_loop)
+    return _worker_loop.run_until_complete(coro)
+
 
 celery_app = Celery(
     "mbb",

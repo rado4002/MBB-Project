@@ -11,7 +11,7 @@ from __future__ import annotations
 import structlog
 from celery import Task
 
-from app.tasks.celery_app import celery_app
+from app.tasks.celery_app import celery_app, run_async
 
 log = structlog.get_logger(__name__)
 
@@ -47,13 +47,11 @@ def tag_event(
 
     Returns dict with {"tagged": bool, "tags": [...]}.
     """
-    import asyncio
-
     from app.modules.m8_maps import service as maps_svc  # type: ignore[import]
 
     log.info("maps.tag_event.start", conversation_id=conversation_id, event_type=event_type)
     try:
-        result = asyncio.run(
+        result = run_async(
             maps_svc.tag_event(
                 conversation_id=conversation_id,
                 event_type=event_type,
@@ -81,17 +79,15 @@ def aggregate_daily_maps() -> dict:
     Computes daily demand patterns, silence rates, and conversion triggers.
     Results are stored in the maps_tags table and invalidate dashboard cache.
     """
-    import asyncio
-
     from app.modules.m8_maps import service as maps_svc  # type: ignore[import]
     from app.cache import invalidate_prefix, make_key
 
     log.info("maps.aggregate_daily.start")
-    result = asyncio.run(
+    result = run_async(
         maps_svc.aggregate_daily()
     )
     # Invalidate analytics cache so dashboard picks up fresh data
-    asyncio.run(
+    run_async(
         invalidate_prefix(make_key("analytics", ""))
     )
     log.info("maps.aggregate_daily.done", result=result)
