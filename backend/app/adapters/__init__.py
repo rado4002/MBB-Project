@@ -8,7 +8,7 @@ Usage:
     response = await ai.generate(prompt, system, max_tokens)
 
 Switch adapters by changing env vars — no module code changes required:
-    AI_ADAPTER=claude | gemini
+    AI_ADAPTER=disabled | claude
     CRM_ADAPTER=airtable | mbb_hub
     INVENTORY_ADAPTER=static | mbb_box
     PAYMENT_ADAPTER=mobile_money
@@ -30,6 +30,9 @@ settings = get_settings()
 
 @lru_cache()
 def get_ai_adapter() -> BaseAIAdapter:
+    if settings.ai_adapter in {"disabled", "local"}:
+        from app.adapters.ai.disabled_adapter import DisabledAIAdapter
+        return DisabledAIAdapter()
     if settings.ai_adapter == "claude":
         from app.adapters.ai.claude_adapter import ClaudeAdapter
         return ClaudeAdapter()

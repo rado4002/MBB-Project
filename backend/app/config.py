@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     whatsapp_mode: str = "baileys"          # baileys | official
 
     # ── Adapters ──────────────────────────────────────────────────────────────
-    ai_adapter: str = "claude"
+    ai_adapter: str = "disabled"
     crm_adapter: str = "airtable"
     inventory_adapter: str = "static"
     payment_adapter: str = "mobile_money"

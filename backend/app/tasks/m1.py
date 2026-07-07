@@ -2,7 +2,7 @@
 app/tasks/m1.py — Celery tasks for M1 Message Gateway.
 
 Tasks:
-  - process_inbound_message : Full M1 processing flow (AI response + send)
+  - process_inbound_message : Full M1 processing flow (AI/local fallback response + send)
   - drain_blackout_queue    : Drain Redis blackout queue on power recovery
 """
 from __future__ import annotations
@@ -53,8 +53,8 @@ def process_inbound_message(
     2. Upsert customer + conversation, detect language, persist inbound message
     3. Voice note → escalation ticket + ack → return
     4. Opt-out → ack → return
-    5. Build Claude prompt from session cache + DB history
-    6. Call Claude API (with circuit breaker)
+    5. Build response prompt from session cache + DB history
+    6. Call configured AI adapter or use fallback when AI is disabled/unavailable
     7. Persist outbound message
     8. Dispatch MAPS tag generation (async Celery task)
     9. Update Redis session cache
@@ -158,7 +158,7 @@ async def _process(
         else:
             history = session_state.history
 
-        # ── Step 6: Call Claude ───────────────────────────────────────────────
+        # ── Step 6: Generate response or use local fallback ───────────────────
         from app.modules.m2_language.prompts import get_system_prompt
         ai = get_ai_adapter()
         system_prompt = get_system_prompt(language, history)
@@ -169,7 +169,7 @@ async def _process(
                 max_tokens=512,
             )
         except Exception as exc:
-            log.error("m1.claude.error", conv_id=conv_id, error=str(exc))
+            log.warning("m1.ai_fallback.used", conv_id=conv_id, error=str(exc))
             ai_response = t("error_fallback", language)
 
         processing_ms = int((time.monotonic() - t0) * 1000)
