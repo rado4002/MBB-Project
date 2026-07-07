@@ -27,6 +27,12 @@ _MAX_RETRIES = 3
 _RETRY_DELAYS = (2.0, 5.0, 10.0)   # exponential back-off steps
 
 
+def _mask_phone(phone: str) -> str:
+    if len(phone) <= 7:
+        return "***"
+    return f"{phone[:4]}***{phone[-3:]}"
+
+
 class MessagingAdapterError(RuntimeError):
     """Raised when the messaging backend is unreachable after retries."""
 
@@ -72,6 +78,15 @@ class BaileysAdapter(BaseMessagingAdapter):
         POST /send/text to Baileys bridge.
         Returns the bridge-assigned message ID.
         """
+        if not settings.whatsapp_send_enabled:
+            log.warning(
+                "baileys.send_skipped_safety_gate",
+                phone=_mask_phone(phone),
+                chars=len(text),
+                whatsapp_send_enabled=False,
+            )
+            return ""
+
         self._check_circuit()
         payload = {"phone": phone, "message": text}
 

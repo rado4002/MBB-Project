@@ -21,12 +21,14 @@ services:
       DEBUG: "true"
       LOG_LEVEL: DEBUG
       BAILEYS_WEBHOOK_SECRET: dev-webhook-secret-do-not-use-in-production
+      WHATSAPP_SEND_ENABLED: "false"
 
   celery_worker:
     volumes:
       - ./backend:/app
     environment:
       WHATSAPP_MODE: baileys
+      WHATSAPP_SEND_ENABLED: "false"
       LOG_LEVEL: DEBUG
 
   celery_beat:
@@ -34,6 +36,7 @@ services:
       - ./backend:/app
     environment:
       WHATSAPP_MODE: baileys
+      WHATSAPP_SEND_ENABLED: "false"
 
   dashboard:
     volumes:

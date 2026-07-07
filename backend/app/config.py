@@ -22,6 +22,7 @@ class Settings(BaseSettings):
 
     # ── WhatsApp Mode ─────────────────────────────────────────────────────────
     whatsapp_mode: str = "baileys"          # baileys | official
+    whatsapp_send_enabled: bool = False     # safety gate for real outbound delivery
 
     # ── Adapters ──────────────────────────────────────────────────────────────
     ai_adapter: str = "disabled"
