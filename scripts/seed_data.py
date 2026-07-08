@@ -20,15 +20,17 @@ import os
 import sys
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 sys.path.insert(0, ".")
 
 # Allow running locally with minimal env
 os.environ.setdefault("APP_ENV", "development")
-os.environ.setdefault("POSTGRES_HOST", "localhost")
-os.environ.setdefault("POSTGRES_DB", "mbb")
-os.environ.setdefault("POSTGRES_USER", "mbb")
-os.environ.setdefault("POSTGRES_PASSWORD", "mbb")
+if not Path("/run/secrets/postgres_password").exists():
+    os.environ.setdefault("POSTGRES_HOST", "localhost")
+    os.environ.setdefault("POSTGRES_DB", "mbb")
+    os.environ.setdefault("POSTGRES_USER", "mbb")
+    os.environ.setdefault("POSTGRES_PASSWORD", "mbb")
 os.environ.setdefault("REDIS_HOST", "localhost")
 os.environ.setdefault("JWT_SECRET", "testsecret32charslongpadding12345")
 os.environ.setdefault("CLAUDE_API_KEY", "test")
