@@ -121,13 +121,13 @@ async def _liveness_checks(request: Request) -> tuple[dict, list[str]]:
     except Exception as exc:
         errors.append(f"celery: broker unreachable — {exc}")
 
-    # Baileys bridge — HTTP GET /status (best-effort, only in baileys mode)
+    # Baileys bridge — HTTP GET /health (best-effort, only in baileys mode)
     if settings.whatsapp_mode == "baileys":
         try:
             import httpx
             async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
-                resp = await client.get(f"{settings.baileys_url}/status")
-                checks["baileys"] = resp.status_code < 500
+                resp = await client.get(f"{settings.baileys_url}/health")
+                checks["baileys"] = resp.is_success
         except Exception as exc:
             errors.append(f"baileys: {exc}")
     else:
