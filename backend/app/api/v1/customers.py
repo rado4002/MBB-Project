@@ -24,6 +24,32 @@ log = structlog.get_logger()
 router = APIRouter(prefix="/customers", tags=["M4 — Customers"])
 
 
+def _customer_response_payload(
+    customer: Customer,
+    *,
+    conversation_count: int | None = None,
+    lead_count: int | None = None,
+) -> dict:
+    payload = {
+        "phone_number": customer.phone_number,
+        "name": customer.name,
+        "city": customer.city,
+        "language": customer.preferred_language,
+        "preferred_language": customer.preferred_language,
+        "opt_out": customer.opt_out_flag,
+        "opted_out": customer.opt_out_flag,
+        "club_member": customer.club_member,
+        "club_points": customer.club_points,
+        "created_at": customer.created_at,
+        "updated_at": customer.last_interaction,
+    }
+    if conversation_count is not None:
+        payload["conversation_count"] = conversation_count
+    if lead_count is not None:
+        payload["lead_count"] = lead_count
+    return payload
+
+
 @router.get(
     "/{phone_number:path}",
     response_model=CustomerResponse,
@@ -49,19 +75,11 @@ async def get_customer(phone_number: str, db: DBSession):
         select(func.count()).select_from(Lead).where(Lead.customer_id == phone_number)
     )).scalar() or 0
     
-    return CustomerResponse(
-        phone_number=customer.phone_number,
-        name=customer.name,
-        city=customer.city,
-        preferred_language=customer.preferred_language,
-        opted_out=customer.opted_out,
-        club_member=customer.club_member,
-        club_points=customer.club_points,
-        created_at=customer.created_at,
-        updated_at=customer.updated_at,
+    return CustomerResponse(**_customer_response_payload(
+        customer,
         conversation_count=conv_count,
         lead_count=lead_count,
-    )
+    ))
 
 
 @router.put(
@@ -181,8 +199,8 @@ async def list_customers(
         count_q = count_q.where(Customer.preferred_language == language)
     
     if opted_out is not None:
-        q = q.where(Customer.opted_out == opted_out)
-        count_q = count_q.where(Customer.opted_out == opted_out)
+        q = q.where(Customer.opt_out_flag == opted_out)
+        count_q = count_q.where(Customer.opt_out_flag == opted_out)
     
     if club_member is not None:
         q = q.where(Customer.club_member == club_member)
@@ -208,19 +226,14 @@ async def list_customers(
             select(func.count()).select_from(Lead).where(Lead.customer_id == c.phone_number)
         )).scalar() or 0
         
-        items.append({
-            "phone_number": c.phone_number,
-            "name": c.name,
-            "city": c.city,
-            "preferred_language": c.preferred_language,
-            "opted_out": c.opted_out,
-            "club_member": c.club_member,
-            "club_points": c.club_points,
-            "created_at": c.created_at.isoformat(),
-            "updated_at": c.updated_at.isoformat(),
-            "conversation_count": conv_count,
-            "lead_count": lead_count,
-        })
+        payload = _customer_response_payload(
+            c,
+            conversation_count=conv_count,
+            lead_count=lead_count,
+        )
+        payload["created_at"] = payload["created_at"].isoformat()
+        payload["updated_at"] = payload["updated_at"].isoformat()
+        items.append(payload)
     
     return {
         "customers": items,

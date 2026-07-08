@@ -11,10 +11,15 @@ class CustomerResponse(BaseModel):
     name: str | None = None
     city: str | None = None
     language: Language | None = None
+    preferred_language: Language | None = None
     club_member: bool = False
+    club_points: int = 0
     opt_out: bool = False
+    opted_out: bool = False
     created_at: datetime
     updated_at: datetime
+    conversation_count: int = 0
+    lead_count: int = 0
 
 
 class OptOutRequest(BaseModel):
