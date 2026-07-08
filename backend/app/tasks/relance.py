@@ -266,3 +266,7 @@ def process_due_relances() -> dict:
     )
     log.info("relance.process_due.done", dispatched=result.get("dispatched", 0))
     return result
+
+
+# Backward-compatible task export expected by setup validation.
+schedule_next_relance = scan_eligible_leads
