@@ -20,6 +20,7 @@ from app.models.lead import Lead
 from app.modules.m5_qualification.service import qualify_and_create_lead
 from app.modules.m5_qualification.stages import suggest_stage_from_score
 from app.schemas.leads import (
+    CustomerInLead,
     LeadCreate,
     LeadCreatedResponse,
     LeadResponse,
@@ -27,6 +28,7 @@ from app.schemas.leads import (
     LeadScoreUpdate,
     LeadStageResponse,
     LeadStageUpdate,
+    RelanceSummary,
 )
 
 log = structlog.get_logger()
@@ -117,9 +119,11 @@ async def get_lead(lead_id: uuid.UUID, db: DBSession):
     
     return LeadResponse(
         lead_id=lead.lead_id,
-        customer_id=lead.customer_id,
-        customer_name=customer.name if customer else None,
-        conversation_id=lead.conversation_id,
+        customer=CustomerInLead(
+            phone_number=lead.customer_id,
+            name=customer.name if customer else None,
+            city=customer.city if customer else None,
+        ),
         score=lead.score,
         score_value=lead.score_value,
         stage=lead.stage,
@@ -127,20 +131,19 @@ async def get_lead(lead_id: uuid.UUID, db: DBSession):
         product_interest=lead.product_interest or [],
         source=lead.source,
         relance_count=lead.relance_count,
-        qualified_at=lead.qualified_at,
-        created_at=lead.created_at,
-        updated_at=lead.updated_at,
-        relance_history=[
-            {
-                "relance_id": str(r.relance_id),
-                "attempt_number": r.attempt_number,
-                "hook_type": r.hook_type,
-                "scheduled_at": r.scheduled_at.isoformat(),
-                "delivered_at": r.delivered_at.isoformat() if r.delivered_at else None,
-                "response_received": r.response_received,
-            }
+        relances=[
+            RelanceSummary(
+                relance_id=r.relance_id,
+                attempt_number=r.attempt_number,
+                scheduled_at=r.scheduled_at,
+                delivered_at=r.delivered_at,
+                response_received=r.response_received,
+                hook_type=r.hook_type,
+            )
             for r in lead.relances
         ],
+        qualified_at=lead.qualified_at,
+        converted_at=lead.converted_at,
     )
 
 
