@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     crm_send_enabled: bool = False          # safety gate for CRM external writes
     payment_send_enabled: bool = False      # safety gate for payment provider calls
     relance_enabled: bool = False           # safety gate for relance scheduling/sends
+    scheduled_tasks_enabled: bool = False   # safety gate for Celery beat schedules
 
     # ── Adapters ──────────────────────────────────────────────────────────────
     ai_adapter: str = "disabled"

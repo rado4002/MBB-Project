@@ -48,6 +48,45 @@ celery_app = Celery(
     ],
 )
 
+
+_BEAT_SCHEDULE = {
+    # M6 — Scan for eligible leads every hour (Sprint 1.6)
+    "relance-scan-eligible": {
+        "task": "app.tasks.relance.scan_eligible_leads",
+        "schedule": crontab(minute=0),  # Every hour at :00
+        "options": {"queue": "relance"},
+    },
+
+    # M1 — Drain blackout queue every 5 minutes (power recovery)
+    "m1-drain-blackout": {
+        "task": "m1.drain_blackout_queue",
+        "schedule": crontab(minute="*/5"),
+        "options": {"queue": "default"},
+    },
+
+    # M6 — Drain blackout queue every 5 minutes
+    "conversion-drain-blackout": {
+        "task": "app.tasks.conversion.drain_blackout_queue",
+        "schedule": crontab(minute="*/5"),
+        "options": {"queue": "default"},
+    },
+
+    # M7 — Daily MAPS aggregation at 02:00 Kinshasa (00:00 UTC)
+    "maps-aggregate-daily": {
+        "task": "app.tasks.maps.aggregate_daily",
+        "schedule": crontab(hour=0, minute=0),
+        "options": {"queue": "maps"},
+    },
+
+    # M8 — Check for stale escalations every 30 minutes
+    "escalation-check-stale": {
+        "task": "app.tasks.escalation.check_stale",
+        "schedule": crontab(minute="*/30"),
+        "options": {"queue": "escalation"},
+    },
+}
+
+
 celery_app.conf.update(
     # Serialization
     task_serializer="json",
@@ -91,40 +130,5 @@ celery_app.conf.update(
     # ── Beat schedule ─────────────────────────────────────────────────────────
     # All times are in Africa/Kinshasa (UTC+2).
     # No relance tasks are dispatched between 22:00–07:00 (enforced in M6 service).
-    beat_schedule={
-        # M6 — Scan for eligible leads every hour (Sprint 1.6)
-        "relance-scan-eligible": {
-            "task": "app.tasks.relance.scan_eligible_leads",
-            "schedule": crontab(minute=0),  # Every hour at :00
-            "options": {"queue": "relance"},
-        },
-
-        # M1 — Drain blackout queue every 5 minutes (power recovery)
-        "m1-drain-blackout": {
-            "task": "m1.drain_blackout_queue",
-            "schedule": crontab(minute="*/5"),
-            "options": {"queue": "default"},
-        },
-
-        # M6 — Drain blackout queue every 5 minutes
-        "conversion-drain-blackout": {
-            "task": "app.tasks.conversion.drain_blackout_queue",
-            "schedule": crontab(minute="*/5"),
-            "options": {"queue": "default"},
-        },
-
-        # M7 — Daily MAPS aggregation at 02:00 Kinshasa (00:00 UTC)
-        "maps-aggregate-daily": {
-            "task": "app.tasks.maps.aggregate_daily",
-            "schedule": crontab(hour=0, minute=0),
-            "options": {"queue": "maps"},
-        },
-
-        # M8 — Check for stale escalations every 30 minutes
-        "escalation-check-stale": {
-            "task": "app.tasks.escalation.check_stale",
-            "schedule": crontab(minute="*/30"),
-            "options": {"queue": "escalation"},
-        },
-    },
+    beat_schedule=_BEAT_SCHEDULE if settings.scheduled_tasks_enabled else {},
 )
