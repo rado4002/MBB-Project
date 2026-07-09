@@ -26,6 +26,12 @@ _MAX_RETRIES = 3
 _RETRY_DELAYS = (2.0, 5.0, 15.0)
 
 
+def _mask_phone(phone: str) -> str:
+    if len(phone) <= 7:
+        return "***"
+    return f"{phone[:4]}***{phone[-3:]}"
+
+
 class MessagingAdapterError(RuntimeError):
     """Raised when the WA Cloud API is unreachable after retries."""
 
@@ -68,6 +74,15 @@ class WhatsAppOfficialAdapter(BaseMessagingAdapter):
         Send a free-form text message via the WhatsApp Cloud API.
         Returns the WA message ID.
         """
+        if not settings.whatsapp_send_enabled:
+            log.warning(
+                "wa_official.send_skipped_safety_gate",
+                phone=_mask_phone(phone),
+                chars=len(text),
+                whatsapp_send_enabled=False,
+            )
+            return ""
+
         self._check_circuit()
         # Cloud API requires phone without '+' and must be in E.164
         to = phone.lstrip("+")
@@ -105,6 +120,15 @@ class WhatsAppOfficialAdapter(BaseMessagingAdapter):
         """
         Send a pre-approved Meta template message with positional parameters.
         """
+        if not settings.whatsapp_send_enabled:
+            log.warning(
+                "wa_official.template_skipped_safety_gate",
+                phone=_mask_phone(phone),
+                template_name=template_name,
+                whatsapp_send_enabled=False,
+            )
+            return ""
+
         self._check_circuit()
         to = phone.lstrip("+")
         components = []
