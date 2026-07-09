@@ -135,6 +135,18 @@ class AirtelMoneyAdapter(BasePaymentAdapter):
         Returns:
             {"status": "pending", "transaction_id": ..., "ussd_code": ...}
         """
+        if not settings.payment_send_enabled:
+            log.warning(
+                "airtel_money.initiate_skipped_safety_gate",
+                reference=reference,
+                payment_send_enabled=False,
+            )
+            return {
+                "status": "skipped",
+                "reason": "payment_send_disabled",
+                "transaction_id": None,
+            }
+
         if self._is_dev_mode():
             return self._mock_initiate(phone, amount, reference)
 
@@ -155,6 +167,18 @@ class AirtelMoneyAdapter(BasePaymentAdapter):
         Returns:
             {"status": "completed" | "pending" | "failed", "transaction_id": ...}
         """
+        if not settings.payment_send_enabled:
+            log.warning(
+                "airtel_money.verify_skipped_safety_gate",
+                transaction_id=transaction_id,
+                payment_send_enabled=False,
+            )
+            return {
+                "status": "skipped",
+                "reason": "payment_send_disabled",
+                "transaction_id": transaction_id,
+            }
+
         if self._is_dev_mode():
             return self._mock_verify(transaction_id)
 

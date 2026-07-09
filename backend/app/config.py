@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     # ── WhatsApp Mode ─────────────────────────────────────────────────────────
     whatsapp_mode: str = "baileys"          # baileys | official
     whatsapp_send_enabled: bool = False     # safety gate for real outbound delivery
+    crm_send_enabled: bool = False          # safety gate for CRM external writes
+    payment_send_enabled: bool = False      # safety gate for payment provider calls
+    relance_enabled: bool = False           # safety gate for relance scheduling/sends
 
     # ── Adapters ──────────────────────────────────────────────────────────────
     ai_adapter: str = "disabled"

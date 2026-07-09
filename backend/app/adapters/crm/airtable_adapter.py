@@ -81,6 +81,14 @@ class AirtableAdapter(BaseCRMAdapter):
         """Create a lead record in Airtable. Returns Airtable record ID."""
         import asyncio
 
+        if not settings.crm_send_enabled:
+            log.warning(
+                "airtable.create_lead_skipped_safety_gate",
+                lead_id=lead_data.get("lead_id", ""),
+                crm_send_enabled=False,
+            )
+            return "skipped_safety_gate"
+
         self._check_circuit()
         payload = {
             "fields": {
@@ -123,6 +131,14 @@ class AirtableAdapter(BaseCRMAdapter):
         """Update a lead record in Airtable by record ID."""
         import asyncio
 
+        if not settings.crm_send_enabled:
+            log.warning(
+                "airtable.update_lead_skipped_safety_gate",
+                record_id=external_id,
+                crm_send_enabled=False,
+            )
+            return
+
         self._check_circuit()
         payload = {"fields": updates}
 
@@ -150,6 +166,14 @@ class AirtableAdapter(BaseCRMAdapter):
     async def sync_order(self, order_data: dict[str, Any]) -> str:
         """Sync an order to Airtable. Returns record ID."""
         import asyncio
+
+        if not settings.crm_send_enabled:
+            log.warning(
+                "airtable.sync_order_skipped_safety_gate",
+                order_id=order_data.get("order_id", ""),
+                crm_send_enabled=False,
+            )
+            return "skipped_safety_gate"
 
         self._check_circuit()
         payload = {

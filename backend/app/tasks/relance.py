@@ -17,6 +17,7 @@ import structlog
 from celery import Task
 from sqlalchemy import select
 
+from app.config import get_settings
 from app.database import AsyncSessionLocal
 from app.models.conversation import Conversation
 from app.models.lead import Lead
@@ -29,6 +30,7 @@ from app.modules.m6_relance.service import (
 from app.tasks.celery_app import celery_app, run_async
 
 log = structlog.get_logger(__name__)
+settings = get_settings()
 
 
 class _BaseRelanceTask(Task):
@@ -57,6 +59,15 @@ def scan_eligible_leads(self: Task) -> dict:
         Dict with scan results (eligible_count, scheduled_count)
     """
     log.info("relance.scan.start")
+
+    if not settings.relance_enabled:
+        log.warning("relance.scan.skipped_safety_gate", relance_enabled=False)
+        return {
+            "status": "skipped",
+            "reason": "relance_disabled",
+            "eligible_count": 0,
+            "scheduled_count": 0,
+        }
 
     try:
         result = run_async(_scan_and_schedule_relances())
@@ -141,6 +152,18 @@ def send_relance(self: Task, relance_id: str) -> dict:
         Dict with status (sent, skipped, failed)
     """
     log.info("relance.send.start", relance_id=relance_id)
+
+    if not settings.relance_enabled:
+        log.warning(
+            "relance.send.skipped_safety_gate",
+            relance_id=relance_id,
+            relance_enabled=False,
+        )
+        return {
+            "status": "skipped",
+            "reason": "relance_disabled",
+            "relance_id": relance_id,
+        }
 
     try:
         result = run_async(_send_relance_message(relance_id))
@@ -258,9 +281,17 @@ def process_due_relances() -> dict:
 
     Safe to run multiple times (idempotent — each relance row has a status).
     """
+    log.info("relance.process_due.start")
+    if not settings.relance_enabled:
+        log.warning("relance.process_due.skipped_safety_gate", relance_enabled=False)
+        return {
+            "status": "skipped",
+            "reason": "relance_disabled",
+            "dispatched": 0,
+        }
+
     from app.modules.m6_relance import service as relance_svc  # type: ignore[import]
 
-    log.info("relance.process_due.start")
     result = run_async(
         relance_svc.process_due_relances()
     )
