@@ -1,7 +1,7 @@
 # MBB ya Kin: Multi-Language Lead Nurturer Bot for DRC
 **"A Helpful Congolese Friend on WhatsApp"**
 
-![Status](https://img.shields.io/badge/Phase-1.E%20Complete%20%E2%80%94%20Pilot%20Ready-brightgreen)
+![Status](https://img.shields.io/badge/Status-Recovery%20Mode-yellow)
 ![Python](https://img.shields.io/badge/Python-3.12-green)
 ![License](https://img.shields.io/badge/License-Internal-red)
 
@@ -9,7 +9,21 @@
 
 ## 🎯 What is MBB ya Kin?
 
-**MBB ya Kin** is a production-ready, self-hosted WhatsApp AI chatbot designed specifically for the **Democratic Republic of Congo (DRC)** market. It speaks Lingala, French, and Swahili—automates lead qualification, nurtures prospects through multi-language conversations, and converts them to paying customers.
+**MBB ya Kin** is a self-hosted WhatsApp-first chatbot project designed specifically for the **Democratic Republic of Congo (DRC)** market. It is currently in **recovery and stabilization mode**, focused on proving one clean MVP flow before feature expansion.
+
+The project is **not production-ready**, **not pilot-ready**, **not feature-ready**, and **not fully stabilized** yet.
+
+## Current Recovery Status
+
+- **Step 13 CLOSED**: controlled backend MVP webhook pipeline validated from a clean repo.
+- **Step 14A CLOSED**: Dashboard/API read safety validated.
+- Current recovery mode uses `AI_ADAPTER=disabled`; no external AI provider is connected.
+- `WHATSAPP_SEND_ENABLED=false`; real WhatsApp outbound is disabled by safety gate.
+- `celery_beat` remains stopped/exited during recovery validation.
+- Live Baileys inbound remains unresolved as an adapter reliability risk.
+- Production compose/nginx behavior is not validated.
+- Payment, CRM, conversion, relance, and escalation domains are not validated.
+- Next work should continue in small validated recovery steps.
 
 ### Built for DRC Constraints
 - ✅ Works on **3G/4G networks** with frequent power outages
@@ -19,8 +33,8 @@
 
 ---
 
-## 📊 Key Metrics
-| Target | Current Phase |
+## 📊 Intended Product Targets
+| Target | Planned Target |
 | :--- | :--- |
 | Response Time | < 60 seconds |
 | Automation Rate | 80–85% |
@@ -33,10 +47,10 @@
 
 | Component | Technology | Purpose |
 | :--- | :--- | :--- |
-| **Messaging** | WhatsApp Business API | User-facing channel |
+| **Messaging** | Baileys / WhatsApp adapter boundary | User-facing channel; live inbound remains an adapter risk |
 | **Backend** | FastAPI | REST API & business logic |
-| **Orchestration** | Celery + Celery Beat | Async tasks & scheduling |
-| **Intelligence** | Claude 3.5 Sonnet | NLU & lead qualification |
+| **Orchestration** | Celery worker; Celery Beat defined but stopped in recovery | Async tasks; periodic scheduling not validated |
+| **Intelligence** | Disabled/local fallback mode | External AI provider not connected in current recovery mode |
 | **Database** | PostgreSQL | Leads, orders, sessions |
 | **Cache/Queues** | Redis | Sessions, message queues |
 | **Adapters** | Python ABC | Pluggable integrations |
@@ -102,8 +116,9 @@ The `.env` file controls adapter selection and service addresses. Key settings f
 
 ```ini
 APP_ENV=development
-WHATSAPP_MODE=baileys          # Uses Baileys bridge (no WhatsApp Business account needed)
-AI_ADAPTER=claude              # claude | gemini
+WHATSAPP_MODE=baileys          # Uses Baileys bridge; live inbound remains an adapter risk
+AI_ADAPTER=disabled            # recovery mode; no external AI provider connected
+WHATSAPP_SEND_ENABLED=false    # recovery safety gate; no real WhatsApp outbound
 CRM_ADAPTER=airtable           # airtable | mbb_hub
 TZ=Africa/Kinshasa
 ```
@@ -113,7 +128,8 @@ TZ=Africa/Kinshasa
 ### Step 3 — Start the Dev Environment
 
 ```bash
-# Build and start all 11 services
+# Build and start the development stack.
+# During recovery validation, keep celery_beat stopped/exited unless a task explicitly authorizes it.
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 ```
 
@@ -127,8 +143,8 @@ First run takes 3–5 minutes (pulling images + building). Subsequent starts tak
 | **redis** | `localhost:6379` | Cache + task broker (AOF persistence) |
 | **api** | Internal `:8000` | FastAPI backend (behind nginx) |
 | **celery_worker** | — | 4 async workers, 5 task queues |
-| **celery_beat** | — | RedBeat periodic scheduler |
-| **baileys** | `localhost:3000` | WhatsApp bridge (Baileys) |
+| **celery_beat** | — | RedBeat periodic scheduler; keep stopped/exited during recovery validation |
+| **baileys** | `localhost:3000` | WhatsApp bridge; live inbound remains an adapter reliability risk |
 | **dashboard** | Internal `:8501` | Streamlit analytics (behind nginx) |
 | **nginx** | `localhost:80` | Reverse proxy (routes to api + dashboard) |
 | **prometheus** | `localhost:9090` | Metrics collection |
@@ -509,17 +525,17 @@ The bot's "Brain" never talks directly to Airtable, Claude, or Orange Money. Ins
 
 ### Example: Switching AI Models
 ```bash
-# Current (Claude)
-AI_ADAPTER=ANTHROPIC_CLAUDE
+# Current recovery mode
+AI_ADAPTER=disabled
 
-# Switch to Gemini? (No code changes)
-# AI_ADAPTER=GOOGLE_GEMINI
+# External providers are not connected in the validated recovery state.
+# Re-enable only in a separate validated step.
 ```
 
 **Why This Matters:**
-1. **Speed to Market**: Use Airtable today, migrate to MBB HUB tomorrow (0 dev days).
-2. **Resilience**: If Claude is slow from Kinshasa, auto-switch to Gemini (configured in 1 line).
-3. **Cost Control**: Use cheap Gemini Flash for FAQs, Claude Sonnet for hard decisions.
+1. **Recovery Safety**: keep external AI disabled while the core flow is being stabilized.
+2. **Controlled Reconnection**: re-enable provider adapters only in separate validated steps.
+3. **Boundary Clarity**: keep AI, CRM, payment, and messaging integrations behind adapter boundaries.
 
 For full details, see [Adapter Architecture Guide](Documentation/Architecture/Adapter%20Architecture%20Guide.md).
 
@@ -529,7 +545,7 @@ For full details, see [Adapter Architecture Guide](Documentation/Architecture/Ad
 
 ### Message Inbound Flow
 
-The complete pipeline from phone message to database:
+The intended live path is:
 
 ```
 WhatsApp Phone
@@ -542,8 +558,10 @@ PostgreSQL (tables: customers, conversations, messages)
     ↓ (Celery task processes async)
 Streamlit Dashboard (Conversation Mirror page)
     ↓ (Auto-refresh shows new conversations)
-User sees real WhatsApp conversation in UI
+User sees conversation in UI
 ```
+
+Current validated recovery evidence is narrower: Step 13 validated the controlled backend webhook pipeline, and Step 14A validated Dashboard/API read safety. Live Baileys inbound remains unresolved as an adapter reliability risk, and real WhatsApp outbound remains disabled by `WHATSAPP_SEND_ENABLED=false`.
 
 ### Baileys Webhook Payload Schema
 
@@ -595,9 +613,11 @@ This ensures each worker gets fresh connections bound to its own event loop.
 
 ## 👨‍💻 For Developers
 
-### Testing the Complete WhatsApp → Dashboard Pipeline
+### Testing the WhatsApp → Dashboard Pipeline
 
-To verify end-to-end message flow works:
+Do not use live Baileys or real WhatsApp sends during the current recovery validation unless a task explicitly authorizes it. The currently closed recovery evidence is the controlled backend webhook path plus Dashboard/API read safety.
+
+Historical/manual live-path checklist:
 
 ```bash
 # 1. Open the QR dashboard in browser
@@ -758,58 +778,25 @@ Internal MBB Project. Not for external distribution.
 
 ---
 
-## 🎉 Current Status & Next Steps
+## Current Status & Next Steps
 
-### Phase 0 — Foundation ✅ (Complete)
-- [x] Docker Compose stack (11 services running)
-- [x] PostgreSQL schema with 15+ tables, indexes, materialized views
-- [x] Redis AOF persistence + Celery 5-queue configuration
-- [x] FastAPI app with health checks, middleware, security
-- [x] Pydantic schemas for all 10 API domains
-- [x] Adapter pattern (AI, CRM, Inventory, Payment, Messaging)
-- [x] Baileys WhatsApp bridge with QR code + auto-version-fetch
-- [x] Streamlit dashboard skeleton
-- [x] Nginx reverse proxy
-- [x] Monitoring stack (Prometheus, Grafana, Loki)
-- [x] CI/CD pipeline (GitHub Actions: lint, test, docker-build)
-- [x] 40 passing test checks (structure, schemas, blackout, resilience)
+### Recovery Mode
 
-### Phase 1 — Core System 🚀 (In Progress)
+The project is in recovery and stabilization mode. Current validated evidence is limited to:
 
-#### **Stage 1.A: M1 Gateway + WhatsApp Integration** ✅ (Complete)
-- [x] **Live QR Dashboard** — http://localhost:3000/qr with 10-second auto-refresh
-- [x] **Baileys WhatsApp Bridge** — Webhook payload transformation + E.164 formatting
-- [x] **Message Inbound Pipeline** — Baileys → FastAPI webhook → Celery task → PostgreSQL
-- [x] **Conversation Mirroring** — Real WhatsApp conversations visible in Streamlit dashboard
-- [x] **Celery Async Tasks** — Worker process initialization for async engine pool management
-- [x] **M1 Message Processing** — Customer upsert, conversation management, language detection
-- [x] **Error Handling** — HMAC verification, circuit breakers, DRC resilience
+- Step 13: controlled backend MVP webhook pipeline closed from a clean repo.
+- Step 14A: Dashboard/API read safety closed.
 
-#### **Stage 1.B: M2 Conversation Engine + M5 Lead Qualification** 🔜 (Next)
-- [ ] M2: AI response generation (Claude integration)
-- [ ] M5: Lead scoring (hot/warm/cold classification)
-- [ ] M6: Relance scheduling (max 3 follow-ups)
+Current recovery constraints:
 
-#### **Stage 1.C: M7 Conversion + Payment Integration** 🔜 (Planned)
-- [ ] Mobile Money payment handling (Orange/Airtel)
-- [ ] Order creation + fulfillment tracking
-- [ ] COD payment flow
+- `AI_ADAPTER=disabled`; no external AI provider is connected.
+- `WHATSAPP_SEND_ENABLED=false`; real WhatsApp outbound is disabled.
+- `celery_beat` remains stopped/exited during recovery validation.
+- Live Baileys inbound remains unresolved as an adapter reliability risk.
+- Production compose/nginx behavior is not validated.
+- Payment, CRM, conversion, relance, and escalation domains are not validated.
 
-#### **Stage 1.D: M8 MAPS Intelligence + M9 Dashboard** 🔜 (Planned)
-- [ ] MAPS metrics aggregation
-- [ ] Escalation system for voice notes
-- [ ] Admin dashboard endpoints (M9)
-
-#### **Stage 1.E: Integration Testing + Security Audit + Pilot** 🔜 (Planned)
-- [ ] End-to-end testing across all modules
-- [ ] Security penetration testing
-- [ ] Pilot deployment to 500 leads
-
-### Phase 2 — Advanced Intelligence (Q3–Q4 2026)
-- Voice note handling, Gemini fallback, MBB HUB/BOX adapters
-
-### Phase 3 — Scale (2027)
-- Kubernetes, multi-city deployment, predictive AI
+Next work should continue as small validated recovery steps. Do not treat older roadmap items or historical runbooks as proof that the project is production-ready, pilot-ready, feature-ready, or fully stabilized.
 
 ---
 

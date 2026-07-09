@@ -5,6 +5,10 @@
 
 ---
 
+> **Recovery status warning:** This runbook is historical and is not current launch guidance. The project remains in recovery/stabilization mode and is not production-ready, pilot-ready, feature-ready, or fully stabilized. Step 13 validated only the controlled backend MVP webhook pipeline, and Step 14A validated Dashboard/API read safety. Live Baileys inbound, real WhatsApp outbound, external AI provider integration, production compose/nginx behavior, and payment/CRM/conversion/relance/escalation domains are not currently validated.
+
+---
+
 ## 1. Pre-Launch Checklist
 
 Complete all items before sending the first pilot message.
