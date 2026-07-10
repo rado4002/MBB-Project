@@ -1,5 +1,6 @@
 # ========== ENVIRONMENT & SECRETS ==========
 .env
+.env.recovery-dryrun
 .env.local
 .env.*.local
 .env.production

@@ -1,0 +1,156 @@
+# MBB ya Kin — isolated recovery runtime dry-run
+#
+# Default phase:
+#   docker compose --env-file .env.recovery-dryrun -f docker-compose.recovery-dryrun.yml up postgres redis api
+#
+# Routing phase:
+#   docker compose --env-file .env.recovery-dryrun -f docker-compose.recovery-dryrun.yml --profile routing up
+#
+# This file is standalone on purpose. It does not load the repository `.env`,
+# does not define Baileys, workers, Beat, monitoring, or backup services, and
+# uses isolated dry-run storage.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - recovery_dryrun_postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    networks:
+      - recovery_dryrun_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server /usr/local/etc/redis/redis.conf
+    volumes:
+      - recovery_dryrun_redis_data:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    networks:
+      - recovery_dryrun_internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2 --timeout-graceful-shutdown 30
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      DEBUG: ${DEBUG:-false}
+      TZ: ${TZ:-Africa/Kinshasa}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      ENABLE_METRICS: ${ENABLE_METRICS:-false}
+      WHATSAPP_MODE: ${WHATSAPP_MODE:-official}
+      AI_ADAPTER: ${AI_ADAPTER:-disabled}
+      WHATSAPP_SEND_ENABLED: ${WHATSAPP_SEND_ENABLED:-false}
+      CRM_SEND_ENABLED: ${CRM_SEND_ENABLED:-false}
+      PAYMENT_SEND_ENABLED: ${PAYMENT_SEND_ENABLED:-false}
+      RELANCE_ENABLED: ${RELANCE_ENABLED:-false}
+      SCHEDULED_TASKS_ENABLED: ${SCHEDULED_TASKS_ENABLED:-false}
+      CRM_ADAPTER: ${CRM_ADAPTER:-airtable}
+      INVENTORY_ADAPTER: ${INVENTORY_ADAPTER:-static}
+      PAYMENT_ADAPTER: ${PAYMENT_ADAPTER:-mobile_money}
+      MESSAGING_ADAPTER: ${MESSAGING_ADAPTER:-whatsapp}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_DB: ${REDIS_DB:-0}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      CELERY_TIMEZONE: ${CELERY_TIMEZONE:-Africa/Kinshasa}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - recovery_dryrun_internal
+    ports:
+      - "8000:8000"
+    expose:
+      - "8000"
+    stop_grace_period: 35s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  dashboard:
+    profiles:
+      - routing
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      DEBUG: ${DEBUG:-false}
+      WHATSAPP_MODE: ${WHATSAPP_MODE:-official}
+      AI_ADAPTER: ${AI_ADAPTER:-disabled}
+      WHATSAPP_SEND_ENABLED: ${WHATSAPP_SEND_ENABLED:-false}
+      CRM_SEND_ENABLED: ${CRM_SEND_ENABLED:-false}
+      PAYMENT_SEND_ENABLED: ${PAYMENT_SEND_ENABLED:-false}
+      RELANCE_ENABLED: ${RELANCE_ENABLED:-false}
+      SCHEDULED_TASKS_ENABLED: ${SCHEDULED_TASKS_ENABLED:-false}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    networks:
+      - recovery_dryrun_internal
+    expose:
+      - "8501"
+
+  nginx:
+    profiles:
+      - routing
+    image: nginx:1.25-alpine
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - recovery_dryrun_nginx_conf:/etc/nginx/conf.d
+      - ./nginx/conf.d/mbb.recovery-dryrun.conf:/etc/nginx/conf.d/mbb.recovery-dryrun.conf:ro
+      - recovery_dryrun_nginx_logs:/var/log/nginx
+    depends_on:
+      api:
+        condition: service_healthy
+      dashboard:
+        condition: service_started
+    networks:
+      - recovery_dryrun_internal
+    ports:
+      - "8080:80"
+
+networks:
+  recovery_dryrun_internal:
+    driver: bridge
+
+volumes:
+  recovery_dryrun_postgres_data:
+  recovery_dryrun_redis_data:
+  recovery_dryrun_nginx_conf:
+  recovery_dryrun_nginx_logs:
