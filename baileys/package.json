@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "WhatsApp bridge for MBB ya Kin — development mode (Baileys)",
   "main": "src/index.js",
+  "scripts": {
+    "test": "node --test test/index.test.js"
+  },
   "engines": {
     "node": ">=20"
   },
