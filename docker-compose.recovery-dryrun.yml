@@ -7,7 +7,7 @@
 #   docker compose --env-file .env.recovery-dryrun -f docker-compose.recovery-dryrun.yml --profile routing up
 #
 # This file is standalone on purpose. It does not load the repository `.env`,
-# does not define Baileys, workers, Beat, monitoring, or backup services, and
+# does not define Baileys, Beat, monitoring, or backup services, and
 # uses isolated dry-run storage.
 
 services:
@@ -125,6 +125,55 @@ services:
       - recovery_dryrun_internal
     expose:
       - "8501"
+
+  celery_worker:
+    profiles:
+      - worker
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: >
+      celery -A app.tasks.celery_app worker
+      --loglevel=info
+      --concurrency=4
+      --queues=default,relance,maps,escalation,conversion
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      DEBUG: ${DEBUG:-false}
+      TZ: ${TZ:-Africa/Kinshasa}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      ENABLE_METRICS: ${ENABLE_METRICS:-false}
+      WHATSAPP_MODE: ${WHATSAPP_MODE:-official}
+      AI_ADAPTER: ${AI_ADAPTER:-disabled}
+      WHATSAPP_SEND_ENABLED: ${WHATSAPP_SEND_ENABLED:-false}
+      CRM_SEND_ENABLED: ${CRM_SEND_ENABLED:-false}
+      PAYMENT_SEND_ENABLED: ${PAYMENT_SEND_ENABLED:-false}
+      RELANCE_ENABLED: ${RELANCE_ENABLED:-false}
+      SCHEDULED_TASKS_ENABLED: ${SCHEDULED_TASKS_ENABLED:-false}
+      CRM_ADAPTER: ${CRM_ADAPTER:-airtable}
+      INVENTORY_ADAPTER: ${INVENTORY_ADAPTER:-static}
+      PAYMENT_ADAPTER: ${PAYMENT_ADAPTER:-mobile_money}
+      MESSAGING_ADAPTER: ${MESSAGING_ADAPTER:-whatsapp}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_DB: ${REDIS_DB:-0}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      CELERY_TIMEZONE: ${CELERY_TIMEZONE:-Africa/Kinshasa}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    networks:
+      - recovery_dryrun_internal
 
   nginx:
     profiles:
