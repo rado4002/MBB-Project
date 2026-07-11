@@ -1,4 +1,5 @@
 import inspect
+import importlib.util
 import sys
 import unittest
 import uuid
@@ -87,7 +88,11 @@ class SchemaModelMigrationTests(unittest.TestCase):
         source = MIGRATION_PATH.read_text()
         self.assertIn('down_revision: Union[str, None] = "c7d8e9f0a1b2"', source)
         self.assertIn("HAVING COUNT(*) > 1", source)
-        self.assertIn("manual review is required", source)
+        self.assertIn("COUNT(*) AS duplicate_group_count", source)
+        self.assertIn("COALESCE(SUM(row_count - 1), 0) AS excess_row_count", source)
+        self.assertIn("duplicate_counts.duplicate_group_count", source)
+        self.assertIn("duplicate_counts.excess_row_count", source)
+        self.assertIn("excess rows require manual review", source)
         self.assertIn("op.create_index(", source)
         self.assertIn("unique=True", source)
         self.assertIn(WHATSAPP_ID_INDEX, source)
@@ -97,6 +102,32 @@ class SchemaModelMigrationTests(unittest.TestCase):
         lowered = source.lower()
         self.assertNotIn(" delete ", lowered)
         self.assertNotIn(" update ", lowered)
+
+    def test_migration_preflight_reports_aggregate_counts_and_aborts(self):
+        counts = SimpleNamespace(duplicate_group_count=2, excess_row_count=3)
+        execute_result = SimpleNamespace(one=Mock(return_value=counts))
+        bind = SimpleNamespace(execute=Mock(return_value=execute_result))
+        migration_op = SimpleNamespace(
+            get_bind=Mock(return_value=bind),
+            create_index=Mock(),
+            drop_index=Mock(),
+        )
+        alembic_module = ModuleType("alembic")
+        alembic_module.op = migration_op
+        spec = importlib.util.spec_from_file_location("dedup_migration", MIGRATION_PATH)
+        migration = importlib.util.module_from_spec(spec)
+
+        with patch.dict(sys.modules, {"alembic": alembic_module}):
+            spec.loader.exec_module(migration)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"2 duplicate inbound WhatsApp ID groups and 3 excess rows require manual review",
+        ):
+            migration.upgrade()
+
+        bind.execute.assert_called_once()
+        migration_op.create_index.assert_not_called()
 
 
 class _ScalarResult:

@@ -23,20 +23,25 @@ INDEX_PREDICATE = (
 
 
 def upgrade() -> None:
-    duplicate = op.get_bind().execute(sa.text("""
-        SELECT whatsapp_message_id
-        FROM mbb.messages
-        WHERE direction = 'inbound'
-          AND whatsapp_message_id IS NOT NULL
-          AND btrim(whatsapp_message_id) <> ''
-        GROUP BY whatsapp_message_id
-        HAVING COUNT(*) > 1
-        LIMIT 1
-    """)).first()
-    if duplicate is not None:
+    duplicate_counts = op.get_bind().execute(sa.text("""
+        SELECT
+            COUNT(*) AS duplicate_group_count,
+            COALESCE(SUM(row_count - 1), 0) AS excess_row_count
+        FROM (
+            SELECT COUNT(*) AS row_count
+            FROM mbb.messages
+            WHERE direction = 'inbound'
+              AND whatsapp_message_id IS NOT NULL
+              AND btrim(whatsapp_message_id) <> ''
+            GROUP BY whatsapp_message_id
+            HAVING COUNT(*) > 1
+        ) AS duplicate_groups
+    """)).one()
+    if duplicate_counts.duplicate_group_count:
         raise RuntimeError(
-            "Duplicate non-empty inbound WhatsApp message IDs exist; "
-            "manual review is required before migration"
+            f"Cannot create {INDEX_NAME}: "
+            f"{duplicate_counts.duplicate_group_count} duplicate inbound WhatsApp ID groups "
+            f"and {duplicate_counts.excess_row_count} excess rows require manual review."
         )
 
     op.create_index(
