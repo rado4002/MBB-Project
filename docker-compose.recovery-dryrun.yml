@@ -134,10 +134,10 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     command: >
-      celery -A app.tasks.celery_app worker
+      celery -A app.tasks.celery_app:celery_app worker
       --loglevel=info
-      --concurrency=4
-      --queues=default,relance,maps,escalation,conversion
+      --concurrency=1
+      --queues=default
     environment:
       APP_ENV: ${APP_ENV:-production}
       DEBUG: ${DEBUG:-false}
@@ -170,8 +170,6 @@ services:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      api:
         condition: service_healthy
     networks:
       - recovery_dryrun_internal
