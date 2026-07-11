@@ -176,6 +176,19 @@ services:
     networks:
       - recovery_dryrun_internal
 
+  baileys_offline:
+    profiles:
+      - baileys-offline
+    build:
+      context: ./baileys
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      BAILEYS_CONNECT_ENABLED: "false"
+      WHATSAPP_SEND_ENABLED: "false"
+    network_mode: none
+
   nginx:
     profiles:
       - routing
