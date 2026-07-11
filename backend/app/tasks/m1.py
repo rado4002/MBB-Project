@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 import structlog
 from celery import Task
+from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
 from app.i18n.messages import t
@@ -21,11 +22,46 @@ from app.tasks.celery_app import celery_app, run_async
 log = structlog.get_logger(__name__)
 settings = get_settings()
 
+_INBOUND_WHATSAPP_UNIQUE_INDEX = "uq_messages_inbound_whatsapp_message_id"
+
 
 class _BaseTask(Task):
     abstract = True
     max_retries = 3
     default_retry_delay = 30
+
+
+def _integrity_constraint_name(exc: IntegrityError) -> str | None:
+    """Extract a PostgreSQL constraint name without classifying other errors."""
+    original = exc.orig
+    for candidate in (original, getattr(original, "__cause__", None)):
+        name = getattr(candidate, "constraint_name", None)
+        if name:
+            return name
+        diagnostic = getattr(candidate, "diag", None)
+        name = getattr(diagnostic, "constraint_name", None)
+        if name:
+            return name
+    return None
+
+
+async def _duplicate_result(session, whatsapp_message_id: str) -> dict:
+    from app.models.message import Message
+    from sqlalchemy import select
+
+    result = await session.execute(
+        select(Message).where(
+            Message.direction == "inbound",
+            Message.whatsapp_message_id == whatsapp_message_id,
+        )
+    )
+    existing = result.scalar_one_or_none()
+    return {
+        "status": "duplicate_ignored",
+        "whatsapp_message_id": whatsapp_message_id,
+        "existing_message_id": str(existing.message_id) if existing else None,
+        "conversation_id": str(existing.conversation_id) if existing else None,
+    }
 
 
 def _dispatch_maps_fanout(*, conversation_id: str, message_id: str, content: str,
@@ -129,7 +165,25 @@ async def _process(
                 whatsapp_message_id=whatsapp_message_id,
                 message_id=msg_uuid,
             )
+            if inbound.is_duplicate:
+                await session.rollback()
+                return {
+                    "status": "duplicate_ignored",
+                    "whatsapp_message_id": whatsapp_message_id,
+                    "existing_message_id": (
+                        str(inbound.existing_message_id)
+                        if inbound.existing_message_id else None
+                    ),
+                    "conversation_id": str(inbound.conversation_id),
+                }
             await session.commit()
+        except IntegrityError as exc:
+            await session.rollback()
+            if _integrity_constraint_name(exc) == _INBOUND_WHATSAPP_UNIQUE_INDEX:
+                log.info("m1.inbound_duplicate_conflict", wa_id=whatsapp_message_id)
+                return await _duplicate_result(session, whatsapp_message_id)
+            log.error("m1.process_inbound.integrity_error", error_type=type(exc).__name__)
+            raise task.retry(exc=exc, countdown=2 ** task.request.retries * 30)
         except Exception as exc:
             await session.rollback()
             log.error("m1.process_inbound.error", phone=customer_phone, error=str(exc))

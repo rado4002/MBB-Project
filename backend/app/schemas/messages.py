@@ -10,13 +10,19 @@ from app.schemas.common import ContentType, Language
 _DRC_PHONE_RE = re.compile(r"^\+243[0-9]{9}$")
 
 
+def validate_whatsapp_message_id_value(value: str) -> str:
+    if not value.strip() or value != value.strip():
+        raise ValueError("WhatsApp message ID must be non-empty without surrounding whitespace")
+    return value
+
+
 class InboundMessageRequest(BaseModel):
     message_id: uuid.UUID
     customer_phone: str = Field(..., description="DRC E.164 phone: +243XXXXXXXXX")
     content: str = Field(..., min_length=1, max_length=4096)
     content_type: ContentType
     timestamp: datetime
-    whatsapp_message_id: str = Field(..., max_length=100)
+    whatsapp_message_id: str = Field(..., min_length=1, max_length=100)
 
     @field_validator("customer_phone")
     @classmethod
@@ -24,6 +30,11 @@ class InboundMessageRequest(BaseModel):
         if not _DRC_PHONE_RE.match(v):
             raise ValueError("Phone must be DRC E.164 format: +243XXXXXXXXX")
         return v
+
+    @field_validator("whatsapp_message_id")
+    @classmethod
+    def validate_whatsapp_message_id(cls, v: str) -> str:
+        return validate_whatsapp_message_id_value(v)
 
     @field_validator("timestamp")
     @classmethod

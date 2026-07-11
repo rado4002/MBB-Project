@@ -23,6 +23,15 @@ class Message(Base):
         Index("idx_msg_timestamp", "timestamp"),
         Index("idx_msg_direction", "direction"),
         Index(
+            "uq_messages_inbound_whatsapp_message_id",
+            "whatsapp_message_id",
+            unique=True,
+            postgresql_where=text(
+                "direction = 'inbound' AND whatsapp_message_id IS NOT NULL "
+                "AND btrim(whatsapp_message_id) <> ''"
+            ),
+        ),
+        Index(
             "idx_msg_content_type",
             "content_type",
             postgresql_where=text("content_type != 'text'"),

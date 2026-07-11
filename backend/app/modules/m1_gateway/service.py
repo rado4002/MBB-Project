@@ -45,6 +45,8 @@ class ProcessedInbound:
     is_opted_out: bool = False
     is_voice_note: bool = False
     requires_escalation: bool = False
+    is_duplicate: bool = False
+    existing_message_id: uuid.UUID | None = None
     whatsapp_message_id: str = ""
     content: str = ""
     extra: dict = field(default_factory=dict)
@@ -65,6 +67,28 @@ async def process_inbound(
     detect language, persist inbound message, return structured result.
     """
     now = datetime.now(timezone.utc)
+
+    # Fast duplicate path before any customer or conversation mutation. The
+    # database unique index remains authoritative for concurrent deliveries.
+    existing_result = await session.execute(
+        select(Message).where(
+            Message.direction == "inbound",
+            Message.whatsapp_message_id == whatsapp_message_id,
+        )
+    )
+    existing_message = existing_result.scalar_one_or_none()
+    if existing_message is not None:
+        log.info("m1.inbound_duplicate_existing", wa_id=whatsapp_message_id)
+        return ProcessedInbound(
+            customer_phone=customer_phone,
+            conversation_id=existing_message.conversation_id,
+            message_id=message_id,
+            language=existing_message.language,
+            is_duplicate=True,
+            existing_message_id=existing_message.message_id,
+            whatsapp_message_id=whatsapp_message_id,
+            content=content,
+        )
 
     # ── 1. Customer upsert ────────────────────────────────────────────────────
     stmt = pg_insert(Customer).values(
@@ -92,19 +116,10 @@ async def process_inbound(
     # ── 2. Opt-out guard ──────────────────────────────────────────────────────
     # Check both DB flag and content of this message
     message_has_opt_out = is_opt_out(content)
+    inbound_is_opted_out = customer.opt_out_flag or message_has_opt_out
     if customer.opt_out_flag:
         log.info("m1.opted_out_blocked", phone=customer_phone)
-        return ProcessedInbound(
-            customer_phone=customer_phone,
-            conversation_id=uuid.uuid4(),  # dummy — won't be used
-            message_id=message_id,
-            language=customer.preferred_language,
-            is_opted_out=True,
-            content=content,
-            whatsapp_message_id=whatsapp_message_id,
-        )
-
-    if message_has_opt_out:
+    elif message_has_opt_out:
         # Immediately set opt-out flag in DB
         await session.execute(
             update(Customer)
@@ -129,15 +144,6 @@ async def process_inbound(
             total_cancelled += cancelled_count
         
         log.info("m1.opt_out_registered", phone=customer_phone, relances_cancelled=total_cancelled)
-        return ProcessedInbound(
-            customer_phone=customer_phone,
-            conversation_id=uuid.uuid4(),  # dummy
-            message_id=message_id,
-            language=customer.preferred_language,
-            is_opted_out=True,
-            content=content,
-            whatsapp_message_id=whatsapp_message_id,
-        )
 
     # ── 3. Load or create active conversation ─────────────────────────────────
     conv_result = await session.execute(
@@ -226,6 +232,7 @@ async def process_inbound(
         conversation_id=conversation.conversation_id,
         message_id=message_id,
         language=language,
+        is_opted_out=inbound_is_opted_out,
         is_voice_note=is_voice,
         requires_escalation=is_voice,
         content=content,

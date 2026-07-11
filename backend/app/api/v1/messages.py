@@ -31,6 +31,7 @@ from app.schemas.messages import (
     InboundMessageRequest,
     MessageHistoryResponse,
     QueuedMessageResponse,
+    validate_whatsapp_message_id_value,
 )
 
 log = structlog.get_logger()
@@ -147,7 +148,7 @@ class BaileysWebhookPayload(BaseModel):
     content: str = Field(..., min_length=1, max_length=4096)
     content_type: str = Field(default="text")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    whatsapp_message_id: str = Field(..., max_length=100)
+    whatsapp_message_id: str = Field(..., min_length=1, max_length=100)
 
     @field_validator("customer_phone")
     @classmethod
@@ -155,6 +156,11 @@ class BaileysWebhookPayload(BaseModel):
         if not _DRC_PHONE_RE.match(v):
             raise ValueError("Phone must be DRC E.164 format: +243XXXXXXXXX")
         return v
+
+    @field_validator("whatsapp_message_id")
+    @classmethod
+    def validate_whatsapp_message_id(cls, v: str) -> str:
+        return validate_whatsapp_message_id_value(v)
 
     def to_inbound_request(self) -> InboundMessageRequest:
         from app.schemas.common import ContentType
