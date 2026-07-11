@@ -129,17 +129,12 @@ function safeErrorType(error) {
   return error?.name || error?.code || "unknown_error";
 }
 
-function logSkippedInbound(message, identity) {
-  log.info({
-    event_type: "messages.upsert",
-    jid_domain: identity.jidDomain,
-    identity_source: null,
-    identity_resolved: false,
-    content_type: messageContentType(message),
-    message_present: Boolean(message?.message),
-    message_key_count: messageKeyCount(message),
-    skip_reason: identity.skipReason,
-  }, "inbound_message_skipped");
+function logSkippedInbound(identity) {
+  log.info({ skip_reason: identity.skipReason }, "inbound_message_skipped");
+}
+
+function logInvalidInbound(skipReason) {
+  log.info({ skip_reason: skipReason }, "inbound_message_skipped");
 }
 
 async function handleSend(req, res) {
@@ -184,74 +179,141 @@ async function handleSend(req, res) {
   }
 }
 
-async function handleInboundUpsert({ messages = [], type }, postWebhook = axios.post) {
+async function handleInboundUpsert(event, postWebhook = axios.post) {
   if (!isBaileysConnectEnabled()) {
     log.info({ connection_enabled: false }, "inbound_skipped_connection_disabled");
+    return;
+  }
+  if (!event || typeof event !== "object" || Array.isArray(event)) {
+    logInvalidInbound("invalid_upsert_event");
+    return;
+  }
+
+  const { messages, type } = event;
+  if (!Array.isArray(messages)) {
+    logInvalidInbound("invalid_messages_array");
     return;
   }
   if (type !== "notify") return;
 
   for (const msg of messages) {
-    const identity = resolveInboundIdentity(msg);
-    if (identity.skipReason) {
-      logSkippedInbound(msg, identity);
-      continue;
-    }
+    try {
+      if (!msg || typeof msg !== "object" || Array.isArray(msg)) {
+        logInvalidInbound("invalid_message_entry");
+        continue;
+      }
+      if (!msg.key || typeof msg.key !== "object" || Array.isArray(msg.key)) {
+        logInvalidInbound("invalid_message_key");
+        continue;
+      }
+      if (typeof msg.key.id !== "string" || !msg.key.id.trim()) {
+        logInvalidInbound("invalid_message_id");
+        continue;
+      }
 
-    const text =
-      msg.message?.conversation ||
-      msg.message?.extendedTextMessage?.text ||
-      null;
-    const msgType = messageContentType(msg);
-    const payload = {
-      customer_phone: identity.phone,
-      whatsapp_message_id: msg.key.id,
-      content: text ?? "",
-      content_type: msgType,
-      timestamp: new Date(Number(msg.messageTimestamp) * 1000).toISOString(),
-    };
+      const identity = resolveInboundIdentity(msg);
+      if (identity.skipReason) {
+        logSkippedInbound(identity);
+        continue;
+      }
 
-    log.info({
-      event_type: "messages.upsert",
-      jid_domain: identity.jidDomain,
-      identity_source: identity.source,
-      identity_resolved: true,
-      content_type: msgType,
-      message_present: Boolean(msg.message),
-      message_key_count: messageKeyCount(msg),
-    }, "inbound_message");
+      const conversation = msg.message?.conversation;
+      const extendedText = msg.message?.extendedTextMessage?.text;
+      const text = typeof conversation === "string"
+        ? conversation
+        : typeof extendedText === "string" ? extendedText : null;
+      if (text === null) {
+        logInvalidInbound("unsupported_message_content");
+        continue;
+      }
+      if (!text.trim()) {
+        logInvalidInbound("empty_text_content");
+        continue;
+      }
 
-    const headers = { "Content-Type": "application/json" };
-    if (WEBHOOK_SECRET) headers["X-Webhook-Secret"] = WEBHOOK_SECRET;
-
-    let attempt = 0;
-    while (attempt < 3) {
+      if (msg.messageTimestamp === null || msg.messageTimestamp === undefined) {
+        logInvalidInbound("invalid_message_timestamp");
+        continue;
+      }
+      const timestampMs = Number(msg.messageTimestamp) * 1000;
+      if (!Number.isFinite(timestampMs)) {
+        logInvalidInbound("invalid_message_timestamp");
+        continue;
+      }
+      let timestamp;
       try {
-        await postWebhook(FASTAPI_WEBHOOK_URL, payload, {
-          timeout: 8000,
-          headers,
-        });
-        break;
-      } catch (err) {
-        attempt++;
-        log.warn({
-          attempt,
-          status_category: safeStatusCategory(err),
-          identity_source: identity.source,
-          jid_domain: identity.jidDomain,
-        }, "fastapi_forward_failed");
-        if (attempt < 3) {
-          await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
-        } else {
-          log.error({
+        timestamp = new Date(timestampMs).toISOString();
+      } catch {
+        logInvalidInbound("invalid_message_timestamp");
+        continue;
+      }
+
+      const payload = {
+        customer_phone: identity.phone,
+        whatsapp_message_id: msg.key.id,
+        content: text,
+        content_type: "text",
+        timestamp,
+      };
+
+      log.info({
+        event_type: "messages.upsert",
+        jid_domain: identity.jidDomain,
+        identity_source: identity.source,
+        identity_resolved: true,
+        content_type: "text",
+        message_present: true,
+        message_key_count: messageKeyCount(msg),
+      }, "inbound_message");
+
+      const headers = { "Content-Type": "application/json" };
+      if (WEBHOOK_SECRET) headers["X-Webhook-Secret"] = WEBHOOK_SECRET;
+
+      let attempt = 0;
+      while (attempt < 3) {
+        try {
+          await postWebhook(FASTAPI_WEBHOOK_URL, payload, {
+            timeout: 8000,
+            headers,
+          });
+          break;
+        } catch (err) {
+          attempt++;
+          log.warn({
+            attempt,
+            status_category: safeStatusCategory(err),
             identity_source: identity.source,
             jid_domain: identity.jidDomain,
-            status_category: safeStatusCategory(err),
-          }, "fastapi_forward_exhausted");
+          }, "fastapi_forward_failed");
+          if (attempt < 3) {
+            await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
+          } else {
+            log.error({
+              identity_source: identity.source,
+              jid_domain: identity.jidDomain,
+              status_category: safeStatusCategory(err),
+            }, "fastapi_forward_exhausted");
+          }
         }
       }
+    } catch (err) {
+      log.error({
+        skip_reason: "inbound_message_error",
+        error_type: safeErrorType(err),
+      }, "inbound_message_skipped");
     }
   }
+}
+
+function handleMessagesUpsertEvent(event, handler = handleInboundUpsert) {
+  void Promise.resolve()
+    .then(() => handler(event))
+    .catch((err) => {
+      log.error({
+        skip_reason: "inbound_handler_rejected",
+        error_type: safeErrorType(err),
+      }, "inbound_handler_failed");
+    });
 }
 
 // ── Express server (send-message API + health) ────────────────────────────────
@@ -592,7 +654,7 @@ async function connectToWhatsApp() {
   sock.ev.on("creds.update", saveCreds);
 
   // ── Inbound Message Handler ─────────────────────────────────────────────────
-  sock.ev.on("messages.upsert", async (event) => handleInboundUpsert(event));
+  sock.ev.on("messages.upsert", (event) => handleMessagesUpsertEvent(event));
 }
 
 function startBridge({
@@ -629,6 +691,7 @@ module.exports = {
   app,
   connectToWhatsApp,
   handleInboundUpsert,
+  handleMessagesUpsertEvent,
   handleSend,
   isBaileysConnectEnabled,
   jidDomain,

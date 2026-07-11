@@ -316,6 +316,143 @@ test("never forwards unresolved LID and logs only redacted diagnostics", async (
   assert.match(serializedLogs, /from_me/);
 });
 
+test("malformed upsert events are skipped without webhook calls", async () => {
+  const cases = [
+    null,
+    42,
+    "invalid",
+    {},
+    { type: "notify" },
+    { type: "notify", messages: {} },
+    { type: "notify", messages: [] },
+  ];
+  let webhookCalls = 0;
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+  try {
+    for (const event of cases) {
+      await assert.doesNotReject(() => bridge.handleInboundUpsert(
+        event,
+        async () => { webhookCalls += 1; }
+      ));
+    }
+  } finally {
+    process.env.BAILEYS_CONNECT_ENABLED = "false";
+  }
+  assert.equal(webhookCalls, 0);
+});
+
+test("malformed and unsupported messages are skipped locally", async () => {
+  const validBase = message("243812345678@s.whatsapp.net");
+  const cases = [
+    null,
+    { ...validBase, key: undefined },
+    { ...validBase, key: { remoteJid: validBase.key.remoteJid } },
+    { ...validBase, key: { ...validBase.key, id: "" } },
+    message(undefined),
+    message("123456789@lid"),
+    { ...validBase, message: undefined },
+    { ...validBase, message: { audioMessage: {} } },
+    { ...validBase, message: { imageMessage: {} } },
+    { ...validBase, message: { protocolMessage: {} } },
+    { ...validBase, message: { conversation: "" } },
+    { ...validBase, message: { extendedTextMessage: { text: "   " } } },
+    { ...validBase, messageTimestamp: undefined },
+    { ...validBase, messageTimestamp: "not-a-timestamp" },
+    { ...validBase, messageTimestamp: Number.MAX_VALUE },
+  ];
+  let webhookCalls = 0;
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+  try {
+    for (const malformed of cases) {
+      await assert.doesNotReject(() => bridge.handleInboundUpsert({
+        type: "notify",
+        messages: [malformed],
+      }, async () => { webhookCalls += 1; }));
+    }
+  } finally {
+    process.env.BAILEYS_CONNECT_ENABLED = "false";
+  }
+  assert.equal(webhookCalls, 0);
+});
+
+test("mixed batch skips malformed entries and forwards valid plain text once", async () => {
+  const calls = [];
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+  try {
+    await bridge.handleInboundUpsert({
+      type: "notify",
+      messages: [
+        null,
+        { key: {}, message: { conversation: "secret malformed text" } },
+        message("243812345678@s.whatsapp.net"),
+        { ...message("243812345678@s.whatsapp.net"), message: { audioMessage: {} } },
+      ],
+    }, async (...args) => { calls.push(args); });
+  } finally {
+    process.env.BAILEYS_CONNECT_ENABLED = "false";
+  }
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][1].customer_phone, "+243812345678");
+  assert.equal(calls[0][1].whatsapp_message_id, "message-id");
+  assert.equal(calls[0][1].content, "private message text");
+  assert.equal(calls[0][1].content_type, "text");
+  assert.equal(calls[0][1].timestamp, "2024-03-09T16:00:00.000Z");
+});
+
+test("extended text remains supported", async () => {
+  const calls = [];
+  const extended = message("243812345678@s.whatsapp.net");
+  extended.message = { extendedTextMessage: { text: "supported extended text" } };
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+  try {
+    await bridge.handleInboundUpsert({ type: "notify", messages: [extended] },
+      async (...args) => { calls.push(args); });
+  } finally {
+    process.env.BAILEYS_CONNECT_ENABLED = "false";
+  }
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][1].content, "supported extended text");
+});
+
+test("listener wrapper catches rejected handler promises with redacted logs", async () => {
+  const firstLog = logs.length;
+  bridge.handleMessagesUpsertEvent(
+    { privatePayload: "listener-sensitive-payload" },
+    async () => { throw new Error("listener-sensitive-error"); }
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const serializedLogs = JSON.stringify(logs.slice(firstLog));
+  assert.match(serializedLogs, /inbound_handler_rejected/);
+  assert.equal(serializedLogs.includes("listener-sensitive-payload"), false);
+  assert.equal(serializedLogs.includes("listener-sensitive-error"), false);
+});
+
+test("malformed inbound diagnostics contain no sensitive values", async () => {
+  const firstLog = logs.length;
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+  try {
+    await bridge.handleInboundUpsert({
+      type: "notify",
+      messages: [{
+        key: { remoteJid: "243899999999@s.whatsapp.net", id: "" },
+        message: { conversation: "sensitive malformed content" },
+        messageTimestamp: 1710000000,
+      }],
+    }, async () => assert.fail("malformed message must not reach webhook"));
+  } finally {
+    process.env.BAILEYS_CONNECT_ENABLED = "false";
+  }
+
+  const serializedLogs = JSON.stringify(logs.slice(firstLog));
+  assert.equal(serializedLogs.includes("243899999999"), false);
+  assert.equal(serializedLogs.includes("sensitive malformed content"), false);
+  assert.equal(serializedLogs.includes("@s.whatsapp.net"), false);
+  assert.equal(serializedLogs.includes("test-webhook-secret"), false);
+  assert.match(serializedLogs, /invalid_message_id/);
+});
+
 test("forwards an authoritative international identity unchanged", async () => {
   const calls = [];
   process.env.BAILEYS_CONNECT_ENABLED = "true";
