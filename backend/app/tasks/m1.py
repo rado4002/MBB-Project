@@ -14,16 +14,40 @@ from datetime import datetime, timezone
 import structlog
 from celery import Task
 
+from app.config import get_settings
 from app.i18n.messages import t
 from app.tasks.celery_app import celery_app, run_async
 
 log = structlog.get_logger(__name__)
+settings = get_settings()
 
 
 class _BaseTask(Task):
     abstract = True
     max_retries = 3
     default_retry_delay = 30
+
+
+def _dispatch_maps_fanout(*, conversation_id: str, message_id: str, content: str,
+                          language: str, content_type: str) -> None:
+    if not settings.m1_maps_fanout_enabled:
+        log.info("m1.maps_fanout_skipped_safety_gate")
+        return
+
+    celery_app.send_task(
+        "app.tasks.maps.tag_event",
+        kwargs={
+            "conversation_id": conversation_id,
+            "event_type": "inbound_message",
+            "payload": {
+                "message_id": message_id,
+                "content": content[:200],
+                "language": language,
+                "content_type": content_type,
+            },
+        },
+        queue="maps",
+    )
 
 
 # ── Main processing task ──────────────────────────────────────────────────────
@@ -191,19 +215,12 @@ async def _process(
 
         # ── Step 8: Dispatch MAPS tag generation ──────────────────────────────
         try:
-            celery_app.send_task(
-                "app.tasks.maps.tag_event",
-                kwargs={
-                    "conversation_id": conv_id,
-                    "event_type": "inbound_message",
-                    "payload": {
-                        "message_id": str(msg_uuid),
-                        "content": content[:200],
-                        "language": language,
-                        "content_type": content_type,
-                    },
-                },
-                queue="maps",
+            _dispatch_maps_fanout(
+                conversation_id=conv_id,
+                message_id=str(msg_uuid),
+                content=content,
+                language=language,
+                content_type=content_type,
             )
         except Exception as exc:
             log.warning("m1.maps_dispatch.failed", conv_id=conv_id, error=str(exc))

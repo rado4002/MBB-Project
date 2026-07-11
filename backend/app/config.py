@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     payment_send_enabled: bool = False      # safety gate for payment provider calls
     relance_enabled: bool = False           # safety gate for relance scheduling/sends
     scheduled_tasks_enabled: bool = False   # safety gate for Celery beat schedules
+    m1_maps_fanout_enabled: bool = True     # safety gate for M1 MAPS task submission
 
     # ── Adapters ──────────────────────────────────────────────────────────────
     ai_adapter: str = "disabled"
