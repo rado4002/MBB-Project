@@ -21,9 +21,6 @@ RUN git config --global url."https://github.com/".insteadOf "ssh://git@github.co
 
 COPY src/ ./src/
 
-# Session data volume
-VOLUME ["/app/sessions"]
-
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
     CMD wget -qO- http://localhost:3000/health || exit 1
 
