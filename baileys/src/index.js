@@ -116,6 +116,10 @@ function isWhatsAppSendEnabled() {
   return String(process.env.WHATSAPP_SEND_ENABLED || "false").toLowerCase() === "true";
 }
 
+function isBaileysConnectEnabled() {
+  return String(process.env.BAILEYS_CONNECT_ENABLED || "true").toLowerCase() !== "false";
+}
+
 function safeStatusCategory(error) {
   const status = error?.response?.status;
   return Number.isInteger(status) ? Math.floor(status / 100) * 100 : "unknown";
@@ -152,6 +156,14 @@ async function handleSend(req, res) {
       reason: "whatsapp_send_disabled",
     });
   }
+  if (!isBaileysConnectEnabled()) {
+    log.warn({ connection_enabled: false }, "send_skipped_connection_disabled");
+    return res.status(200).json({
+      success: false,
+      skipped: true,
+      reason: "baileys_connect_disabled",
+    });
+  }
   if (!sock?.user || isReconnecting) {
     return res.status(503).json({ error: "WhatsApp not connected" });
   }
@@ -173,6 +185,10 @@ async function handleSend(req, res) {
 }
 
 async function handleInboundUpsert({ messages = [], type }, postWebhook = axios.post) {
+  if (!isBaileysConnectEnabled()) {
+    log.info({ connection_enabled: false }, "inbound_skipped_connection_disabled");
+    return;
+  }
   if (type !== "notify") return;
 
   for (const msg of messages) {
@@ -251,6 +267,7 @@ let isReconnecting = false;
  * Root endpoint — service info and connection status.
  */
 app.get("/", (req, res) => {
+  const connectionEnabled = isBaileysConnectEnabled();
   res.json({
     service: "MBB ya Kin — Baileys WhatsApp Bridge",
     status: "running",
@@ -263,8 +280,9 @@ app.get("/", (req, res) => {
       logout: "POST /logout",
     },
     whatsapp: {
-      connected: sock?.user != null,
-      jid: sock?.user?.id ?? null,
+      connection_enabled: connectionEnabled,
+      connected: connectionEnabled && sock?.user != null,
+      jid: connectionEnabled ? sock?.user?.id ?? null : null,
     },
   });
 });
@@ -273,10 +291,12 @@ app.get("/", (req, res) => {
  * Health endpoint — used by Docker healthcheck and FastAPI adapter.
  */
 app.get("/health", (req, res) => {
+  const connectionEnabled = isBaileysConnectEnabled();
   res.json({
     status: "ok",
-    connected: sock?.user != null,
-    jid: sock?.user?.id ?? null,
+    connection_enabled: connectionEnabled,
+    connected: connectionEnabled && sock?.user != null,
+    jid: connectionEnabled ? sock?.user?.id ?? null : null,
   });
 });
 
@@ -290,7 +310,18 @@ app.post("/send", handleSend);
 
 // QR status — polled by the dashboard SPA every 10 s
 app.get("/qr.json", async (req, res) => {
+  if (!isBaileysConnectEnabled()) {
+    return res.json({
+      connection_enabled: false,
+      connected: false,
+      jid: null,
+      ts: 0,
+      qrDataUrl: null,
+    });
+  }
+
   const payload = {
+    connection_enabled: true,
     connected: sock?.user != null,
     jid: sock?.user?.id ?? null,
     ts: qrTimestamp,
@@ -312,6 +343,9 @@ app.get("/qr.json", async (req, res) => {
 // Live QR dashboard — open http://localhost:3000/qr in a browser
 app.get("/qr", (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
+  if (!isBaileysConnectEnabled()) {
+    return res.send("<!DOCTYPE html><html><body><p>WhatsApp connection is disabled.</p></body></html>");
+  }
   res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -420,6 +454,14 @@ app.get("/qr", (req, res) => {
  * Logout endpoint — disconnect WhatsApp and clear session.
  */
 app.post("/logout", async (req, res) => {
+  if (!isBaileysConnectEnabled()) {
+    return res.status(200).json({
+      success: false,
+      skipped: true,
+      reason: "baileys_connect_disabled",
+    });
+  }
+
   if (!sock) {
     return res.status(400).json({ error: "No active WhatsApp connection" });
   }
@@ -496,6 +538,11 @@ async function fetchVersionWithRetry(maxAttempts = 3, timeoutMs = 10000) {
 
 // ── WhatsApp Connection ───────────────────────────────────────────────────────
 async function connectToWhatsApp() {
+  if (!isBaileysConnectEnabled()) {
+    log.info({ connection_enabled: false }, "baileys_connection_disabled");
+    return;
+  }
+
   const { state, saveCreds } = await useMultiFileAuthState(SESSIONS_DIR);
 
   // Fetch latest WA Web version (with timeout + retry for VPN resilience)
@@ -548,15 +595,29 @@ async function connectToWhatsApp() {
   sock.ev.on("messages.upsert", async (event) => handleInboundUpsert(event));
 }
 
-if (require.main === module) {
-  app.listen(PORT, () => {
+function startBridge({
+  listen = () => app.listen(PORT, () => {
     log.info({ port: PORT }, "baileys_bridge_listening");
-  });
+  }),
+  connect = connectToWhatsApp,
+  exit = (code) => process.exit(code),
+} = {}) {
+  listen();
 
-  connectToWhatsApp().catch((err) => {
+  if (!isBaileysConnectEnabled()) {
+    log.info({ connection_enabled: false }, "baileys_connection_disabled");
+    return Promise.resolve(false);
+  }
+
+  return Promise.resolve().then(connect).then(() => true).catch((err) => {
     log.error({ error_type: err?.name || "initialization_failed" }, "fatal_baileys_init_error");
-    process.exit(1);
+    exit(1);
+    return false;
   });
+}
+
+if (require.main === module) {
+  startBridge();
 }
 
 function setSocketForTests(nextSocket) {
@@ -566,10 +627,13 @@ function setSocketForTests(nextSocket) {
 
 module.exports = {
   app,
+  connectToWhatsApp,
   handleInboundUpsert,
   handleSend,
+  isBaileysConnectEnabled,
   jidDomain,
   normalizePnJid,
   resolveInboundIdentity,
   setSocketForTests,
+  startBridge,
 };

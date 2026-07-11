@@ -5,6 +5,8 @@ const { test, after } = require("node:test");
 const Module = require("node:module");
 
 const logs = [];
+const routes = { get: {}, post: {} };
+const dependencyCalls = { auth: 0, version: 0, socket: 0, saveCreds: 0 };
 const originalLoad = Module._load;
 
 function fakeLogger() {
@@ -18,8 +20,8 @@ function fakeLogger() {
 function fakeExpress() {
   return {
     use() {},
-    get() {},
-    post() {},
+    get(path, handler) { routes.get[path] = handler; },
+    post(path, handler) { routes.post[path] = handler; },
     listen() {},
   };
 }
@@ -30,9 +32,21 @@ Module._load = function load(request, parent, isMain) {
   if (request === "@whiskeysockets/baileys") {
     return {
       DisconnectReason: { loggedOut: 401 },
-      fetchLatestWaWebVersion: async () => ({ version: [1, 1, 1] }),
-      makeWASocket: () => ({}),
-      useMultiFileAuthState: async () => ({ state: {}, saveCreds() {} }),
+      fetchLatestWaWebVersion: async () => {
+        dependencyCalls.version += 1;
+        return { version: [1, 1, 1] };
+      },
+      makeWASocket: () => {
+        dependencyCalls.socket += 1;
+        return { ev: { on() {} } };
+      },
+      useMultiFileAuthState: async () => {
+        dependencyCalls.auth += 1;
+        return {
+          state: {},
+          saveCreds() { dependencyCalls.saveCreds += 1; },
+        };
+      },
     };
   }
   if (request === "axios") return { post: async () => ({ status: 200 }) };
@@ -45,11 +59,13 @@ const originalEnvironment = {
   BAILEYS_WEBHOOK_SECRET: process.env.BAILEYS_WEBHOOK_SECRET,
   FASTAPI_WEBHOOK_URL: process.env.FASTAPI_WEBHOOK_URL,
   WHATSAPP_SEND_ENABLED: process.env.WHATSAPP_SEND_ENABLED,
+  BAILEYS_CONNECT_ENABLED: process.env.BAILEYS_CONNECT_ENABLED,
 };
 
 process.env.BAILEYS_WEBHOOK_SECRET = "test-webhook-secret";
 process.env.FASTAPI_WEBHOOK_URL = "http://test.invalid/webhook";
 process.env.WHATSAPP_SEND_ENABLED = "false";
+process.env.BAILEYS_CONNECT_ENABLED = "false";
 const bridge = require("../src/index.js");
 
 after(() => {
@@ -67,6 +83,158 @@ function message(remoteJid, fields = {}) {
     messageTimestamp: 1710000000,
   };
 }
+
+function response() {
+  return {
+    statusCode: 200,
+    body: null,
+    headers: {},
+    status(code) { this.statusCode = code; return this; },
+    json(body) { this.body = body; return this; },
+    send(body) { this.body = body; return this; },
+    setHeader(name, value) { this.headers[name] = value; },
+  };
+}
+
+test("disabled startup starts HTTP only and touches no connection dependency", async () => {
+  let listenCalls = 0;
+  let connectCalls = 0;
+  let timerCalls = 0;
+  const originalSetTimeout = global.setTimeout;
+  global.setTimeout = () => { timerCalls += 1; };
+  try {
+    const started = await bridge.startBridge({
+      listen: () => { listenCalls += 1; },
+      connect: async () => { connectCalls += 1; },
+      exit: () => assert.fail("disabled startup must not exit"),
+    });
+    assert.equal(started, false);
+  } finally {
+    global.setTimeout = originalSetTimeout;
+  }
+
+  assert.equal(listenCalls, 1);
+  assert.equal(connectCalls, 0);
+  assert.equal(timerCalls, 0);
+  assert.deepEqual(dependencyCalls, { auth: 0, version: 0, socket: 0, saveCreds: 0 });
+});
+
+test("disabled health reports local health without WhatsApp readiness", () => {
+  const res = response();
+  routes.get["/health"]({}, res);
+  assert.deepEqual(res.body, {
+    status: "ok",
+    connection_enabled: false,
+    connected: false,
+    jid: null,
+  });
+});
+
+test("disabled QR endpoints expose no QR or identity", async () => {
+  const jsonRes = response();
+  await routes.get["/qr.json"]({}, jsonRes);
+  assert.deepEqual(jsonRes.body, {
+    connection_enabled: false,
+    connected: false,
+    jid: null,
+    ts: 0,
+    qrDataUrl: null,
+  });
+
+  const pageRes = response();
+  routes.get["/qr"]({}, pageRes);
+  assert.match(pageRes.body, /connection is disabled/i);
+  assert.equal(pageRes.body.includes("/qr.json"), false);
+});
+
+test("disabled logout touches no socket, session files, or reconnect timer", async () => {
+  const fs = require("fs");
+  let logoutCalls = 0;
+  let rmCalls = 0;
+  let mkdirCalls = 0;
+  let timerCalls = 0;
+  bridge.setSocketForTests({
+    user: { id: "redacted@s.whatsapp.net" },
+    logout: async () => { logoutCalls += 1; },
+  });
+  const originals = { rmSync: fs.rmSync, mkdirSync: fs.mkdirSync, setTimeout: global.setTimeout };
+  fs.rmSync = () => { rmCalls += 1; };
+  fs.mkdirSync = () => { mkdirCalls += 1; };
+  global.setTimeout = () => { timerCalls += 1; };
+  const res = response();
+  try {
+    await routes.post["/logout"]({}, res);
+  } finally {
+    fs.rmSync = originals.rmSync;
+    fs.mkdirSync = originals.mkdirSync;
+    global.setTimeout = originals.setTimeout;
+  }
+
+  assert.deepEqual(res.body, {
+    success: false,
+    skipped: true,
+    reason: "baileys_connect_disabled",
+  });
+  assert.equal(logoutCalls, 0);
+  assert.equal(rmCalls, 0);
+  assert.equal(mkdirCalls, 0);
+  assert.equal(timerCalls, 0);
+});
+
+test("disabled connection drops inbound before backend webhook", async () => {
+  let webhookCalls = 0;
+  await bridge.handleInboundUpsert({
+    type: "notify",
+    messages: [message("243812345678@s.whatsapp.net")],
+  }, async () => { webhookCalls += 1; });
+  assert.equal(webhookCalls, 0);
+});
+
+test("disabled connection independently blocks sendMessage", async () => {
+  process.env.WHATSAPP_SEND_ENABLED = "true";
+  let sendCalls = 0;
+  bridge.setSocketForTests({
+    user: { id: "redacted@s.whatsapp.net" },
+    sendMessage: async () => { sendCalls += 1; },
+  });
+  const res = response();
+  try {
+    await bridge.handleSend({ body: { phone: "+243000000000", message: "test" } }, res);
+  } finally {
+    process.env.WHATSAPP_SEND_ENABLED = "false";
+  }
+  assert.equal(sendCalls, 0);
+  assert.deepEqual(res.body, {
+    success: false,
+    skipped: true,
+    reason: "baileys_connect_disabled",
+  });
+});
+
+test("default-enabled startup preserves callable connection behavior", async () => {
+  delete process.env.BAILEYS_CONNECT_ENABLED;
+  let listenCalls = 0;
+  let connectCalls = 0;
+  const before = { ...dependencyCalls };
+  try {
+    assert.equal(bridge.isBaileysConnectEnabled(), true);
+    const started = await bridge.startBridge({
+      listen: () => { listenCalls += 1; },
+      connect: async () => { connectCalls += 1; },
+      exit: () => assert.fail("mock enabled startup must not exit"),
+    });
+    assert.equal(started, true);
+    await bridge.connectToWhatsApp();
+  } finally {
+    process.env.BAILEYS_CONNECT_ENABLED = "false";
+  }
+  assert.equal(listenCalls, 1);
+  assert.equal(connectCalls, 1);
+  assert.equal(dependencyCalls.auth, before.auth + 1);
+  assert.equal(dependencyCalls.version, before.version + 1);
+  assert.equal(dependencyCalls.socket, before.socket + 1);
+  assert.equal(dependencyCalls.saveCreds, before.saveCreds);
+});
 
 test("normalizes direct international PN identities", () => {
   for (const [phone, expected] of [
@@ -121,15 +289,20 @@ test("skips unresolved, group, status, broadcast, fromMe, and invalid identities
 test("never forwards unresolved LID and logs only redacted diagnostics", async () => {
   const firstLog = logs.length;
   let webhookCalls = 0;
-  await bridge.handleInboundUpsert({
-    type: "notify",
-    messages: [
-      message("123456789@lid"),
-      message("120363@g.us", { senderPn: "244923456789@s.whatsapp.net" }),
-      message("status@broadcast", { senderPn: "244923456789@s.whatsapp.net" }),
-      message("244923456789@s.whatsapp.net", { fromMe: true }),
-    ],
-  }, async () => { webhookCalls += 1; });
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+  try {
+    await bridge.handleInboundUpsert({
+      type: "notify",
+      messages: [
+        message("123456789@lid"),
+        message("120363@g.us", { senderPn: "244923456789@s.whatsapp.net" }),
+        message("status@broadcast", { senderPn: "244923456789@s.whatsapp.net" }),
+        message("244923456789@s.whatsapp.net", { fromMe: true }),
+      ],
+    }, async () => { webhookCalls += 1; });
+  } finally {
+    process.env.BAILEYS_CONNECT_ENABLED = "false";
+  }
 
   assert.equal(webhookCalls, 0);
   const serializedLogs = JSON.stringify(logs.slice(firstLog));
@@ -145,12 +318,17 @@ test("never forwards unresolved LID and logs only redacted diagnostics", async (
 
 test("forwards an authoritative international identity unchanged", async () => {
   const calls = [];
-  await bridge.handleInboundUpsert({
-    type: "notify",
-    messages: [message("987654321@lid", {
-      senderPn: "244923456789@s.whatsapp.net",
-    })],
-  }, async (...args) => { calls.push(args); });
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+  try {
+    await bridge.handleInboundUpsert({
+      type: "notify",
+      messages: [message("987654321@lid", {
+        senderPn: "244923456789@s.whatsapp.net",
+      })],
+    }, async (...args) => { calls.push(args); });
+  } finally {
+    process.env.BAILEYS_CONNECT_ENABLED = "false";
+  }
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0][1].customer_phone, "+244923456789");
