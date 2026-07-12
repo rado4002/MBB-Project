@@ -7,6 +7,8 @@ Tasks:
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 import uuid
 from datetime import datetime, timezone
@@ -386,6 +388,45 @@ async def _handle_voice_note(
 
 # ── Blackout queue drainer ────────────────────────────────────────────────────
 
+_BLACKOUT_REQUIRED_FIELDS = (
+    "message_id",
+    "customer_phone",
+    "content",
+    "content_type",
+    "timestamp",
+    "whatsapp_message_id",
+)
+
+
+def _blackout_raw_ref(raw: str) -> str:
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _decode_blackout_payload(raw: str) -> tuple[dict | None, str | None]:
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None, "invalid_json"
+    if not isinstance(payload, dict):
+        return None, "not_object"
+    if any(field not in payload for field in _BLACKOUT_REQUIRED_FIELDS):
+        return None, "missing_required_field"
+    if any(not isinstance(payload[field], str) for field in _BLACKOUT_REQUIRED_FIELDS):
+        return None, "invalid_field_type"
+    if any(not payload[field] for field in _BLACKOUT_REQUIRED_FIELDS):
+        return None, "empty_required_field"
+    try:
+        uuid.UUID(payload["message_id"])
+        datetime.fromisoformat(payload["timestamp"])
+    except (ValueError, TypeError):
+        return None, "invalid_identifier_or_timestamp"
+    if payload["content_type"] not in {"text", "voice_note", "image"}:
+        return None, "invalid_content_type"
+    wa_id = payload["whatsapp_message_id"]
+    if not wa_id.strip() or wa_id != wa_id.strip() or len(wa_id) > 100:
+        return None, "invalid_whatsapp_message_id"
+    return payload, None
+
 @celery_app.task(
     bind=True,
     base=_BaseTask,
@@ -403,38 +444,136 @@ def drain_blackout_queue(self: Task) -> dict:
 
 
 async def _drain(task: Task) -> dict:
-    from app.modules.m3_queue.recovery import send_recovery_message
-    from app.redis_client import blackout_dequeue_batch
-
-    processed = 0
-    errors = 0
-    notified_phones: set[str] = set()
-    MAX_BATCH = 50  # avoid hogging the worker for too long
-
-    messages = await blackout_dequeue_batch(batch_size=MAX_BATCH)
-    for payload in messages:
-        try:
-            phone = payload.get("customer_phone", "")
-
-            # Send recovery message once per customer
-            if phone and phone not in notified_phones:
-                await send_recovery_message(phone)
-                notified_phones.add(phone)
-
-            celery_app.send_task(
-                "m1.process_inbound_message",
-                kwargs=payload,
-                queue="default",
-            )
-            processed += 1
-        except Exception as exc:
-            log.error("m1.drain.item_failed", error=str(exc))
-            errors += 1
-
-    log.info(
-        "m1.drain_blackout_queue.done",
-        processed=processed,
-        errors=errors,
-        recovery_sent=len(notified_phones),
+    del task
+    from app.redis_client import (
+        blackout_acknowledge,
+        blackout_acquire_drain_lock,
+        blackout_claim_one,
+        blackout_depths,
+        blackout_quarantine,
+        blackout_recover_processing,
+        blackout_release_drain_lock,
+        new_blackout_drain_owner,
     )
-    return {"processed": processed, "errors": errors, "recovery_sent": len(notified_phones)}
+
+    counts = {
+        "recovered": 0,
+        "claimed": 0,
+        "published": 0,
+        "acknowledged": 0,
+        "quarantined": 0,
+        "failed": 0,
+    }
+    owner = new_blackout_drain_owner()
+    lock_acquired = False
+    status = "completed"
+    MAX_ITEMS = 50
+
+    try:
+        lock_acquired = await blackout_acquire_drain_lock(owner)
+    except Exception as exc:
+        log.error("blackout.drain.lock_failed", error_type=type(exc).__name__)
+        return {
+            "status": "redis_error",
+            **counts,
+            "pending_depth": -1,
+            "processing_depth": -1,
+            "quarantine_depth": -1,
+            "lock_acquired": False,
+        }
+
+    if not lock_acquired:
+        return {
+            "status": "already_running",
+            **counts,
+            "pending_depth": -1,
+            "processing_depth": -1,
+            "quarantine_depth": -1,
+            "lock_acquired": False,
+        }
+
+    try:
+        counts["recovered"] = await blackout_recover_processing()
+        for _ in range(MAX_ITEMS):
+            raw = await blackout_claim_one()
+            if raw is None:
+                break
+            counts["claimed"] += 1
+            payload, reason = _decode_blackout_payload(raw)
+            if reason is not None:
+                raw_ref = _blackout_raw_ref(raw)
+                try:
+                    quarantined = await blackout_quarantine(raw)
+                except Exception as exc:
+                    counts["failed"] += 1
+                    status = "redis_error"
+                    log.error(
+                        "blackout.quarantine_failed",
+                        reason=reason,
+                        raw_ref=raw_ref,
+                        error_type=type(exc).__name__,
+                    )
+                    break
+                if not quarantined:
+                    counts["failed"] += 1
+                    status = "redis_error"
+                    log.error(
+                        "blackout.quarantine_failed",
+                        reason=reason,
+                        raw_ref=raw_ref,
+                        error_type="RedisWriteNotConfirmed",
+                    )
+                    break
+                counts["quarantined"] += 1
+                log.warning("blackout.payload_quarantined", reason=reason, raw_ref=raw_ref)
+                continue
+
+            try:
+                celery_app.send_task(
+                    "m1.process_inbound_message",
+                    kwargs=payload,
+                    queue="default",
+                )
+                counts["published"] += 1
+            except Exception as exc:
+                counts["failed"] += 1
+                status = "publication_failed"
+                log.error(
+                    "blackout.drain.publish_failed",
+                    wa_ref=_blackout_raw_ref(payload["whatsapp_message_id"]),
+                    error_type=type(exc).__name__,
+                )
+                break
+
+            try:
+                acknowledged = await blackout_acknowledge(raw)
+            except Exception as exc:
+                acknowledged = False
+                log.error(
+                    "blackout.drain.ack_failed",
+                    wa_ref=_blackout_raw_ref(payload["whatsapp_message_id"]),
+                    error_type=type(exc).__name__,
+                )
+            if not acknowledged:
+                counts["failed"] += 1
+                status = "acknowledgement_failed"
+                break
+            counts["acknowledged"] += 1
+    except Exception as exc:
+        counts["failed"] += 1
+        status = "redis_error"
+        log.error("blackout.drain.redis_failed", error_type=type(exc).__name__)
+    finally:
+        try:
+            await blackout_release_drain_lock(owner)
+        except Exception as exc:
+            log.error("blackout.drain.lock_release_failed", error_type=type(exc).__name__)
+
+    try:
+        depths = await blackout_depths()
+    except Exception as exc:
+        depths = {"pending_depth": -1, "processing_depth": -1, "quarantine_depth": -1}
+        log.error("blackout.drain.depth_failed", error_type=type(exc).__name__)
+    result = {"status": status, **counts, **depths, "lock_acquired": True}
+    log.info("m1.drain_blackout_queue.done", **result)
+    return result

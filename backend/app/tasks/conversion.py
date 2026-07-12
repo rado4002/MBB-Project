@@ -177,39 +177,9 @@ async def _process_payment_callback(
     acks_late=True,
 )
 def drain_blackout_queue() -> dict:
-    """
-    Periodic beat task (runs every 5 min).
-
-    Drains the Redis blackout queue (DB 3) and re-submits each message to
-    the M1 Gateway ingest endpoint so it is processed normally.
-
-    On recovery after a Kinshasa power outage, each re-processed message
-    triggers the standard conversation flow, then sends the DRC recovery
-    confirmation: "Naza-zonga! Message na yo e-batelami ✓"
-    """
-    from app.redis_client import blackout_dequeue_batch, blackout_queue_length
-    from app.modules.m1_gateway import service as gateway_svc  # type: ignore[import]
-
-    queue_len = run_async(blackout_queue_length())
-    if queue_len <= 0:
-        return {"drained": 0, "queue_was_empty": True}
-
-    log.info("blackout.drain.start", queue_length=queue_len)
-    messages = run_async(
-        blackout_dequeue_batch(batch_size=50)
-    )
-    processed = 0
-    for msg in messages:
-        try:
-            run_async(
-                gateway_svc.reprocess_blackout_message(msg)
-            )
-            processed += 1
-        except Exception as exc:  # noqa: BLE001
-            log.error("blackout.drain.reprocess_failed", wa_id=msg.get("wa_id"), error=str(exc))
-
-    log.info("blackout.drain.done", processed=processed, total=len(messages))
-    return {"drained": processed, "total": len(messages)}
+    """Obsolete compatibility task; M1 owns the only blackout drainer."""
+    log.warning("conversion.blackout_drain.obsolete")
+    return {"status": "obsolete", "skipped": True, "drained": 0}
 
 
 # ── Task: sync confirmed order to CRM ─────────────────────────────────────────

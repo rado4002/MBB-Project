@@ -64,13 +64,6 @@ _BEAT_SCHEDULE = {
         "options": {"queue": "default"},
     },
 
-    # M6 — Drain blackout queue every 5 minutes
-    "conversion-drain-blackout": {
-        "task": "app.tasks.conversion.drain_blackout_queue",
-        "schedule": crontab(minute="*/5"),
-        "options": {"queue": "default"},
-    },
-
     # M7 — Daily MAPS aggregation at 02:00 Kinshasa (00:00 UTC)
     "maps-aggregate-daily": {
         "task": "app.tasks.maps.aggregate_daily",
@@ -85,6 +78,11 @@ _BEAT_SCHEDULE = {
         "options": {"queue": "escalation"},
     },
 }
+
+
+def beat_schedule_for(enabled: bool) -> dict:
+    """Return the gated schedule without mutating the canonical definition."""
+    return dict(_BEAT_SCHEDULE) if enabled else {}
 
 
 celery_app.conf.update(
@@ -130,5 +128,5 @@ celery_app.conf.update(
     # ── Beat schedule ─────────────────────────────────────────────────────────
     # All times are in Africa/Kinshasa (UTC+2).
     # No relance tasks are dispatched between 22:00–07:00 (enforced in M6 service).
-    beat_schedule=_BEAT_SCHEDULE if settings.scheduled_tasks_enabled else {},
+    beat_schedule=beat_schedule_for(settings.scheduled_tasks_enabled),
 )

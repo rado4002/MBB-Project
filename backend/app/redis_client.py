@@ -19,6 +19,7 @@ All AOF persistence for DB 3 is configured in redis.conf / Docker Compose.
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any, AsyncGenerator
 
 import redis.asyncio as aioredis
@@ -68,7 +69,18 @@ async def get_redis() -> AsyncGenerator[aioredis.Redis, None]:
 # ── Blackout queue (DB 3 — AOF-persisted) ────────────────────────────────────
 _BLACKOUT_DB = 3
 _BLACKOUT_KEY = "mbb:blackout:queue"
+_BLACKOUT_PROCESSING_KEY = "mbb:blackout:processing"
+_BLACKOUT_QUARANTINE_KEY = "mbb:blackout:quarantine"
+_BLACKOUT_DRAIN_LOCK_KEY = "mbb:blackout:drain:lock"
+_BLACKOUT_DRAIN_LOCK_TTL_SECONDS = 300
 _blackout_pool: aioredis.ConnectionPool | None = None
+
+_RELEASE_LOCK_SCRIPT = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+end
+return 0
+"""
 
 
 def _get_blackout_pool() -> aioredis.ConnectionPool:
@@ -102,7 +114,7 @@ async def blackout_enqueue(message: dict[str, Any]) -> bool:
         await client.rpush(_BLACKOUT_KEY, json.dumps(message, default=str))
         await client.aclose()
         BLACKOUT_QUEUE_DEPTH.inc()
-        log.info("blackout.enqueued", wa_id=message.get("wa_id"))
+        log.info("blackout.enqueued")
         return True
     except Exception as exc:  # noqa: BLE001
         log.error("blackout.enqueue_failed", error=str(exc))
@@ -110,31 +122,121 @@ async def blackout_enqueue(message: dict[str, Any]) -> bool:
 
 
 async def blackout_dequeue_batch(batch_size: int = 50) -> list[dict[str, Any]]:
-    """
-    Pop up to *batch_size* messages from the front (FIFO) of the blackout queue.
+    """Disabled compatibility shim for the former destructive dequeue API."""
+    del batch_size
+    raise RuntimeError("destructive blackout dequeue is disabled; use claim/ack")
 
-    Called by the Celery recovery task on system startup / connectivity restore.
-    """
-    messages: list[dict[str, Any]] = []
+
+def new_blackout_drain_owner() -> str:
+    """Return an opaque unique owner token for one drain invocation."""
+    return uuid.uuid4().hex
+
+
+async def blackout_acquire_drain_lock(
+    owner: str,
+    *,
+    ttl_seconds: int = _BLACKOUT_DRAIN_LOCK_TTL_SECONDS,
+) -> bool:
+    """Acquire the bounded canonical-drainer lock for *owner*."""
+    client = _blackout_client()
     try:
-        client = _blackout_client()
-        pipeline = client.pipeline()
-        for _ in range(batch_size):
-            pipeline.lpop(_BLACKOUT_KEY)
-        results = await pipeline.execute()
+        result = await client.set(
+            _BLACKOUT_DRAIN_LOCK_KEY,
+            owner,
+            nx=True,
+            ex=ttl_seconds,
+        )
+        return bool(result)
+    finally:
         await client.aclose()
-        for raw in results:
+
+
+async def blackout_release_drain_lock(owner: str) -> bool:
+    """Release the drain lock only when it is still owned by *owner*."""
+    client = _blackout_client()
+    try:
+        result = await client.eval(
+            _RELEASE_LOCK_SCRIPT,
+            1,
+            _BLACKOUT_DRAIN_LOCK_KEY,
+            owner,
+        )
+        return bool(result)
+    finally:
+        await client.aclose()
+
+
+async def blackout_claim_one() -> str | None:
+    """Atomically move the oldest pending serialized item into processing."""
+    client = _blackout_client()
+    try:
+        return await client.lmove(
+            _BLACKOUT_KEY,
+            _BLACKOUT_PROCESSING_KEY,
+            "LEFT",
+            "RIGHT",
+        )
+    finally:
+        await client.aclose()
+
+
+async def blackout_acknowledge(raw: str) -> bool:
+    """Remove one exact serialized item from processing after publication."""
+    client = _blackout_client()
+    try:
+        removed = await client.lrem(_BLACKOUT_PROCESSING_KEY, 1, raw)
+        return int(removed) == 1
+    finally:
+        await client.aclose()
+
+
+async def blackout_quarantine(raw: str) -> bool:
+    """Copy malformed *raw* to quarantine, then remove its processing claim."""
+    client = _blackout_client()
+    try:
+        await client.rpush(_BLACKOUT_QUARANTINE_KEY, raw)
+        removed = await client.lrem(_BLACKOUT_PROCESSING_KEY, 1, raw)
+        return int(removed) == 1
+    finally:
+        await client.aclose()
+
+
+async def blackout_recover_processing() -> int:
+    """Restore abandoned claims ahead of newer pending items in FIFO order."""
+    client = _blackout_client()
+    recovered = 0
+    try:
+        while True:
+            raw = await client.lmove(
+                _BLACKOUT_PROCESSING_KEY,
+                _BLACKOUT_KEY,
+                "RIGHT",
+                "LEFT",
+            )
             if raw is None:
-                break
-            try:
-                messages.append(json.loads(raw))
-            except json.JSONDecodeError:
-                log.warning("blackout.invalid_payload", raw=raw)
-        if messages:
-            BLACKOUT_QUEUE_DEPTH.dec(len(messages))
-    except Exception as exc:  # noqa: BLE001
-        log.error("blackout.dequeue_failed", error=str(exc))
-    return messages
+                return recovered
+            recovered += 1
+    finally:
+        await client.aclose()
+
+
+async def blackout_depths() -> dict[str, int]:
+    """Return authoritative pending, processing, and quarantine list depths."""
+    client = _blackout_client()
+    try:
+        pipeline = client.pipeline()
+        pipeline.llen(_BLACKOUT_KEY)
+        pipeline.llen(_BLACKOUT_PROCESSING_KEY)
+        pipeline.llen(_BLACKOUT_QUARANTINE_KEY)
+        pending, processing, quarantine = await pipeline.execute()
+        BLACKOUT_QUEUE_DEPTH.set(int(pending))
+        return {
+            "pending_depth": int(pending),
+            "processing_depth": int(processing),
+            "quarantine_depth": int(quarantine),
+        }
+    finally:
+        await client.aclose()
 
 
 async def blackout_queue_length() -> int:
