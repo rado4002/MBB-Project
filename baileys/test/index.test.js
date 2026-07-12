@@ -108,6 +108,10 @@ function recoveryRequest(token = "test-recovery-token") {
   };
 }
 
+function auditEventsSince(firstLog, eventName) {
+  return logs.slice(firstLog).filter((entry) => entry.includes(eventName));
+}
+
 test("disabled startup starts HTTP only and touches no connection dependency", async () => {
   let listenCalls = 0;
   let connectCalls = 0;
@@ -143,6 +147,7 @@ test("disabled health reports local health without WhatsApp readiness", () => {
 });
 
 test("disabled QR endpoints expose no QR or identity", async () => {
+  const firstLog = logs.length;
   const jsonRes = response();
   await routes.get["/qr.json"]({}, jsonRes);
   assert.equal(jsonRes.statusCode, 404);
@@ -152,6 +157,7 @@ test("disabled QR endpoints expose no QR or identity", async () => {
   routes.get["/qr"]({}, pageRes);
   assert.equal(pageRes.statusCode, 404);
   assert.deepEqual(pageRes.body, { error: "qr_endpoints_disabled" });
+  assert.equal(auditEventsSince(firstLog, "baileys.protected_route_rejected").length, 0);
 });
 
 test("disabled logout touches no socket, session files, or reconnect timer", async () => {
@@ -904,18 +910,36 @@ test("QR endpoints reject missing and incorrect Basic authentication", async () 
   bridge.resetLifecycleForTests();
   process.env.BAILEYS_QR_ENDPOINTS_ENABLED = "true";
   process.env.BAILEYS_RECOVERY_TOKEN = "test-recovery-token";
-  for (const req of [{}, recoveryRequest("incorrect-token")]) {
-    const jsonRes = response();
-    await routes.get["/qr.json"](req, jsonRes);
-    assert.equal(jsonRes.statusCode, 401);
-    assert.deepEqual(jsonRes.body, { error: "recovery_auth_required" });
-    assert.match(jsonRes.headers["WWW-Authenticate"], /^Basic /);
+  const firstLog = logs.length;
+  for (const route of [routes.get["/qr"], routes.get["/qr.json"]]) {
+    for (const req of [{}, recoveryRequest("incorrect-token")]) {
+      const denied = response();
+      await route(req, denied);
+      assert.equal(denied.statusCode, 401);
+      assert.deepEqual(denied.body, { error: "recovery_auth_required" });
+      assert.match(denied.headers["WWW-Authenticate"], /^Basic /);
+    }
   }
+  const events = auditEventsSince(firstLog, "baileys.protected_route_rejected");
+  assert.equal(events.length, 4);
+  for (const event of events) {
+    assert.deepEqual(event, [
+      "warn",
+      { route_category: "qr", reason: "missing_or_invalid_auth" },
+      "baileys.protected_route_rejected",
+    ]);
+  }
+  const serialized = JSON.stringify(events);
+  for (const sensitive of [
+    "incorrect-token", "Authorization", "test-recovery-token", "qrDataUrl",
+    "@s.whatsapp.net", "phone", "/app/sessions", "header",
+  ]) assert.equal(serialized.includes(sensitive), false);
   delete process.env.BAILEYS_QR_ENDPOINTS_ENABLED;
   delete process.env.BAILEYS_RECOVERY_TOKEN;
 });
 
 test("authenticated QR routes expose mocked QR state without identity", async () => {
+  const firstLog = logs.length;
   enableLifecycle();
   process.env.BAILEYS_QR_ENDPOINTS_ENABLED = "true";
   process.env.BAILEYS_RECOVERY_TOKEN = "test-recovery-token";
@@ -944,6 +968,7 @@ test("authenticated QR routes expose mocked QR state without identity", async ()
   await routes.get["/qr.json"](recoveryRequest(), afterOpen);
   assert.equal(afterOpen.body.qrDataUrl, null);
   assert.equal(afterOpen.body.ts, 0);
+  assert.equal(auditEventsSince(firstLog, "baileys.protected_route_rejected").length, 0);
   delete process.env.BAILEYS_QR_ENDPOINTS_ENABLED;
   delete process.env.BAILEYS_RECOVERY_TOKEN;
   disableLifecycle();
@@ -985,6 +1010,7 @@ test("root and health expose operational state without account identity", () => 
 });
 
 test("disabled logout ignores even valid recovery credentials with zero effects", async () => {
+  const firstLog = logs.length;
   enableLifecycle();
   process.env.BAILEYS_RECOVERY_TOKEN = "test-recovery-token";
   delete process.env.BAILEYS_LOGOUT_ENABLED;
@@ -1007,11 +1033,18 @@ test("disabled logout ignores even valid recovery credentials with zero effects"
   assert.equal(fileCalls, 0);
   assert.equal(bridge.getLifecycleStateForTests().currentSocket, socket);
   assert.equal(timers.size, 0);
+  const events = auditEventsSince(firstLog, "baileys.logout_disabled");
+  assert.deepEqual(events, [[
+    "warn",
+    { action: "logout", reason: "disabled" },
+    "baileys.logout_disabled",
+  ]]);
   delete process.env.BAILEYS_RECOVERY_TOKEN;
   disableLifecycle();
 });
 
 test("enabled logout requires authentication before lifecycle or session effects", async () => {
+  const firstLog = logs.length;
   enableLifecycle();
   process.env.BAILEYS_LOGOUT_ENABLED = "true";
   process.env.BAILEYS_RECOVERY_TOKEN = "test-recovery-token";
@@ -1038,6 +1071,7 @@ test("enabled logout requires authentication before lifecycle or session effects
     assert.equal(fileCalls, 2);
     assert.equal(bridge.getLifecycleStateForTests().loggedOut, true);
     assert.equal(bridge.getLifecycleStateForTests().currentQR, null);
+    assert.equal(auditEventsSince(firstLog, "baileys.logout_disabled").length, 0);
   } finally {
     fs.rmSync = originals.rmSync;
     fs.mkdirSync = originals.mkdirSync;

@@ -153,12 +153,18 @@ function hasValidRecoveryAuth(req) {
   }
 }
 
-function requireRecoveryAuth(req, res) {
+function requireRecoveryAuth(req, res, routeCategory = null) {
   if (!recoveryToken()) {
     res.status(503).json({ error: "recovery_auth_unconfigured" });
     return false;
   }
   if (!hasValidRecoveryAuth(req)) {
+    if (routeCategory === "qr") {
+      log.warn({
+        route_category: "qr",
+        reason: "missing_or_invalid_auth",
+      }, "baileys.protected_route_rejected");
+    }
     res.setHeader("WWW-Authenticate", 'Basic realm="Baileys recovery"');
     res.status(401).json({ error: "recovery_auth_required" });
     return false;
@@ -435,7 +441,7 @@ app.post("/send", handleSend);
 // QR status — polled by the dashboard SPA every 10 s
 app.get("/qr.json", async (req, res) => {
   if (!isQrEndpointsEnabled()) return res.status(404).json({ error: "qr_endpoints_disabled" });
-  if (!requireRecoveryAuth(req, res)) return undefined;
+  if (!requireRecoveryAuth(req, res, "qr")) return undefined;
   const connectionEnabled = isBaileysConnectEnabled();
 
   const payload = {
@@ -461,7 +467,7 @@ app.get("/qr.json", async (req, res) => {
 app.get("/qr", (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   if (!isQrEndpointsEnabled()) return res.status(404).json({ error: "qr_endpoints_disabled" });
-  if (!requireRecoveryAuth(req, res)) return undefined;
+  if (!requireRecoveryAuth(req, res, "qr")) return undefined;
   res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -568,6 +574,7 @@ app.get("/qr", (req, res) => {
  */
 app.post("/logout", async (req, res) => {
   if (!isLogoutEnabled()) {
+    log.warn({ action: "logout", reason: "disabled" }, "baileys.logout_disabled");
     return res.status(404).json({ error: "logout_disabled" });
   }
   if (!requireRecoveryAuth(req, res)) return undefined;

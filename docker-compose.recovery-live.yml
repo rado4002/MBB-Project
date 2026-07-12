@@ -1,4 +1,8 @@
 services:
+  api:
+    environment:
+      BAILEYS_WEBHOOK_SECRET: ${BAILEYS_WEBHOOK_SECRET:?set matching recovery webhook secret}
+
   baileys_live:
     profiles:
       - baileys-live
