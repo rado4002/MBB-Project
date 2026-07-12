@@ -1,0 +1,31 @@
+services:
+  baileys_live:
+    profiles:
+      - baileys-live
+    build:
+      context: ./baileys
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      BAILEYS_CONNECT_ENABLED: "true"
+      WHATSAPP_SEND_ENABLED: "false"
+      BAILEYS_QR_ENDPOINTS_ENABLED: "true"
+      BAILEYS_LOGOUT_ENABLED: "false"
+      FASTAPI_WEBHOOK_URL: http://api:8000/api/v1/messages/baileys
+      BAILEYS_RECOVERY_TOKEN: ${BAILEYS_RECOVERY_TOKEN:?set a strong temporary recovery token}
+      BAILEYS_WEBHOOK_SECRET: ${BAILEYS_WEBHOOK_SECRET:?set the matching recovery webhook secret}
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - recovery_dryrun_internal
+    ports:
+      - "127.0.0.1:${RECOVERY_BAILEYS_PORT:-13000}:3000"
+    volumes:
+      - recovery_baileys_live_session:/app/sessions
+    restart: "no"
+
+volumes:
+  recovery_baileys_live_session:
+    name: ${RECOVERY_BAILEYS_SESSION_VOLUME:?set a unique recovery session volume name}

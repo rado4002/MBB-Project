@@ -52,6 +52,7 @@ Module._load = function load(request, parent, isMain) {
   if (request === "axios") return { post: async () => ({ status: 200 }) };
   if (request === "express") return fakeExpress;
   if (request === "pino") return () => fakeLogger();
+  if (request === "qrcode") return { toDataURL: async () => "data:image/png;base64,mocked" };
   return originalLoad(request, parent, isMain);
 };
 
@@ -60,6 +61,9 @@ const originalEnvironment = {
   FASTAPI_WEBHOOK_URL: process.env.FASTAPI_WEBHOOK_URL,
   WHATSAPP_SEND_ENABLED: process.env.WHATSAPP_SEND_ENABLED,
   BAILEYS_CONNECT_ENABLED: process.env.BAILEYS_CONNECT_ENABLED,
+  BAILEYS_QR_ENDPOINTS_ENABLED: process.env.BAILEYS_QR_ENDPOINTS_ENABLED,
+  BAILEYS_LOGOUT_ENABLED: process.env.BAILEYS_LOGOUT_ENABLED,
+  BAILEYS_RECOVERY_TOKEN: process.env.BAILEYS_RECOVERY_TOKEN,
 };
 
 process.env.BAILEYS_WEBHOOK_SECRET = "test-webhook-secret";
@@ -96,6 +100,14 @@ function response() {
   };
 }
 
+function recoveryRequest(token = "test-recovery-token") {
+  return {
+    headers: {
+      authorization: `Basic ${Buffer.from(`recovery:${token}`).toString("base64")}`,
+    },
+  };
+}
+
 test("disabled startup starts HTTP only and touches no connection dependency", async () => {
   let listenCalls = 0;
   let connectCalls = 0;
@@ -126,25 +138,20 @@ test("disabled health reports local health without WhatsApp readiness", () => {
     status: "ok",
     connection_enabled: false,
     connected: false,
-    jid: null,
+    connection: "disconnected",
   });
 });
 
 test("disabled QR endpoints expose no QR or identity", async () => {
   const jsonRes = response();
   await routes.get["/qr.json"]({}, jsonRes);
-  assert.deepEqual(jsonRes.body, {
-    connection_enabled: false,
-    connected: false,
-    jid: null,
-    ts: 0,
-    qrDataUrl: null,
-  });
+  assert.equal(jsonRes.statusCode, 404);
+  assert.deepEqual(jsonRes.body, { error: "qr_endpoints_disabled" });
 
   const pageRes = response();
   routes.get["/qr"]({}, pageRes);
-  assert.match(pageRes.body, /connection is disabled/i);
-  assert.equal(pageRes.body.includes("/qr.json"), false);
+  assert.equal(pageRes.statusCode, 404);
+  assert.deepEqual(pageRes.body, { error: "qr_endpoints_disabled" });
 });
 
 test("disabled logout touches no socket, session files, or reconnect timer", async () => {
@@ -171,9 +178,7 @@ test("disabled logout touches no socket, session files, or reconnect timer", asy
   }
 
   assert.deepEqual(res.body, {
-    success: false,
-    skipped: true,
-    reason: "baileys_connect_disabled",
+    error: "logout_disabled",
   });
   assert.equal(logoutCalls, 0);
   assert.equal(rmCalls, 0);
@@ -742,6 +747,8 @@ test("logged-out close records suppression and schedules nothing", async () => {
 
 test("logout clears reconnect and close caused by logout cannot reconnect", async () => {
   enableLifecycle();
+  process.env.BAILEYS_LOGOUT_ENABLED = "true";
+  process.env.BAILEYS_RECOVERY_TOKEN = "test-recovery-token";
   const fs = require("fs");
   const timers = fakeTimers();
   const socket = fakeSocket({ user: { id: "redacted@s.whatsapp.net" } });
@@ -756,7 +763,7 @@ test("logout clears reconnect and close caused by logout cannot reconnect", asyn
   fs.rmSync = () => {};
   fs.mkdirSync = () => {};
   const res = response();
-  try { await routes.post["/logout"]({}, res); } finally {
+  try { await routes.post["/logout"](recoveryRequest(), res); } finally {
     fs.rmSync = originals.rmSync;
     fs.mkdirSync = originals.mkdirSync;
   }
@@ -765,11 +772,15 @@ test("logout clears reconnect and close caused by logout cannot reconnect", asyn
   assert.equal(socket.logoutCalls, 1);
   assert.equal(timers.size, 0);
   assert.equal(bridge.getLifecycleStateForTests().loggedOut, true);
+  delete process.env.BAILEYS_LOGOUT_ENABLED;
+  delete process.env.BAILEYS_RECOVERY_TOKEN;
   disableLifecycle();
 });
 
 test("logout suppresses an in-flight connection before socket creation", async () => {
   enableLifecycle();
+  process.env.BAILEYS_LOGOUT_ENABLED = "true";
+  process.env.BAILEYS_RECOVERY_TOKEN = "test-recovery-token";
   const fs = require("fs");
   const auth = deferred();
   let socketCalls = 0;
@@ -783,7 +794,7 @@ test("logout suppresses an in-flight connection before socket creation", async (
   fs.rmSync = () => {};
   fs.mkdirSync = () => {};
   const res = response();
-  try { await routes.post["/logout"]({}, res); } finally {
+  try { await routes.post["/logout"](recoveryRequest(), res); } finally {
     fs.rmSync = originals.rmSync;
     fs.mkdirSync = originals.mkdirSync;
   }
@@ -792,6 +803,8 @@ test("logout suppresses an in-flight connection before socket creation", async (
   assert.equal(res.body.success, true);
   assert.equal(socketCalls, 0);
   assert.equal(bridge.getLifecycleStateForTests().loggedOut, true);
+  delete process.env.BAILEYS_LOGOUT_ENABLED;
+  delete process.env.BAILEYS_RECOVERY_TOKEN;
   disableLifecycle();
 });
 
@@ -874,6 +887,187 @@ test("connection-disabled lifecycle touches no auth, version, socket or timer", 
   assert.equal(bridge.scheduleReconnect(), false);
   assert.deepEqual(calls, { auth: 0, version: 0, socket: 0 });
   assert.equal(timers.size, 0);
+});
+
+test("enabled QR endpoints fail closed without configured recovery token", async () => {
+  bridge.resetLifecycleForTests();
+  process.env.BAILEYS_QR_ENDPOINTS_ENABLED = "true";
+  delete process.env.BAILEYS_RECOVERY_TOKEN;
+  const res = response();
+  await routes.get["/qr.json"]({}, res);
+  assert.equal(res.statusCode, 503);
+  assert.deepEqual(res.body, { error: "recovery_auth_unconfigured" });
+  delete process.env.BAILEYS_QR_ENDPOINTS_ENABLED;
+});
+
+test("QR endpoints reject missing and incorrect Basic authentication", async () => {
+  bridge.resetLifecycleForTests();
+  process.env.BAILEYS_QR_ENDPOINTS_ENABLED = "true";
+  process.env.BAILEYS_RECOVERY_TOKEN = "test-recovery-token";
+  for (const req of [{}, recoveryRequest("incorrect-token")]) {
+    const jsonRes = response();
+    await routes.get["/qr.json"](req, jsonRes);
+    assert.equal(jsonRes.statusCode, 401);
+    assert.deepEqual(jsonRes.body, { error: "recovery_auth_required" });
+    assert.match(jsonRes.headers["WWW-Authenticate"], /^Basic /);
+  }
+  delete process.env.BAILEYS_QR_ENDPOINTS_ENABLED;
+  delete process.env.BAILEYS_RECOVERY_TOKEN;
+});
+
+test("authenticated QR routes expose mocked QR state without identity", async () => {
+  enableLifecycle();
+  process.env.BAILEYS_QR_ENDPOINTS_ENABLED = "true";
+  process.env.BAILEYS_RECOVERY_TOKEN = "test-recovery-token";
+  const socket = fakeSocket({ user: { id: "243899999999@s.whatsapp.net" } });
+  bridge.setSocketForTests(socket);
+  const generation = bridge.getLifecycleStateForTests().socketGeneration;
+  bridge.handleConnectionUpdate(socket, generation, { qr: "mock-current-qr" });
+
+  const jsonRes = response();
+  await routes.get["/qr.json"](recoveryRequest(), jsonRes);
+  assert.equal(jsonRes.statusCode, 200);
+  assert.equal(jsonRes.body.connected, true);
+  assert.equal(jsonRes.body.qrDataUrl, "data:image/png;base64,mocked");
+  assert.ok(jsonRes.body.ts > 0);
+  assert.equal("jid" in jsonRes.body, false);
+
+  const pageRes = response();
+  routes.get["/qr"](recoveryRequest(), pageRes);
+  assert.equal(pageRes.statusCode, 200);
+  assert.equal(pageRes.body.includes("/qr.json"), true);
+  assert.equal(pageRes.body.includes("243899999999"), false);
+  assert.equal(pageRes.body.includes("jid-label"), false);
+
+  bridge.handleConnectionUpdate(socket, generation, { connection: "open" });
+  const afterOpen = response();
+  await routes.get["/qr.json"](recoveryRequest(), afterOpen);
+  assert.equal(afterOpen.body.qrDataUrl, null);
+  assert.equal(afterOpen.body.ts, 0);
+  delete process.env.BAILEYS_QR_ENDPOINTS_ENABLED;
+  delete process.env.BAILEYS_RECOVERY_TOKEN;
+  disableLifecycle();
+});
+
+test("stale generation QR cannot reach authenticated pairing responses", async () => {
+  enableLifecycle();
+  process.env.BAILEYS_QR_ENDPOINTS_ENABLED = "true";
+  process.env.BAILEYS_RECOVERY_TOKEN = "test-recovery-token";
+  const socketA = fakeSocket();
+  const socketB = fakeSocket();
+  bridge.setSocketForTests(socketA);
+  const generationA = bridge.getLifecycleStateForTests().socketGeneration;
+  bridge.setSocketForTests(socketB);
+  bridge.handleConnectionUpdate(socketA, generationA, { qr: "stale-route-qr" });
+  const res = response();
+  await routes.get["/qr.json"](recoveryRequest(), res);
+  assert.equal(res.body.qrDataUrl, null);
+  assert.equal(res.body.ts, 0);
+  delete process.env.BAILEYS_QR_ENDPOINTS_ENABLED;
+  delete process.env.BAILEYS_RECOVERY_TOKEN;
+  disableLifecycle();
+});
+
+test("root and health expose operational state without account identity", () => {
+  enableLifecycle();
+  bridge.setSocketForTests(fakeSocket({ user: { id: "243877777777@s.whatsapp.net" } }));
+  for (const path of ["/", "/health"]) {
+    const res = response();
+    routes.get[path]({}, res);
+    const serialized = JSON.stringify(res.body);
+    assert.equal(serialized.includes("243877777777"), false);
+    assert.equal(serialized.toLowerCase().includes("jid"), false);
+    assert.equal(serialized.toLowerCase().includes("qr"), false);
+    assert.equal(serialized.includes("/app/sessions"), false);
+    if (path === "/health") assert.equal(res.body.connection, "connected");
+  }
+  disableLifecycle();
+});
+
+test("disabled logout ignores even valid recovery credentials with zero effects", async () => {
+  enableLifecycle();
+  process.env.BAILEYS_RECOVERY_TOKEN = "test-recovery-token";
+  delete process.env.BAILEYS_LOGOUT_ENABLED;
+  const fs = require("fs");
+  const timers = fakeTimers();
+  const socket = fakeSocket({ user: { id: "redacted@s.whatsapp.net" } });
+  bridge.setSocketForTests(socket);
+  bridge.setLifecycleDependenciesForTests({ setTimer: timers.setTimer, clearTimer: timers.clearTimer });
+  let fileCalls = 0;
+  const originals = { rmSync: fs.rmSync, mkdirSync: fs.mkdirSync };
+  fs.rmSync = () => { fileCalls += 1; };
+  fs.mkdirSync = () => { fileCalls += 1; };
+  const res = response();
+  try { await routes.post["/logout"](recoveryRequest(), res); } finally {
+    fs.rmSync = originals.rmSync;
+    fs.mkdirSync = originals.mkdirSync;
+  }
+  assert.equal(res.statusCode, 404);
+  assert.equal(socket.logoutCalls, 0);
+  assert.equal(fileCalls, 0);
+  assert.equal(bridge.getLifecycleStateForTests().currentSocket, socket);
+  assert.equal(timers.size, 0);
+  delete process.env.BAILEYS_RECOVERY_TOKEN;
+  disableLifecycle();
+});
+
+test("enabled logout requires authentication before lifecycle or session effects", async () => {
+  enableLifecycle();
+  process.env.BAILEYS_LOGOUT_ENABLED = "true";
+  process.env.BAILEYS_RECOVERY_TOKEN = "test-recovery-token";
+  const fs = require("fs");
+  const socket = fakeSocket({ user: { id: "redacted@s.whatsapp.net" } });
+  bridge.setSocketForTests(socket);
+  let fileCalls = 0;
+  const originals = { rmSync: fs.rmSync, mkdirSync: fs.mkdirSync };
+  fs.rmSync = () => { fileCalls += 1; };
+  fs.mkdirSync = () => { fileCalls += 1; };
+  try {
+    for (const req of [{}, recoveryRequest("wrong-token")]) {
+      const denied = response();
+      await routes.post["/logout"](req, denied);
+      assert.equal(denied.statusCode, 401);
+      assert.equal(socket.logoutCalls, 0);
+      assert.equal(fileCalls, 0);
+      assert.equal(bridge.getLifecycleStateForTests().currentSocket, socket);
+    }
+    const allowed = response();
+    await routes.post["/logout"](recoveryRequest(), allowed);
+    assert.equal(allowed.body.success, true);
+    assert.equal(socket.logoutCalls, 1);
+    assert.equal(fileCalls, 2);
+    assert.equal(bridge.getLifecycleStateForTests().loggedOut, true);
+    assert.equal(bridge.getLifecycleStateForTests().currentQR, null);
+  } finally {
+    fs.rmSync = originals.rmSync;
+    fs.mkdirSync = originals.mkdirSync;
+  }
+  delete process.env.BAILEYS_LOGOUT_ENABLED;
+  delete process.env.BAILEYS_RECOVERY_TOKEN;
+  disableLifecycle();
+});
+
+test("pairing and logout credentials never appear in logs or denied responses", async () => {
+  const firstLog = logs.length;
+  const token = "sensitive-recovery-token-value";
+  process.env.BAILEYS_QR_ENDPOINTS_ENABLED = "true";
+  process.env.BAILEYS_LOGOUT_ENABLED = "true";
+  process.env.BAILEYS_RECOVERY_TOKEN = token;
+  const responses = [];
+  for (const [route, req] of [
+    [routes.get["/qr.json"], recoveryRequest("wrong-sensitive-token")],
+    [routes.post["/logout"], recoveryRequest("wrong-sensitive-token")],
+  ]) {
+    const res = response();
+    await route(req, res);
+    responses.push(res.body);
+  }
+  const serialized = JSON.stringify([logs.slice(firstLog), responses]);
+  assert.equal(serialized.includes(token), false);
+  assert.equal(serialized.includes("wrong-sensitive-token"), false);
+  delete process.env.BAILEYS_QR_ENDPOINTS_ENABLED;
+  delete process.env.BAILEYS_LOGOUT_ENABLED;
+  delete process.env.BAILEYS_RECOVERY_TOKEN;
 });
 
 test("lifecycle logs contain no QR, JID, session detail or raw rejection", () => {

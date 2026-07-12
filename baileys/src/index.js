@@ -7,6 +7,7 @@ const {
   fetchLatestWaWebVersion,
 } = require("@whiskeysockets/baileys");
 const axios = require("axios");
+const crypto = require("crypto");
 const express = require("express");
 const fs = require("fs");
 const pino = require("pino");
@@ -118,6 +119,51 @@ function isWhatsAppSendEnabled() {
 
 function isBaileysConnectEnabled() {
   return String(process.env.BAILEYS_CONNECT_ENABLED || "true").toLowerCase() !== "false";
+}
+
+function isQrEndpointsEnabled() {
+  return String(process.env.BAILEYS_QR_ENDPOINTS_ENABLED || "false").toLowerCase() === "true";
+}
+
+function isLogoutEnabled() {
+  return String(process.env.BAILEYS_LOGOUT_ENABLED || "false").toLowerCase() === "true";
+}
+
+function recoveryToken() {
+  return String(process.env.BAILEYS_RECOVERY_TOKEN || "");
+}
+
+function requestHeader(req, name) {
+  if (typeof req?.get === "function") return req.get(name);
+  const headers = req?.headers || {};
+  return headers[name.toLowerCase()] || headers[name];
+}
+
+function hasValidRecoveryAuth(req) {
+  const token = recoveryToken();
+  if (!token) return false;
+  const authorization = requestHeader(req, "authorization");
+  if (typeof authorization !== "string" || !authorization.startsWith("Basic ")) return false;
+  try {
+    const supplied = Buffer.from(authorization.slice(6), "base64");
+    const expected = Buffer.from(`recovery:${token}`, "utf8");
+    return supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
+  } catch {
+    return false;
+  }
+}
+
+function requireRecoveryAuth(req, res) {
+  if (!recoveryToken()) {
+    res.status(503).json({ error: "recovery_auth_unconfigured" });
+    return false;
+  }
+  if (!hasValidRecoveryAuth(req)) {
+    res.setHeader("WWW-Authenticate", 'Basic realm="Baileys recovery"');
+    res.status(401).json({ error: "recovery_auth_required" });
+    return false;
+  }
+  return true;
 }
 
 function safeStatusCategory(error) {
@@ -355,15 +401,12 @@ app.get("/", (req, res) => {
     endpoints: {
       root: "GET /",
       health: "GET /health",
-      qr: "GET /qr",
-      qr_json: "GET /qr.json",
       send: "POST /send",
-      logout: "POST /logout",
     },
     whatsapp: {
       connection_enabled: connectionEnabled,
       connected: connectionEnabled && currentSocket?.user != null,
-      jid: connectionEnabled ? currentSocket?.user?.id ?? null : null,
+      connection: connectionEnabled && currentSocket?.user != null ? "connected" : "disconnected",
     },
   });
 });
@@ -377,7 +420,7 @@ app.get("/health", (req, res) => {
     status: "ok",
     connection_enabled: connectionEnabled,
     connected: connectionEnabled && currentSocket?.user != null,
-    jid: connectionEnabled ? currentSocket?.user?.id ?? null : null,
+    connection: connectionEnabled && currentSocket?.user != null ? "connected" : "disconnected",
   });
 });
 
@@ -391,25 +434,18 @@ app.post("/send", handleSend);
 
 // QR status — polled by the dashboard SPA every 10 s
 app.get("/qr.json", async (req, res) => {
-  if (!isBaileysConnectEnabled()) {
-    return res.json({
-      connection_enabled: false,
-      connected: false,
-      jid: null,
-      ts: 0,
-      qrDataUrl: null,
-    });
-  }
+  if (!isQrEndpointsEnabled()) return res.status(404).json({ error: "qr_endpoints_disabled" });
+  if (!requireRecoveryAuth(req, res)) return undefined;
+  const connectionEnabled = isBaileysConnectEnabled();
 
   const payload = {
-    connection_enabled: true,
-    connected: currentSocket?.user != null,
-    jid: currentSocket?.user?.id ?? null,
-    ts: qrTimestamp,
+    connection_enabled: connectionEnabled,
+    connected: connectionEnabled && currentSocket?.user != null,
+    ts: connectionEnabled ? qrTimestamp : 0,
     qrDataUrl: null,
   };
 
-  if (currentQR) {
+  if (connectionEnabled && currentQR) {
     try {
       const qrLib = require("qrcode");
       payload.qrDataUrl = await qrLib.toDataURL(currentQR, { width: 300, margin: 1 });
@@ -424,9 +460,8 @@ app.get("/qr.json", async (req, res) => {
 // Live QR dashboard — open http://localhost:3000/qr in a browser
 app.get("/qr", (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
-  if (!isBaileysConnectEnabled()) {
-    return res.send("<!DOCTYPE html><html><body><p>WhatsApp connection is disabled.</p></body></html>");
-  }
+  if (!isQrEndpointsEnabled()) return res.status(404).json({ error: "qr_endpoints_disabled" });
+  if (!requireRecoveryAuth(req, res)) return undefined;
   res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -445,7 +480,6 @@ app.get("/qr", (req, res) => {
     /* connected state */
     .connected-icon{font-size:3rem;margin-bottom:.75rem}
     .connected-title{font-size:1.4rem;font-weight:700;color:#25d366;margin-bottom:.4rem}
-    .jid{font-size:.82rem;color:#555;margin-bottom:1.5rem;word-break:break-all}
     /* QR state */
     #qr-img{width:260px;height:260px;border-radius:8px;border:1px solid #e0e0e0;
             display:none;margin:0 auto 1rem}
@@ -472,7 +506,6 @@ app.get("/qr", (req, res) => {
     <div id="view-connected" style="display:none">
       <div class="connected-icon">✅</div>
       <div class="connected-title">WhatsApp Connected!</div>
-      <div class="jid" id="jid-label"></div>
       <button class="btn btn-logout" onclick="logout()">🔒 Logout &amp; Reset QR</button>
       <div id="error-msg"></div>
     </div>
@@ -499,7 +532,6 @@ app.get("/qr", (req, res) => {
       try {
         const d = await fetch('/qr.json').then(r => r.json());
         if (d.connected) {
-          document.getElementById('jid-label').textContent = 'Logged in as: ' + (d.jid || '');
           show('connected');
         } else if (d.qrDataUrl) {
           const img = document.getElementById('qr-img');
@@ -535,6 +567,10 @@ app.get("/qr", (req, res) => {
  * Logout endpoint — disconnect WhatsApp and clear session.
  */
 app.post("/logout", async (req, res) => {
+  if (!isLogoutEnabled()) {
+    return res.status(404).json({ error: "logout_disabled" });
+  }
+  if (!requireRecoveryAuth(req, res)) return undefined;
   if (!isBaileysConnectEnabled()) {
     return res.status(200).json({
       success: false,
