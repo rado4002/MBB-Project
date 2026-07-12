@@ -26,7 +26,7 @@ from app.api.deps import DBSession, IdempotencyKey, get_current_role
 from app.config import get_settings
 from app.modules.m1_gateway.normalizer import normalize_webhook
 from app.redis_client import blackout_enqueue
-from app.redis_utils import dedup_check_and_mark, rate_limit_check
+from app.redis_utils import has_accepted_inbound, mark_inbound_accepted, rate_limit_check
 from app.schemas.messages import (
     InboundMessageRequest,
     MessageHistoryResponse,
@@ -37,6 +37,10 @@ from app.schemas.messages import (
 log = structlog.get_logger()
 settings = get_settings()
 router = APIRouter(prefix="/messages", tags=["M1 — Gateway"])
+
+
+def _safe_ref(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 _DRC_PHONE_RE = re.compile(r"^\+243[0-9]{9}$")
 
@@ -50,18 +54,26 @@ async def _handle_inbound(
 ) -> QueuedMessageResponse:
     """
     Shared inbound processing:
-      1. Dedup via whatsapp_message_id (Redis DB2, 24 h TTL, atomic SET NX)
+      1. Check for a previously accepted whatsapp_message_id marker
       2. Rate limit: 10 messages/minute per customer (Redis DB2 counter)
       3. Dispatch Celery task or push to blackout queue on broker failure
+      4. Best-effort mark the ID only after one path accepts the message
     Returns QueuedMessageResponse (HTTP 202 semantics).
     """
-    # ── 1. Dedup ──────────────────────────────────────────────────────────────
-    if await dedup_check_and_mark(payload.whatsapp_message_id):
-        log.info("m1.duplicate_ignored", wa_id=payload.whatsapp_message_id, source=source)
-        return QueuedMessageResponse(queue_position=0, estimated_processing_seconds=0)
+    wa_ref = _safe_ref(payload.whatsapp_message_id)
+
+    # ── 1. Previously accepted duplicate ─────────────────────────────────────
+    if await has_accepted_inbound(payload.whatsapp_message_id):
+        log.info("inbound.duplicate_accepted", wa_ref=wa_ref, source=source)
+        return QueuedMessageResponse(
+            status="duplicate",
+            queue_position=0,
+            estimated_processing_seconds=0,
+        )
 
     # ── 2. Rate limit ──────────────────────────────────────────────────────────
     if await rate_limit_check(payload.customer_phone):
+        log.warning("inbound.rate_limited", wa_ref=wa_ref, source=source)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="rate_limit_exceeded",
@@ -88,18 +100,38 @@ async def _handle_inbound(
         log.info(
             "m1.task_dispatched",
             task_id=task.id,
-            wa_id=payload.whatsapp_message_id,
+            wa_ref=wa_ref,
             source=source,
         )
+        await mark_inbound_accepted(payload.whatsapp_message_id)
         return QueuedMessageResponse(queue_position=1, estimated_processing_seconds=10)
     except Exception as exc:
         # Celery broker unreachable → push to blackout queue (AOF-persisted)
-        log.warning("m1.celery_unavailable", error=str(exc), source=source)
+        log.warning(
+            "m1.celery_unavailable",
+            error_type=type(exc).__name__,
+            wa_ref=wa_ref,
+            source=source,
+        )
         try:
-            await blackout_enqueue(task_kwargs)
+            blackout_accepted = await blackout_enqueue(task_kwargs)
         except Exception as q_exc:
-            log.error("m1.blackout_queue_failed", error=str(q_exc))
-        return QueuedMessageResponse(queue_position=-1, estimated_processing_seconds=300)
+            blackout_accepted = False
+            log.error(
+                "m1.blackout_queue_failed",
+                error_type=type(q_exc).__name__,
+                wa_ref=wa_ref,
+                source=source,
+            )
+        if blackout_accepted:
+            await mark_inbound_accepted(payload.whatsapp_message_id)
+            return QueuedMessageResponse(queue_position=-1, estimated_processing_seconds=300)
+
+        log.error("inbound.acceptance_failed", wa_ref=wa_ref, source=source)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="temporarily_unavailable_not_accepted_retry",
+        )
 
 
 # ── EP-01: Official / Production path ────────────────────────────────────────
@@ -131,8 +163,8 @@ async def receive_message(
     """
     log.info(
         "m1.receive",
-        wa_id=payload.whatsapp_message_id,
-        phone=payload.customer_phone,
+        wa_ref=_safe_ref(payload.whatsapp_message_id),
+        phone_ref=_safe_ref(payload.customer_phone),
         content_type=payload.content_type,
         source="official",
     )
@@ -223,8 +255,8 @@ async def receive_from_baileys(
 
     log.info(
         "m1.baileys.receive",
-        wa_id=payload.whatsapp_message_id,
-        phone=payload.customer_phone,
+        wa_ref=_safe_ref(payload.whatsapp_message_id),
+        phone_ref=_safe_ref(payload.customer_phone),
         content_type=payload.content_type,
     )
     inbound = payload.to_inbound_request()
@@ -350,15 +382,15 @@ async def receive_webhook(
             whatsapp_message_id=normalized["whatsapp_message_id"],
         )
     except Exception as exc:
-        log.error("webhook.normalization_error", error=str(exc), normalized=normalized)
+        log.error("webhook.normalization_error", error_type=type(exc).__name__)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"normalization_error: {exc}") from exc
 
     # Dispatch to M1 processing
     source = "baileys" if is_baileys else "official"
     log.info(
         "webhook.received",
-        wa_id=inbound.whatsapp_message_id,
-        phone=inbound.customer_phone,
+        wa_ref=_safe_ref(inbound.whatsapp_message_id),
+        phone_ref=_safe_ref(inbound.customer_phone),
         content_type=inbound.content_type,
         source=source,
     )

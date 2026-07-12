@@ -13,6 +13,7 @@ Sections
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
@@ -21,6 +22,11 @@ import structlog
 from app.cache import TTL, get_cache_client, make_key
 
 log = structlog.get_logger(__name__)
+
+
+def _safe_identifier(value: str) -> str:
+    """Return a stable, non-reversible reference suitable for logs."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -49,11 +55,20 @@ async def rate_limit_check(
             await client.expire(key, window_seconds)
         await client.aclose()
         if count > limit:
-            log.warning("rate_limit.exceeded", phone=phone, count=count, limit=limit)
+            log.warning(
+                "rate_limit.exceeded",
+                phone_ref=_safe_identifier(phone),
+                count=count,
+                limit=limit,
+            )
             return True
         return False
     except Exception as exc:
-        log.warning("rate_limit.redis_error", phone=phone, error=str(exc))
+        log.warning(
+            "rate_limit.redis_error",
+            phone_ref=_safe_identifier(phone),
+            error_type=type(exc).__name__,
+        )
         return False   # fail-open during Redis outage
 
 
@@ -74,6 +89,46 @@ async def rate_limit_remaining(phone: str, limit: int = 10) -> int:
 # 2. Message deduplication
 # ═══════════════════════════════════════════════════════════════════════════════
 
+async def has_accepted_inbound(whatsapp_message_id: str) -> bool:
+    """Return whether this authoritative ID has a previously accepted marker."""
+    key = make_key("dedup", whatsapp_message_id)
+    try:
+        client = get_cache_client()
+        result = await client.exists(key)
+        await client.aclose()
+        return bool(result)
+    except Exception as exc:
+        log.warning(
+            "dedup.accepted_marker_read_failed",
+            wa_ref=_safe_identifier(whatsapp_message_id),
+            error_type=type(exc).__name__,
+        )
+        return False
+
+
+async def mark_inbound_accepted(whatsapp_message_id: str) -> bool:
+    """Best-effort mark an inbound ID after a processing path accepts it."""
+    key = make_key("dedup", whatsapp_message_id)
+    try:
+        client = get_cache_client()
+        result = await client.set(key, "1", ex=TTL.DEDUP)
+        await client.aclose()
+        if result:
+            return True
+        log.warning(
+            "dedup.accepted_marker_write_failed",
+            wa_ref=_safe_identifier(whatsapp_message_id),
+            error_type="RedisWriteNotConfirmed",
+        )
+        return False
+    except Exception as exc:
+        log.warning(
+            "dedup.accepted_marker_write_failed",
+            wa_ref=_safe_identifier(whatsapp_message_id),
+            error_type=type(exc).__name__,
+        )
+        return False
+
 async def dedup_check_and_mark(wa_message_id: str) -> bool:
     """
     Check if *wa_message_id* was already processed, then mark it.
@@ -92,10 +147,14 @@ async def dedup_check_and_mark(wa_message_id: str) -> bool:
         await client.aclose()
         is_duplicate = result is None   # None → key already existed
         if is_duplicate:
-            log.info("dedup.duplicate_detected", wa_id=wa_message_id)
+            log.info("dedup.duplicate_detected", wa_ref=_safe_identifier(wa_message_id))
         return is_duplicate
     except Exception as exc:
-        log.warning("dedup.redis_error", wa_id=wa_message_id, error=str(exc))
+        log.warning(
+            "dedup.redis_error",
+            wa_ref=_safe_identifier(wa_message_id),
+            error_type=type(exc).__name__,
+        )
         return False   # fail-open: process even if we can't check dedup
 
 
