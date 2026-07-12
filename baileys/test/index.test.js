@@ -512,3 +512,379 @@ test("outbound disabled mode makes zero sendMessage calls and logs no sensitive 
   assert.equal(serializedLogs.includes("@s.whatsapp.net"), false);
   assert.equal(serializedLogs.includes("test-webhook-secret"), false);
 });
+
+class FakeEmitter {
+  constructor() { this.listeners = new Map(); }
+  on(event, handler) {
+    const handlers = this.listeners.get(event) || [];
+    handlers.push(handler);
+    this.listeners.set(event, handlers);
+  }
+  emit(event, value) {
+    for (const handler of [...(this.listeners.get(event) || [])]) handler(value);
+  }
+  removeAllListeners(event) { this.listeners.delete(event); }
+}
+
+function fakeSocket(overrides = {}) {
+  return {
+    ev: new FakeEmitter(),
+    user: null,
+    endCalls: 0,
+    logoutCalls: 0,
+    end() { this.endCalls += 1; },
+    async logout() { this.logoutCalls += 1; },
+    ...overrides,
+  };
+}
+
+function fakeTimers() {
+  let nextId = 1;
+  const pending = new Map();
+  const delays = [];
+  return {
+    setTimer(fn, delay) {
+      const id = nextId++;
+      pending.set(id, fn);
+      delays.push(delay);
+      return id;
+    },
+    clearTimer(id) { pending.delete(id); },
+    fireNext() {
+      const entry = pending.entries().next().value;
+      if (!entry) return false;
+      pending.delete(entry[0]);
+      entry[1]();
+      return true;
+    },
+    get size() { return pending.size; },
+    delays,
+  };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+async function settle() {
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
+function enableLifecycle() {
+  bridge.resetLifecycleForTests();
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+}
+
+function disableLifecycle() {
+  bridge.resetLifecycleForTests();
+  process.env.BAILEYS_CONNECT_ENABLED = "false";
+}
+
+test("single-flight concurrent connects reuse one exact promise and dependency chain", async () => {
+  enableLifecycle();
+  const auth = deferred();
+  const calls = { auth: 0, version: 0, socket: 0 };
+  const socket = fakeSocket();
+  bridge.setLifecycleDependenciesForTests({
+    loadAuth: async () => { calls.auth += 1; return auth.promise; },
+    fetchVersion: async () => { calls.version += 1; return [1, 2, 3]; },
+    makeSocket: () => { calls.socket += 1; return socket; },
+  });
+  const first = bridge.connectToWhatsApp();
+  const second = bridge.connectToWhatsApp();
+  assert.equal(first, second);
+  assert.deepEqual(calls, { auth: 1, version: 0, socket: 0 });
+  auth.resolve({ state: {}, saveCreds() {} });
+  assert.equal(await first, socket);
+  assert.deepEqual(calls, { auth: 1, version: 1, socket: 1 });
+  assert.equal(bridge.getLifecycleStateForTests().connectPromise, null);
+  disableLifecycle();
+});
+
+test("failed connect clears single-flight state and permits a caught retry", async () => {
+  enableLifecycle();
+  let authCalls = 0;
+  const socket = fakeSocket();
+  bridge.setLifecycleDependenciesForTests({
+    loadAuth: async () => {
+      authCalls += 1;
+      if (authCalls === 1) throw new Error("mock auth failure");
+      return { state: {}, saveCreds() {} };
+    },
+    fetchVersion: async () => [1, 2, 3],
+    makeSocket: () => socket,
+  });
+  await assert.rejects(bridge.connectToWhatsApp(), /mock auth failure/);
+  assert.equal(bridge.getLifecycleStateForTests().connectPromise, null);
+  await assert.doesNotReject(() => bridge.connectToWhatsApp());
+  assert.equal(authCalls, 2);
+  disableLifecycle();
+});
+
+test("repeated recoverable close events create exactly one reconnect timer", async () => {
+  enableLifecycle();
+  const timers = fakeTimers();
+  const socket = fakeSocket();
+  bridge.setLifecycleDependenciesForTests({
+    loadAuth: async () => ({ state: {}, saveCreds() {} }),
+    fetchVersion: async () => undefined,
+    makeSocket: () => socket,
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+    random: () => 0,
+  });
+  await bridge.connectToWhatsApp();
+  socket.ev.emit("connection.update", { connection: "close" });
+  socket.ev.emit("connection.update", { connection: "close" });
+  assert.equal(timers.size, 1);
+  assert.equal(bridge.getLifecycleStateForTests().reconnectAttempt, 1);
+  disableLifecycle();
+});
+
+test("close while a connect is pending never overlaps socket creation", async () => {
+  enableLifecycle();
+  const timers = fakeTimers();
+  const oldSocket = fakeSocket();
+  bridge.setSocketForTests(oldSocket);
+  const oldGeneration = bridge.getLifecycleStateForTests().socketGeneration;
+  const auth = deferred();
+  let socketCalls = 0;
+  bridge.setLifecycleDependenciesForTests({
+    loadAuth: () => auth.promise,
+    fetchVersion: async () => undefined,
+    makeSocket: () => { socketCalls += 1; return fakeSocket(); },
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+  });
+  const pending = bridge.connectToWhatsApp();
+  bridge.handleConnectionUpdate(oldSocket, oldGeneration, { connection: "close" });
+  assert.equal(timers.size, 0);
+  assert.equal(socketCalls, 0);
+  auth.resolve({ state: {}, saveCreds() {} });
+  await pending;
+  assert.equal(socketCalls, 1);
+  disableLifecycle();
+});
+
+test("stale socket events cannot mutate or reconnect a newer generation", async () => {
+  enableLifecycle();
+  const timers = fakeTimers();
+  const sockets = [fakeSocket(), fakeSocket()];
+  bridge.setLifecycleDependenciesForTests({
+    loadAuth: async () => ({ state: {}, saveCreds() {} }),
+    fetchVersion: async () => undefined,
+    makeSocket: () => sockets.shift(),
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+  });
+  const socketA = await bridge.connectToWhatsApp();
+  const generationA = bridge.getLifecycleStateForTests().socketGeneration;
+  const socketB = await bridge.connectToWhatsApp();
+  const stateB = bridge.getLifecycleStateForTests();
+  bridge.handleConnectionUpdate(socketA, generationA, { connection: "close", qr: "stale-secret-qr" });
+  const after = bridge.getLifecycleStateForTests();
+  assert.equal(after.currentSocket, socketB);
+  assert.equal(after.socketGeneration, stateB.socketGeneration);
+  assert.equal(after.currentQR, null);
+  assert.equal(timers.size, 0);
+  assert.equal(socketA.endCalls, 1);
+  disableLifecycle();
+});
+
+test("authoritative open clears QR and timer and resets backoff", async () => {
+  enableLifecycle();
+  const timers = fakeTimers();
+  const socket = fakeSocket();
+  bridge.setLifecycleDependenciesForTests({
+    loadAuth: async () => ({ state: {}, saveCreds() {} }),
+    fetchVersion: async () => undefined,
+    makeSocket: () => socket,
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+    random: () => 0,
+  });
+  await bridge.connectToWhatsApp();
+  socket.ev.emit("connection.update", { qr: "secret-qr" });
+  assert.equal(bridge.scheduleReconnect(), true);
+  socket.ev.emit("connection.update", { connection: "open" });
+  const state = bridge.getLifecycleStateForTests();
+  assert.equal(state.currentSocket, socket);
+  assert.equal(state.currentQR, null);
+  assert.equal(state.reconnectAttempt, 0);
+  assert.equal(timers.size, 0);
+  disableLifecycle();
+});
+
+test("logged-out close records suppression and schedules nothing", async () => {
+  enableLifecycle();
+  const timers = fakeTimers();
+  const socket = fakeSocket();
+  bridge.setLifecycleDependenciesForTests({
+    loadAuth: async () => ({ state: {}, saveCreds() {} }),
+    fetchVersion: async () => undefined,
+    makeSocket: () => socket,
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+  });
+  await bridge.connectToWhatsApp();
+  socket.ev.emit("connection.update", {
+    connection: "close",
+    lastDisconnect: { error: { output: { statusCode: 401 } } },
+  });
+  assert.equal(bridge.getLifecycleStateForTests().loggedOut, true);
+  assert.equal(timers.size, 0);
+  disableLifecycle();
+});
+
+test("logout clears reconnect and close caused by logout cannot reconnect", async () => {
+  enableLifecycle();
+  const fs = require("fs");
+  const timers = fakeTimers();
+  const socket = fakeSocket({ user: { id: "redacted@s.whatsapp.net" } });
+  bridge.setLifecycleDependenciesForTests({
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+    random: () => 0,
+  });
+  bridge.setSocketForTests(socket);
+  bridge.scheduleReconnect();
+  const originals = { rmSync: fs.rmSync, mkdirSync: fs.mkdirSync };
+  fs.rmSync = () => {};
+  fs.mkdirSync = () => {};
+  const res = response();
+  try { await routes.post["/logout"]({}, res); } finally {
+    fs.rmSync = originals.rmSync;
+    fs.mkdirSync = originals.mkdirSync;
+  }
+  socket.ev.emit("connection.update", { connection: "close" });
+  assert.equal(res.body.success, true);
+  assert.equal(socket.logoutCalls, 1);
+  assert.equal(timers.size, 0);
+  assert.equal(bridge.getLifecycleStateForTests().loggedOut, true);
+  disableLifecycle();
+});
+
+test("logout suppresses an in-flight connection before socket creation", async () => {
+  enableLifecycle();
+  const fs = require("fs");
+  const auth = deferred();
+  let socketCalls = 0;
+  bridge.setLifecycleDependenciesForTests({
+    loadAuth: () => auth.promise,
+    fetchVersion: async () => undefined,
+    makeSocket: () => { socketCalls += 1; return fakeSocket(); },
+  });
+  const pending = bridge.connectToWhatsApp();
+  const originals = { rmSync: fs.rmSync, mkdirSync: fs.mkdirSync };
+  fs.rmSync = () => {};
+  fs.mkdirSync = () => {};
+  const res = response();
+  try { await routes.post["/logout"]({}, res); } finally {
+    fs.rmSync = originals.rmSync;
+    fs.mkdirSync = originals.mkdirSync;
+  }
+  auth.resolve({ state: {}, saveCreds() {} });
+  assert.equal(await pending, undefined);
+  assert.equal(res.body.success, true);
+  assert.equal(socketCalls, 0);
+  assert.equal(bridge.getLifecycleStateForTests().loggedOut, true);
+  disableLifecycle();
+});
+
+test("shutdown clears timers, ends socket and server, and never logs out", async () => {
+  enableLifecycle();
+  const timers = fakeTimers();
+  const socket = fakeSocket({ user: { id: "redacted@s.whatsapp.net" } });
+  let serverCloseCalls = 0;
+  const server = { close(callback) { serverCloseCalls += 1; callback(); } };
+  bridge.setLifecycleDependenciesForTests({
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+    random: () => 0,
+  });
+  bridge.setSocketForTests(socket);
+  bridge.scheduleReconnect();
+  await bridge.shutdownBridge(server);
+  assert.equal(timers.size, 0);
+  assert.equal(timers.fireNext(), false);
+  assert.equal(socket.endCalls, 1);
+  assert.equal(socket.logoutCalls, 0);
+  assert.equal(serverCloseCalls, 1);
+  assert.equal(bridge.getLifecycleStateForTests().stopping, true);
+  disableLifecycle();
+});
+
+test("reconnect callback catches rejection and schedules bounded retry", async () => {
+  enableLifecycle();
+  const firstLog = logs.length;
+  const timers = fakeTimers();
+  bridge.setLifecycleDependenciesForTests({
+    loadAuth: async () => { throw new Error("mock reconnect rejection"); },
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+    random: () => 0,
+  });
+  assert.equal(bridge.scheduleReconnect(), true);
+  assert.equal(timers.fireNext(), true);
+  await settle();
+  assert.equal(timers.size, 1);
+  assert.match(JSON.stringify(logs.slice(firstLog)), /baileys\.reconnect_failed/);
+  disableLifecycle();
+});
+
+test("backoff is bounded and successful open resets attempt count", async () => {
+  enableLifecycle();
+  const timers = fakeTimers();
+  bridge.setLifecycleDependenciesForTests({
+    loadAuth: async () => { throw new Error("retry"); },
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+    random: () => 0.999,
+  });
+  for (let i = 0; i < 8; i += 1) {
+    if (timers.size === 0) bridge.scheduleReconnect();
+    timers.fireNext();
+    await settle();
+  }
+  assert.ok(timers.delays.every((delay) => delay >= 1000 && delay <= 30000));
+  const socket = fakeSocket();
+  bridge.setSocketForTests(socket);
+  const generation = bridge.getLifecycleStateForTests().socketGeneration;
+  bridge.handleConnectionUpdate(socket, generation, { connection: "open" });
+  assert.equal(bridge.getLifecycleStateForTests().reconnectAttempt, 0);
+  disableLifecycle();
+});
+
+test("connection-disabled lifecycle touches no auth, version, socket or timer", async () => {
+  disableLifecycle();
+  const timers = fakeTimers();
+  const calls = { auth: 0, version: 0, socket: 0 };
+  bridge.setLifecycleDependenciesForTests({
+    loadAuth: async () => { calls.auth += 1; },
+    fetchVersion: async () => { calls.version += 1; },
+    makeSocket: () => { calls.socket += 1; },
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+  });
+  await bridge.connectToWhatsApp();
+  assert.equal(bridge.scheduleReconnect(), false);
+  assert.deepEqual(calls, { auth: 0, version: 0, socket: 0 });
+  assert.equal(timers.size, 0);
+});
+
+test("lifecycle logs contain no QR, JID, session detail or raw rejection", () => {
+  const serialized = JSON.stringify(logs);
+  for (const sensitive of [
+    "secret-qr",
+    "stale-secret-qr",
+    "redacted@s.whatsapp.net",
+    "mock reconnect rejection",
+    "/app/sessions",
+  ]) {
+    assert.equal(serialized.includes(sensitive), false);
+  }
+});

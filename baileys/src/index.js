@@ -159,7 +159,7 @@ async function handleSend(req, res) {
       reason: "baileys_connect_disabled",
     });
   }
-  if (!sock?.user || isReconnecting) {
+  if (!currentSocket?.user || connectPromise) {
     return res.status(503).json({ error: "WhatsApp not connected" });
   }
 
@@ -170,7 +170,7 @@ async function handleSend(req, res) {
 
   try {
     const jid = `${normalized.slice(1)}@s.whatsapp.net`;
-    await sock.sendMessage(jid, { text: message });
+    await currentSocket.sendMessage(jid, { text: message });
     log.info({ content_type: "text", message_present: true }, "message_sent");
     return res.json({ success: true });
   } catch (err) {
@@ -320,10 +320,29 @@ function handleMessagesUpsertEvent(event, handler = handleInboundUpsert) {
 const app = express();
 app.use(express.json({ limit: "10kb" }));   // DRC payload constraint
 
-let sock = null;
+let currentSocket = null;
 let currentQR = null;   // latest QR string from connection.update, cleared on connect
 let qrTimestamp = 0;    // epoch ms of last QR update — used by polling endpoint
-let isReconnecting = false;
+let connectPromise = null;
+let reconnectTimer = null;
+let reconnectAttempt = 0;
+let stopping = false;
+let loggedOut = false;
+let socketGeneration = 0;
+let httpServer = null;
+
+const RECONNECT_MIN_MS = 1000;
+const RECONNECT_MAX_MS = 30000;
+const RECONNECT_JITTER_MS = 250;
+
+const lifecycleDeps = {
+  loadAuth: useMultiFileAuthState,
+  fetchVersion: () => fetchVersionWithRetry(3, 10000),
+  makeSocket: makeWASocket,
+  random: Math.random,
+  setTimer: setTimeout,
+  clearTimer: clearTimeout,
+};
 
 /**
  * Root endpoint — service info and connection status.
@@ -343,8 +362,8 @@ app.get("/", (req, res) => {
     },
     whatsapp: {
       connection_enabled: connectionEnabled,
-      connected: connectionEnabled && sock?.user != null,
-      jid: connectionEnabled ? sock?.user?.id ?? null : null,
+      connected: connectionEnabled && currentSocket?.user != null,
+      jid: connectionEnabled ? currentSocket?.user?.id ?? null : null,
     },
   });
 });
@@ -357,8 +376,8 @@ app.get("/health", (req, res) => {
   res.json({
     status: "ok",
     connection_enabled: connectionEnabled,
-    connected: connectionEnabled && sock?.user != null,
-    jid: connectionEnabled ? sock?.user?.id ?? null : null,
+    connected: connectionEnabled && currentSocket?.user != null,
+    jid: connectionEnabled ? currentSocket?.user?.id ?? null : null,
   });
 });
 
@@ -384,8 +403,8 @@ app.get("/qr.json", async (req, res) => {
 
   const payload = {
     connection_enabled: true,
-    connected: sock?.user != null,
-    jid: sock?.user?.id ?? null,
+    connected: currentSocket?.user != null,
+    jid: currentSocket?.user?.id ?? null,
     ts: qrTimestamp,
     qrDataUrl: null,
   };
@@ -524,18 +543,12 @@ app.post("/logout", async (req, res) => {
     });
   }
 
-  if (!sock) {
+  if (!currentSocket && !connectPromise) {
     return res.status(400).json({ error: "No active WhatsApp connection" });
   }
 
   try {
-    if (sock.user) {
-      await sock.logout();
-    }
-
-    isReconnecting = true;
-    sock = null;
-    currentQR = null;
+    await logoutCurrentSocket();
 
     // Wipe session files so next connection prompts a fresh QR
     try {
@@ -546,17 +559,10 @@ app.post("/logout", async (req, res) => {
       log.warn({ error_type: safeErrorType(wipeErr) }, "session_wipe_failed");
     }
 
-    // Trigger reconnect — new QR will appear on /qr shortly
-    setTimeout(() => {
-      connectToWhatsApp()
-        .catch((err) => log.error({ error_type: safeErrorType(err) }, "post_logout_reconnect_failed"))
-        .finally(() => { isReconnecting = false; });
-    }, 1000);
-
     log.info("user_logged_out");
     res.json({
       success: true,
-      message: "Logged out. New QR available at /qr in a few seconds.",
+      message: "Logged out. Automatic reconnect is disabled.",
     });
   } catch (err) {
     log.error({ error_type: safeErrorType(err) }, "logout_failed");
@@ -598,63 +604,198 @@ async function fetchVersionWithRetry(maxAttempts = 3, timeoutMs = 10000) {
   return undefined; // Fall back to Baileys default if all attempts fail
 }
 
-// ── WhatsApp Connection ───────────────────────────────────────────────────────
-async function connectToWhatsApp() {
-  if (!isBaileysConnectEnabled()) {
-    log.info({ connection_enabled: false }, "baileys_connection_disabled");
+// ── WhatsApp Connection Lifecycle ─────────────────────────────────────────────
+function clearReconnectTimer() {
+  if (reconnectTimer !== null) {
+    lifecycleDeps.clearTimer(reconnectTimer);
+    reconnectTimer = null;
+  }
+}
+
+function reconnectDelayMs(attempt) {
+  const exponential = RECONNECT_MIN_MS * (2 ** Math.max(0, attempt - 1));
+  const jitter = Math.floor(lifecycleDeps.random() * RECONNECT_JITTER_MS);
+  return Math.min(RECONNECT_MAX_MS, exponential + jitter);
+}
+
+function detachSocket(socket) {
+  try {
+    socket?.ev?.removeAllListeners?.("connection.update");
+    socket?.ev?.removeAllListeners?.("creds.update");
+    socket?.ev?.removeAllListeners?.("messages.upsert");
+  } catch (err) {
+    log.warn({ error_type: safeErrorType(err) }, "baileys.socket_detach_failed");
+  }
+}
+
+function closeSocketSafely(socket) {
+  try {
+    socket?.end?.();
+  } catch (err) {
+    log.warn({ error_type: safeErrorType(err) }, "baileys.socket_close_failed");
+  }
+}
+
+function replaceCurrentSocket(nextSocket) {
+  const previous = currentSocket;
+  if (previous && previous !== nextSocket) {
+    detachSocket(previous);
+    closeSocketSafely(previous);
+    log.info({ replaced: true }, "baileys.socket_replaced");
+  }
+  currentSocket = nextSocket;
+  socketGeneration += 1;
+  return socketGeneration;
+}
+
+function scheduleReconnect(reason = "recoverable_close") {
+  if (!isBaileysConnectEnabled() || stopping || loggedOut || connectPromise || reconnectTimer !== null) {
+    log.info({ reason, stopping, logged_out: loggedOut }, "baileys.reconnect_skipped");
+    return false;
+  }
+
+  reconnectAttempt += 1;
+  const delay = reconnectDelayMs(reconnectAttempt);
+  reconnectTimer = lifecycleDeps.setTimer(() => {
+    reconnectTimer = null;
+    if (stopping || loggedOut || !isBaileysConnectEnabled()) return;
+    void connectToWhatsApp().catch((err) => {
+      log.error({ error_type: safeErrorType(err) }, "baileys.reconnect_failed");
+      scheduleReconnect("connect_failed");
+    });
+  }, delay);
+  log.info({ attempt: reconnectAttempt, delay_ms: delay, reason }, "baileys.reconnect_scheduled");
+  return true;
+}
+
+function handleConnectionUpdate(socket, generation, update = {}) {
+  if (socket !== currentSocket || generation !== socketGeneration) {
+    log.info({ generation }, "baileys.socket_close_ignored_stale");
     return;
   }
 
-  const { state, saveCreds } = await useMultiFileAuthState(SESSIONS_DIR);
+  const { connection, lastDisconnect, qr } = update;
+  if (qr) {
+    currentQR = qr;
+    qrTimestamp = Date.now();
+    log.info({ event_type: "connection.update", qr_present: true }, "qr_code_generated");
+  }
 
-  // Fetch latest WA Web version (with timeout + retry for VPN resilience)
-  const version = await fetchVersionWithRetry(3, 10000);
+  if (connection === "open") {
+    clearReconnectTimer();
+    reconnectAttempt = 0;
+    currentQR = null;
+    qrTimestamp = 0;
+    log.info({ connected: true }, "baileys.socket_open");
+    return;
+  }
+  if (connection !== "close") return;
 
-  sock = makeWASocket({
-    auth: state,
-    logger: pino({ level: process.env.BAILEYS_LOG_LEVEL || "silent" }),
-    browser: ["MBB ya Kin", "Chrome", "1.0.0"],
-    syncFullHistory: false,
-    generateHighQualityLinkPreview: false,
-    ...(version && { version }),
-  });
+  let code;
+  try {
+    code = lastDisconnect?.error?.output?.statusCode;
+  } catch (err) {
+    log.warn({ error_type: safeErrorType(err) }, "baileys.disconnect_classification_failed");
+  }
+  const wasLoggedOut = loggedOut || code === DisconnectReason.loggedOut;
+  currentSocket = null;
+  currentQR = null;
+  qrTimestamp = 0;
+  if (wasLoggedOut) {
+    loggedOut = true;
+    clearReconnectTimer();
+    reconnectAttempt = 0;
+    log.info({ logged_out: true }, "baileys.reconnect_skipped");
+    return;
+  }
+  if (stopping) {
+    log.info({ stopping: true }, "baileys.reconnect_skipped");
+    return;
+  }
+  scheduleReconnect("recoverable_close");
+}
 
-  sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
+function connectToWhatsApp() {
+  if (!isBaileysConnectEnabled() || stopping || loggedOut) {
+    clearReconnectTimer();
+    log.info({ connection_enabled: isBaileysConnectEnabled(), stopping, logged_out: loggedOut },
+      "baileys.reconnect_skipped");
+    return Promise.resolve(undefined);
+  }
+  if (connectPromise) {
+    log.info({ reused: true }, "baileys.connect_reused");
+    return connectPromise;
+  }
 
-    if (qr) {
-      currentQR = qr;
-      qrTimestamp = Date.now();
-      log.info({ event_type: "connection.update", qr_present: true }, "qr_code_generated");
-    }
-
-    if (connection === "close") {
-      const code = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = code !== DisconnectReason.loggedOut;
-      log.warn({ code, shouldReconnect }, "connection_closed");
-
-      if (shouldReconnect) {
-        // Exponential backoff (max 30s) — handles DRC instability
-        const delay = Math.min(5000 * (1 + Math.random()), 30000);
-        log.info({ delay_ms: delay }, "reconnecting");
-        setTimeout(connectToWhatsApp, delay);
-      } else {
-        log.error("logged_out — delete sessions/ folder and restart to re-scan QR");
+  clearReconnectTimer();
+  log.info({ attempt: reconnectAttempt }, "baileys.connect_started");
+  const attempt = (async () => {
+    const { state, saveCreds } = await lifecycleDeps.loadAuth(SESSIONS_DIR);
+    const version = await lifecycleDeps.fetchVersion();
+    if (stopping || loggedOut || !isBaileysConnectEnabled()) return undefined;
+    const nextSocket = lifecycleDeps.makeSocket({
+      auth: state,
+      logger: pino({ level: process.env.BAILEYS_LOG_LEVEL || "silent" }),
+      browser: ["MBB ya Kin", "Chrome", "1.0.0"],
+      syncFullHistory: false,
+      generateHighQualityLinkPreview: false,
+      ...(version && { version }),
+    });
+    const generation = replaceCurrentSocket(nextSocket);
+    nextSocket.ev.on("connection.update", (update) =>
+      handleConnectionUpdate(nextSocket, generation, update));
+    nextSocket.ev.on("creds.update", (...args) => {
+      if (nextSocket === currentSocket && generation === socketGeneration) return saveCreds(...args);
+      return undefined;
+    });
+    nextSocket.ev.on("messages.upsert", (event) => {
+      if (nextSocket === currentSocket && generation === socketGeneration) {
+        handleMessagesUpsertEvent(event);
       }
-    } else if (connection === "open") {
-      currentQR = null;   // QR no longer needed once connected
-      log.info({
-        event_type: "connection.update",
-        jid_domain: jidDomain(sock.user?.id),
-        connected: true,
-      }, "whatsapp_connected");
-    }
-  });
+    });
+    return nextSocket;
+  })();
+  connectPromise = attempt;
+  attempt.then(
+    () => { if (connectPromise === attempt) connectPromise = null; },
+    () => { if (connectPromise === attempt) connectPromise = null; }
+  );
+  return attempt;
+}
 
-  sock.ev.on("creds.update", saveCreds);
+async function logoutCurrentSocket() {
+  loggedOut = true;
+  clearReconnectTimer();
+  reconnectAttempt = 0;
+  const socket = currentSocket;
+  currentSocket = null;
+  currentQR = null;
+  qrTimestamp = 0;
+  detachSocket(socket);
+  if (socket?.user && typeof socket.logout === "function") await socket.logout();
+}
 
-  // ── Inbound Message Handler ─────────────────────────────────────────────────
-  sock.ev.on("messages.upsert", (event) => handleMessagesUpsertEvent(event));
+async function shutdownBridge(server = httpServer) {
+  if (stopping) return;
+  stopping = true;
+  log.info({ stopping: true }, "baileys.shutdown_started");
+  clearReconnectTimer();
+  reconnectAttempt = 0;
+  const socket = currentSocket;
+  currentSocket = null;
+  currentQR = null;
+  qrTimestamp = 0;
+  detachSocket(socket);
+  closeSocketSafely(socket);
+  if (server?.close) {
+    await new Promise((resolve) => {
+      try { server.close(() => resolve()); } catch (err) {
+        log.warn({ error_type: safeErrorType(err) }, "baileys.http_close_failed");
+        resolve();
+      }
+    });
+  }
+  log.info({ stopping: true }, "baileys.shutdown_complete");
 }
 
 function startBridge({
@@ -664,7 +805,7 @@ function startBridge({
   connect = connectToWhatsApp,
   exit = (code) => process.exit(code),
 } = {}) {
-  listen();
+  httpServer = listen() || httpServer;
 
   if (!isBaileysConnectEnabled()) {
     log.info({ connection_enabled: false }, "baileys_connection_disabled");
@@ -679,17 +820,59 @@ function startBridge({
 }
 
 if (require.main === module) {
-  startBridge();
+  process.once("SIGINT", () => { void shutdownBridge().finally(() => process.exit(0)); });
+  process.once("SIGTERM", () => { void shutdownBridge().finally(() => process.exit(0)); });
+  void startBridge();
 }
 
 function setSocketForTests(nextSocket) {
-  sock = nextSocket;
-  isReconnecting = false;
+  currentSocket = nextSocket;
+  socketGeneration += 1;
+}
+
+function setLifecycleDependenciesForTests(overrides = {}) {
+  Object.assign(lifecycleDeps, overrides);
+}
+
+function resetLifecycleForTests() {
+  clearReconnectTimer();
+  currentSocket = null;
+  currentQR = null;
+  qrTimestamp = 0;
+  connectPromise = null;
+  reconnectAttempt = 0;
+  stopping = false;
+  loggedOut = false;
+  socketGeneration = 0;
+  httpServer = null;
+  Object.assign(lifecycleDeps, {
+    loadAuth: useMultiFileAuthState,
+    fetchVersion: () => fetchVersionWithRetry(3, 10000),
+    makeSocket: makeWASocket,
+    random: Math.random,
+    setTimer: setTimeout,
+    clearTimer: clearTimeout,
+  });
+}
+
+function getLifecycleStateForTests() {
+  return {
+    currentSocket,
+    connectPromise,
+    reconnectTimer,
+    reconnectAttempt,
+    stopping,
+    loggedOut,
+    socketGeneration,
+    currentQR,
+  };
 }
 
 module.exports = {
   app,
   connectToWhatsApp,
+  getLifecycleStateForTests,
+  handleConnectionUpdate,
   handleInboundUpsert,
   handleMessagesUpsertEvent,
   handleSend,
@@ -697,6 +880,10 @@ module.exports = {
   jidDomain,
   normalizePnJid,
   resolveInboundIdentity,
+  resetLifecycleForTests,
+  scheduleReconnect,
+  setLifecycleDependenciesForTests,
   setSocketForTests,
+  shutdownBridge,
   startBridge,
 };
