@@ -838,6 +838,43 @@ function disconnectCategory(code) {
   return "recoverable_close";
 }
 
+function classifyStatus408Origin(error) {
+  let statusCode;
+  let message;
+  let payloadMessage;
+  try {
+    statusCode = error?.output?.statusCode;
+    if (statusCode !== 408) return "not_applicable";
+    message = error?.message;
+    payloadMessage = error?.output?.payload?.message;
+  } catch {
+    return statusCode === 408 ? "unknown_408" : "not_applicable";
+  }
+
+  const classifyMessage = (value) => {
+    if (typeof value !== "string") return null;
+    if (value === "QR refs attempts ended") return "qr_refs_exhausted";
+    if (value === "Connection was lost") return "keepalive_silence";
+    if (value.startsWith("WebSocket Error (")) return "websocket_error";
+    if (value === "Timed Out" || value === "Pre-key upload timeout") {
+      return "operation_timeout";
+    }
+    if (value === "Connection Failure" || value.startsWith("Stream Errored (")) {
+      return "server_408";
+    }
+    return null;
+  };
+
+  const messageOrigin = classifyMessage(message);
+  const payloadOrigin = classifyMessage(payloadMessage);
+  if (typeof message === "string" && typeof payloadMessage === "string" &&
+      message !== payloadMessage) {
+    return "unknown_408";
+  }
+  const origins = [...new Set([messageOrigin, payloadOrigin].filter(Boolean))];
+  return origins.length === 1 ? origins[0] : "unknown_408";
+}
+
 function reconnectSkipReason() {
   if (!isBaileysConnectEnabled()) return "connection_disabled";
   if (stopping) return "stopping";
@@ -878,13 +915,32 @@ function replaceCurrentSocket(nextSocket) {
   return socketGeneration;
 }
 
-function scheduleReconnect(category = "recoverable_close", generation = socketGeneration) {
+function scheduleReconnect(
+  category = "recoverable_close",
+  generation = socketGeneration,
+  disconnectOrigin = "unknown_408"
+) {
+  const allowed408Origins = new Set([
+    "qr_refs_exhausted",
+    "keepalive_silence",
+    "websocket_error",
+    "operation_timeout",
+    "server_408",
+    "unknown_408",
+  ]);
+  const safeDisconnectOrigin = allowed408Origins.has(disconnectOrigin)
+    ? disconnectOrigin
+    : "unknown_408";
+  const originFields = category === "connection_lost_or_timed_out"
+    ? { disconnect_origin: safeDisconnectOrigin }
+    : {};
   const skipReason = reconnectSkipReason();
   if (skipReason) {
     log.info({
       skip_reason: skipReason,
       socket_generation: generation,
       disconnect_category: category,
+      ...originFields,
     }, "baileys.reconnect_skipped");
     return false;
   }
@@ -908,6 +964,7 @@ function scheduleReconnect(category = "recoverable_close", generation = socketGe
     delay_ms: delay,
     socket_generation: generation,
     disconnect_category: category,
+    ...originFields,
   }, "baileys.reconnect_scheduled");
   return true;
 }
@@ -941,8 +998,10 @@ function handleConnectionUpdate(socket, generation, update = {}) {
   if (connection !== "close") return;
 
   let code;
+  let disconnectError;
   try {
-    code = lastDisconnect?.error?.output?.statusCode;
+    disconnectError = lastDisconnect?.error;
+    code = disconnectError?.output?.statusCode;
   } catch (err) {
     log.warn({
       error_type: safeErrorType(err),
@@ -951,6 +1010,7 @@ function handleConnectionUpdate(socket, generation, update = {}) {
     }, "baileys.disconnect_classification_failed");
   }
   const category = disconnectCategory(code);
+  const disconnectOrigin = classifyStatus408Origin(disconnectError);
   const terminalActions = {
     logged_out: "manual_reauthentication_required",
     connection_replaced: "another_connection_replaced_this_session",
@@ -978,10 +1038,13 @@ function handleConnectionUpdate(socket, generation, update = {}) {
       skip_reason: "stopping",
       socket_generation: generation,
       disconnect_category: category,
+      ...(category === "connection_lost_or_timed_out"
+        ? { disconnect_origin: disconnectOrigin }
+        : {}),
     }, "baileys.reconnect_skipped");
     return;
   }
-  scheduleReconnect(category, generation);
+  scheduleReconnect(category, generation, disconnectOrigin);
 }
 
 function connectToWhatsApp(initiatingCategory = "manual_or_startup") {
@@ -1152,6 +1215,7 @@ function getLifecycleStateForTests() {
 
 module.exports = {
   app,
+  classifyStatus408Origin,
   connectToWhatsApp,
   getLifecycleStateForTests,
   handleConnectionUpdate,

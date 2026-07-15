@@ -1236,6 +1236,11 @@ test("recoverable v7 disconnects use truthful categories and one bounded timer",
     const lifecycleEvent = namedEventsSince(firstLog, eventName).at(-1);
     assert.equal(lifecycleEvent[1].socket_generation, 1);
     assert.equal(lifecycleEvent[1].disconnect_category, category);
+    if (category === "connection_lost_or_timed_out") {
+      assert.equal(lifecycleEvent[1].disconnect_origin, "unknown_408");
+    } else {
+      assert.equal("disconnect_origin" in lifecycleEvent[1], false);
+    }
     assert.ok(lifecycleEvent[1].delay_ms >= 1000 && lifecycleEvent[1].delay_ms <= 30000);
     assert.equal(timers.size, expectedTimers);
     const serialized = JSON.stringify(logs.slice(firstLog));
@@ -1246,6 +1251,129 @@ test("recoverable v7 disconnects use truthful categories and one bounded timer",
       "unavailable-private",
       "generic-private",
       "unknown-private",
+    ]) {
+      assert.equal(serialized.includes(sensitive), false);
+    }
+    disableLifecycle();
+  }
+});
+
+test("status 408 origins use only exact rc13 boundary signatures", () => {
+  const error408 = (message, fields = {}) => ({
+    name: "Error",
+    message,
+    output: {
+      statusCode: 408,
+      payload: { statusCode: 408, error: "Request Time-out", message },
+    },
+    ...fields,
+  });
+
+  const cases = [
+    [error408("QR refs attempts ended"), "qr_refs_exhausted"],
+    [error408("Connection was lost"), "keepalive_silence"],
+    [error408("WebSocket Error (synthetic network detail)"), "websocket_error"],
+    [error408("Timed Out"), "operation_timeout"],
+    [error408("Pre-key upload timeout"), "operation_timeout"],
+    [error408("Stream Errored (synthetic reason)"), "server_408"],
+    [error408("Connection Failure"), "server_408"],
+    [error408("Unrecognized 408"), "unknown_408"],
+    [{ output: { statusCode: 408 } }, "unknown_408"],
+    [{
+      message: "Connection was lost",
+      output: {
+        statusCode: 408,
+        payload: { message: "QR refs attempts ended" },
+      },
+    }, "unknown_408"],
+    [{
+      message: "WebSocket Error (Timed Out)",
+      output: {
+        statusCode: 408,
+        payload: { message: "WebSocket Error (Timed Out)" },
+      },
+    }, "websocket_error"],
+  ];
+
+  for (const [error, expected] of cases) {
+    assert.equal(bridge.classifyStatus408Origin(error), expected);
+  }
+  assert.equal(bridge.classifyStatus408Origin(null), "not_applicable");
+  for (const statusCode of [515, 428, 401, 440, 500, 411, 503, 499]) {
+    assert.equal(
+      bridge.classifyStatus408Origin({ output: { statusCode } }),
+      "not_applicable"
+    );
+  }
+  const malformed = { output: { statusCode: 408 } };
+  Object.defineProperty(malformed, "message", { get() { throw new Error("private getter"); } });
+  assert.equal(bridge.classifyStatus408Origin(malformed), "unknown_408");
+});
+
+test("status 408 origin logging is fixed and redacted without lifecycle changes", async () => {
+  const origins = [
+    ["QR refs attempts ended", "qr_refs_exhausted"],
+    ["Connection was lost", "keepalive_silence"],
+    ["WebSocket Error (sensitive-websocket-marker)", "websocket_error"],
+    ["Timed Out", "operation_timeout"],
+    ["Stream Errored (sensitive-stream-marker)", "server_408"],
+    ["sensitive-unknown-marker", "unknown_408"],
+  ];
+
+  for (const [messageText, expectedOrigin] of origins) {
+    enableLifecycle();
+    const firstLog = logs.length;
+    const timers = fakeTimers();
+    const socket = fakeSocket();
+    bridge.setLifecycleDependenciesForTests({
+      loadAuth: async () => ({ state: {}, saveCreds() {} }),
+      fetchVersion: async () => undefined,
+      makeSocket: () => socket,
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      random: () => 0,
+    });
+    await bridge.connectToWhatsApp();
+    socket.ev.emit("connection.update", {
+      connection: "close",
+      lastDisconnect: {
+        error: {
+          message: messageText,
+          stack: "sensitive-stack-marker",
+          code: "sensitive-code-marker",
+          cause: "https://sensitive.invalid/?token=sensitive-cause-marker",
+          data: {
+            raw: "sensitive-data-marker",
+            qr: "sensitive-qr-marker",
+            jid: "123456789@s.whatsapp.net",
+            phone: "+123456789",
+            session: "C:\\sensitive-session-path",
+          },
+          output: {
+            statusCode: 408,
+            payload: { message: messageText, private: "sensitive-payload-marker" },
+          },
+        },
+      },
+    });
+    const event = namedEventsSince(firstLog, "baileys.reconnect_scheduled").at(-1);
+    assert.equal(event[1].disconnect_category, "connection_lost_or_timed_out");
+    assert.equal(event[1].disconnect_origin, expectedOrigin);
+    assert.equal(timers.size, 1);
+    const serialized = JSON.stringify(logs.slice(firstLog));
+    for (const sensitive of [
+      "sensitive-websocket-marker",
+      "sensitive-stream-marker",
+      "sensitive-unknown-marker",
+      "sensitive-stack-marker",
+      "sensitive-code-marker",
+      "sensitive-cause-marker",
+      "sensitive-data-marker",
+      "sensitive-payload-marker",
+      "sensitive-qr-marker",
+      "123456789@s.whatsapp.net",
+      "+123456789",
+      "sensitive-session-path",
     ]) {
       assert.equal(serialized.includes(sensitive), false);
     }
