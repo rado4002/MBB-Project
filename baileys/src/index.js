@@ -177,6 +177,19 @@ function safeStatusCategory(error) {
   return Number.isInteger(status) ? Math.floor(status / 100) * 100 : "unknown";
 }
 
+function safeForwardFailureCategory(error) {
+  const status = error?.response?.status;
+  if (Number.isInteger(status) && status >= 400 && status < 500) return "http_4xx";
+  if (Number.isInteger(status) && status >= 500 && status < 600) return "http_5xx";
+
+  const code = error?.code;
+  if (code === "ECONNABORTED" || code === "ETIMEDOUT") return "timeout";
+  if (["ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "EAI_AGAIN"].includes(code)) {
+    return "connection";
+  }
+  return "unknown";
+}
+
 function safeErrorType(error) {
   return error?.name || error?.code || "unknown_error";
 }
@@ -187,6 +200,34 @@ function logSkippedInbound(identity) {
 
 function logInvalidInbound(skipReason) {
   log.info({ skip_reason: skipReason }, "inbound_message_skipped");
+}
+
+function normalizedMessageTimestamp(value) {
+  if (value === null || value === undefined) return null;
+
+  let seconds;
+  try {
+    if (typeof value === "object") {
+      if (typeof value.toNumber !== "function") return null;
+      seconds = value.toNumber();
+    } else {
+      seconds = Number(value);
+    }
+  } catch {
+    return null;
+  }
+
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  const timestampMs = seconds * 1000;
+  if (!Number.isFinite(timestampMs) || timestampMs <= 0) return null;
+
+  try {
+    const date = new Date(timestampMs);
+    if (!Number.isFinite(date.getTime())) return null;
+    return date.toISOString();
+  } catch {
+    return null;
+  }
 }
 
 async function handleSend(req, res) {
@@ -231,7 +272,7 @@ async function handleSend(req, res) {
   }
 }
 
-async function handleInboundUpsert(event, postWebhook = axios.post) {
+async function handleInboundUpsert(event, postWebhook = axios.post, context = {}) {
   if (!isBaileysConnectEnabled()) {
     log.info({ connection_enabled: false }, "inbound_skipped_connection_disabled");
     return;
@@ -247,6 +288,9 @@ async function handleInboundUpsert(event, postWebhook = axios.post) {
     return;
   }
   if (type !== "notify") return;
+  const eventSocketGeneration = Number.isInteger(context.socketGeneration)
+    ? context.socketGeneration
+    : socketGeneration;
 
   for (const msg of messages) {
     try {
@@ -260,6 +304,10 @@ async function handleInboundUpsert(event, postWebhook = axios.post) {
       }
       if (typeof msg.key.id !== "string" || !msg.key.id.trim()) {
         logInvalidInbound("invalid_message_id");
+        continue;
+      }
+      if (msg.messageStubType !== undefined && msg.messageStubType !== null) {
+        logInvalidInbound("message_stub");
         continue;
       }
 
@@ -283,19 +331,8 @@ async function handleInboundUpsert(event, postWebhook = axios.post) {
         continue;
       }
 
-      if (msg.messageTimestamp === null || msg.messageTimestamp === undefined) {
-        logInvalidInbound("invalid_message_timestamp");
-        continue;
-      }
-      const timestampMs = Number(msg.messageTimestamp) * 1000;
-      if (!Number.isFinite(timestampMs)) {
-        logInvalidInbound("invalid_message_timestamp");
-        continue;
-      }
-      let timestamp;
-      try {
-        timestamp = new Date(timestampMs).toISOString();
-      } catch {
+      const timestamp = normalizedMessageTimestamp(msg.messageTimestamp);
+      if (timestamp === null) {
         logInvalidInbound("invalid_message_timestamp");
         continue;
       }
@@ -316,34 +353,50 @@ async function handleInboundUpsert(event, postWebhook = axios.post) {
         content_type: "text",
         message_present: true,
         message_key_count: messageKeyCount(msg),
+        candidate_eligible: true,
+        socket_generation: eventSocketGeneration,
+        upsert_type: type,
       }, "inbound_message");
 
       const headers = { "Content-Type": "application/json" };
       if (WEBHOOK_SECRET) headers["X-Webhook-Secret"] = WEBHOOK_SECRET;
 
-      let attempt = 0;
-      while (attempt < 3) {
+      const maximumAttempts = 3;
+      for (let attemptNumber = 1; attemptNumber <= maximumAttempts; attemptNumber += 1) {
+        log.info({
+          attempt_number: attemptNumber,
+          maximum_attempts: maximumAttempts,
+          socket_generation: eventSocketGeneration,
+          upsert_type: type,
+        }, "fastapi_forward_attempted");
         try {
-          await postWebhook(FASTAPI_WEBHOOK_URL, payload, {
+          const response = await postWebhook(FASTAPI_WEBHOOK_URL, payload, {
             timeout: 8000,
             headers,
           });
+          log.info({
+            successful_attempt_number: attemptNumber,
+            socket_generation: eventSocketGeneration,
+            http_status: Number.isInteger(response?.status) ? response.status : "unknown",
+          }, "fastapi_forward_succeeded");
           break;
         } catch (err) {
-          attempt++;
+          const failureCategory = safeForwardFailureCategory(err);
+          const willRetry = attemptNumber < maximumAttempts;
           log.warn({
-            attempt,
-            status_category: safeStatusCategory(err),
-            identity_source: identity.source,
-            jid_domain: identity.jidDomain,
+            attempt_number: attemptNumber,
+            maximum_attempts: maximumAttempts,
+            will_retry: willRetry,
+            failure_category: failureCategory,
+            socket_generation: eventSocketGeneration,
           }, "fastapi_forward_failed");
-          if (attempt < 3) {
-            await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
+          if (willRetry) {
+            await new Promise((resolve) => setTimeout(resolve, 2000 * attemptNumber));
           } else {
             log.error({
-              identity_source: identity.source,
-              jid_domain: identity.jidDomain,
-              status_category: safeStatusCategory(err),
+              attempts_made: maximumAttempts,
+              socket_generation: eventSocketGeneration,
+              failure_category: failureCategory,
             }, "fastapi_forward_exhausted");
           }
         }
@@ -357,9 +410,9 @@ async function handleInboundUpsert(event, postWebhook = axios.post) {
   }
 }
 
-function handleMessagesUpsertEvent(event, handler = handleInboundUpsert) {
+function handleMessagesUpsertEvent(event, handler = handleInboundUpsert, context = {}) {
   void Promise.resolve()
-    .then(() => handler(event))
+    .then(() => handler(event, undefined, context))
     .catch((err) => {
       log.error({
         skip_reason: "inbound_handler_rejected",
@@ -661,6 +714,33 @@ function reconnectDelayMs(attempt) {
   return Math.min(RECONNECT_MAX_MS, exponential + jitter);
 }
 
+function disconnectCategory(code) {
+  if (!Number.isInteger(code)) return "unknown";
+  const mappings = [
+    ["loggedOut", "logged_out"],
+    ["restartRequired", "restart_required"],
+    ["connectionClosed", "connection_closed"],
+    ["connectionLost", "connection_lost"],
+    ["timedOut", "timed_out"],
+    ["badSession", "bad_session"],
+  ];
+  for (const [reason, category] of mappings) {
+    if (Number.isInteger(DisconnectReason[reason]) && code === DisconnectReason[reason]) {
+      return category;
+    }
+  }
+  return "recoverable_close";
+}
+
+function reconnectSkipReason() {
+  if (!isBaileysConnectEnabled()) return "connection_disabled";
+  if (stopping) return "stopping";
+  if (loggedOut) return "logged_out";
+  if (connectPromise) return "connect_in_progress";
+  if (reconnectTimer !== null) return "timer_already_scheduled";
+  return null;
+}
+
 function detachSocket(socket) {
   try {
     socket?.ev?.removeAllListeners?.("connection.update");
@@ -691,9 +771,14 @@ function replaceCurrentSocket(nextSocket) {
   return socketGeneration;
 }
 
-function scheduleReconnect(reason = "recoverable_close") {
-  if (!isBaileysConnectEnabled() || stopping || loggedOut || connectPromise || reconnectTimer !== null) {
-    log.info({ reason, stopping, logged_out: loggedOut }, "baileys.reconnect_skipped");
+function scheduleReconnect(category = "recoverable_close", generation = socketGeneration) {
+  const skipReason = reconnectSkipReason();
+  if (skipReason) {
+    log.info({
+      skip_reason: skipReason,
+      socket_generation: generation,
+      disconnect_category: category,
+    }, "baileys.reconnect_skipped");
     return false;
   }
 
@@ -702,18 +787,32 @@ function scheduleReconnect(reason = "recoverable_close") {
   reconnectTimer = lifecycleDeps.setTimer(() => {
     reconnectTimer = null;
     if (stopping || loggedOut || !isBaileysConnectEnabled()) return;
-    void connectToWhatsApp().catch((err) => {
-      log.error({ error_type: safeErrorType(err) }, "baileys.reconnect_failed");
-      scheduleReconnect("connect_failed");
+    void connectToWhatsApp("scheduled_reconnect").catch((err) => {
+      log.error({
+        error_type: safeErrorType(err),
+        socket_generation: generation,
+        disconnect_category: "unknown",
+      }, "baileys.reconnect_failed");
+      scheduleReconnect("unknown", socketGeneration);
     });
   }, delay);
-  log.info({ attempt: reconnectAttempt, delay_ms: delay, reason }, "baileys.reconnect_scheduled");
+  log.info({
+    reconnect_attempt: reconnectAttempt,
+    delay_ms: delay,
+    socket_generation: generation,
+    disconnect_category: category,
+  }, "baileys.reconnect_scheduled");
   return true;
 }
 
 function handleConnectionUpdate(socket, generation, update = {}) {
   if (socket !== currentSocket || generation !== socketGeneration) {
-    log.info({ generation }, "baileys.socket_close_ignored_stale");
+    log.info({
+      skip_reason: "stale_generation",
+      socket_generation: generation,
+      authoritative_socket_generation: socketGeneration,
+      disconnect_category: "unknown",
+    }, "baileys.reconnect_skipped");
     return;
   }
 
@@ -738,9 +837,14 @@ function handleConnectionUpdate(socket, generation, update = {}) {
   try {
     code = lastDisconnect?.error?.output?.statusCode;
   } catch (err) {
-    log.warn({ error_type: safeErrorType(err) }, "baileys.disconnect_classification_failed");
+    log.warn({
+      error_type: safeErrorType(err),
+      socket_generation: generation,
+      disconnect_category: "unknown",
+    }, "baileys.disconnect_classification_failed");
   }
-  const wasLoggedOut = loggedOut || code === DisconnectReason.loggedOut;
+  const category = disconnectCategory(code);
+  const wasLoggedOut = loggedOut || category === "logged_out";
   currentSocket = null;
   currentQR = null;
   qrTimestamp = 0;
@@ -748,21 +852,32 @@ function handleConnectionUpdate(socket, generation, update = {}) {
     loggedOut = true;
     clearReconnectTimer();
     reconnectAttempt = 0;
-    log.info({ logged_out: true }, "baileys.reconnect_skipped");
+    log.info({
+      skip_reason: "logged_out",
+      socket_generation: generation,
+      disconnect_category: "logged_out",
+    }, "baileys.reconnect_skipped");
     return;
   }
   if (stopping) {
-    log.info({ stopping: true }, "baileys.reconnect_skipped");
+    log.info({
+      skip_reason: "stopping",
+      socket_generation: generation,
+      disconnect_category: category,
+    }, "baileys.reconnect_skipped");
     return;
   }
-  scheduleReconnect("recoverable_close");
+  scheduleReconnect(category, generation);
 }
 
-function connectToWhatsApp() {
+function connectToWhatsApp(initiatingCategory = "manual_or_startup") {
   if (!isBaileysConnectEnabled() || stopping || loggedOut) {
     clearReconnectTimer();
-    log.info({ connection_enabled: isBaileysConnectEnabled(), stopping, logged_out: loggedOut },
-      "baileys.reconnect_skipped");
+    log.info({
+      skip_reason: reconnectSkipReason() || "unknown",
+      socket_generation: socketGeneration,
+      disconnect_category: "unknown",
+    }, "baileys.reconnect_skipped");
     return Promise.resolve(undefined);
   }
   if (connectPromise) {
@@ -771,7 +886,11 @@ function connectToWhatsApp() {
   }
 
   clearReconnectTimer();
-  log.info({ attempt: reconnectAttempt }, "baileys.connect_started");
+  log.info({
+    next_socket_generation: socketGeneration + 1,
+    reconnect_attempt: reconnectAttempt,
+    initiating_category: initiatingCategory,
+  }, "baileys.connect_started");
   const attempt = (async () => {
     const { state, saveCreds } = await lifecycleDeps.loadAuth(SESSIONS_DIR);
     const version = await lifecycleDeps.fetchVersion();
@@ -793,7 +912,7 @@ function connectToWhatsApp() {
     });
     nextSocket.ev.on("messages.upsert", (event) => {
       if (nextSocket === currentSocket && generation === socketGeneration) {
-        handleMessagesUpsertEvent(event);
+        handleMessagesUpsertEvent(event, handleInboundUpsert, { socketGeneration: generation });
       }
     });
     return nextSocket;

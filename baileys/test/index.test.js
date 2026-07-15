@@ -31,7 +31,14 @@ fakeExpress.json = () => () => {};
 Module._load = function load(request, parent, isMain) {
   if (request === "@whiskeysockets/baileys") {
     return {
-      DisconnectReason: { loggedOut: 401 },
+      DisconnectReason: {
+        loggedOut: 401,
+        connectionClosed: 428,
+        connectionLost: 408,
+        restartRequired: 515,
+        timedOut: 4080,
+        badSession: 500,
+      },
       fetchLatestWaWebVersion: async () => {
         dependencyCalls.version += 1;
         return { version: [1, 1, 1] };
@@ -110,6 +117,23 @@ function recoveryRequest(token = "test-recovery-token") {
 
 function auditEventsSince(firstLog, eventName) {
   return logs.slice(firstLog).filter((entry) => entry.includes(eventName));
+}
+
+function namedEventsSince(firstLog, eventName) {
+  return logs.slice(firstLog).filter((entry) => entry.at(-1) === eventName);
+}
+
+async function withImmediateTimeout(action) {
+  const originalSetTimeout = global.setTimeout;
+  global.setTimeout = (callback) => {
+    callback();
+    return 1;
+  };
+  try {
+    return await action();
+  } finally {
+    global.setTimeout = originalSetTimeout;
+  }
 }
 
 test("disabled startup starts HTTP only and touches no connection dependency", async () => {
@@ -483,6 +507,267 @@ test("forwards an authoritative international identity unchanged", async () => {
   assert.equal(calls[0][1].whatsapp_message_id, "message-id");
 });
 
+test("append and replace events produce no candidate or forwarding activity", async () => {
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+  try {
+    for (const type of ["append", "replace"]) {
+      const firstLog = logs.length;
+      let attempts = 0;
+      await bridge.handleInboundUpsert({
+        type,
+        messages: [message("243812345678@s.whatsapp.net")],
+      }, async () => { attempts += 1; return { status: 200 }; });
+      assert.equal(attempts, 0);
+      for (const eventName of [
+        "inbound_message",
+        "fastapi_forward_attempted",
+        "fastapi_forward_failed",
+        "fastapi_forward_exhausted",
+        "fastapi_forward_succeeded",
+      ]) assert.equal(namedEventsSince(firstLog, eventName).length, 0);
+    }
+  } finally {
+    process.env.BAILEYS_CONNECT_ENABLED = "false";
+  }
+});
+
+test("stub-only and stub-with-text notifications are safely rejected", async () => {
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+  try {
+    for (const stub of [
+      { ...message("243812345678@s.whatsapp.net"), messageStubType: 0, message: undefined },
+      { ...message("243812345678@s.whatsapp.net"), messageStubType: 1 },
+      {
+        ...message("243812345678@s.whatsapp.net"),
+        messageStubType: 2,
+        message: { extendedTextMessage: { text: "stub private content" } },
+      },
+    ]) {
+      const firstLog = logs.length;
+      let attempts = 0;
+      await bridge.handleInboundUpsert({ type: "notify", messages: [stub] },
+        async () => { attempts += 1; return { status: 200 }; });
+      assert.equal(attempts, 0);
+      assert.deepEqual(namedEventsSince(firstLog, "inbound_message_skipped"), [[
+        "info",
+        { skip_reason: "message_stub" },
+        "inbound_message_skipped",
+      ]]);
+      assert.equal(namedEventsSince(firstLog, "fastapi_forward_attempted").length, 0);
+      assert.equal(namedEventsSince(firstLog, "fastapi_forward_succeeded").length, 0);
+    }
+  } finally {
+    process.env.BAILEYS_CONNECT_ENABLED = "false";
+  }
+});
+
+test("invalid timestamps are rejected with fixed redacted diagnostics", async () => {
+  const invalidTimestamps = [
+    0,
+    -1,
+    NaN,
+    Infinity,
+    -Infinity,
+    { low: 1, high: 0, unsigned: false },
+    Number.MAX_VALUE,
+  ];
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+  try {
+    for (const messageTimestamp of invalidTimestamps) {
+      const firstLog = logs.length;
+      let attempts = 0;
+      await bridge.handleInboundUpsert({
+        type: "notify",
+        messages: [{ ...message("243812345678@s.whatsapp.net"), messageTimestamp }],
+      }, async () => { attempts += 1; return { status: 200 }; });
+      assert.equal(attempts, 0);
+      assert.deepEqual(namedEventsSince(firstLog, "inbound_message_skipped"), [[
+        "info",
+        { skip_reason: "invalid_message_timestamp" },
+        "inbound_message_skipped",
+      ]]);
+    }
+  } finally {
+    process.env.BAILEYS_CONNECT_ENABLED = "false";
+  }
+});
+
+test("positive numeric and long-like timestamps remain eligible", async () => {
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+  try {
+    for (const messageTimestamp of [1710000000, { toNumber: () => 1710000000 }]) {
+      let attempts = 0;
+      await bridge.handleInboundUpsert({
+        type: "notify",
+        messages: [{ ...message("243812345678@s.whatsapp.net"), messageTimestamp }],
+      }, async () => { attempts += 1; return { status: 204 }; });
+      assert.equal(attempts, 1);
+    }
+  } finally {
+    process.env.BAILEYS_CONNECT_ENABLED = "false";
+  }
+});
+
+test("protocol, reaction, and unsupported notify content never reaches forwarding", async () => {
+  const base = message("243812345678@s.whatsapp.net");
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+  try {
+    let attempts = 0;
+    await bridge.handleInboundUpsert({
+      type: "notify",
+      messages: [
+        { ...base, message: { protocolMessage: { type: 0 } } },
+        { ...base, message: { reactionMessage: { text: "private reaction" } } },
+        { ...base, message: { imageMessage: { caption: "private caption" } } },
+      ],
+    }, async () => { attempts += 1; return { status: 200 }; });
+    assert.equal(attempts, 0);
+  } finally {
+    process.env.BAILEYS_CONNECT_ENABLED = "false";
+  }
+});
+
+test("history followed by live notify forwards only the live candidate", async () => {
+  const firstLog = logs.length;
+  let attempts = 0;
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+  try {
+    await bridge.handleInboundUpsert({
+      type: "append",
+      messages: [message("243812345678@s.whatsapp.net")],
+    }, async () => { attempts += 1; return { status: 200 }; });
+    await bridge.handleInboundUpsert({
+      type: "notify",
+      messages: [message("243812345678@s.whatsapp.net")],
+    }, async () => { attempts += 1; return { status: 202 }; });
+  } finally {
+    process.env.BAILEYS_CONNECT_ENABLED = "false";
+  }
+  assert.equal(attempts, 1);
+  assert.equal(namedEventsSince(firstLog, "inbound_message").length, 1);
+  assert.equal(namedEventsSince(firstLog, "fastapi_forward_attempted").length, 1);
+  assert.equal(namedEventsSince(firstLog, "fastapi_forward_succeeded").length, 1);
+});
+
+test("successful first attempt has explicit candidate, attempt, and success semantics", async () => {
+  const firstLog = logs.length;
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+  try {
+    await bridge.handleInboundUpsert({
+      type: "notify",
+      messages: [message("243812345678@s.whatsapp.net")],
+    }, async () => ({ status: 201 }), { socketGeneration: 7 });
+  } finally {
+    process.env.BAILEYS_CONNECT_ENABLED = "false";
+  }
+  const candidates = namedEventsSince(firstLog, "inbound_message");
+  const attempted = namedEventsSince(firstLog, "fastapi_forward_attempted");
+  const succeeded = namedEventsSince(firstLog, "fastapi_forward_succeeded");
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0][1].candidate_eligible, true);
+  assert.equal(candidates[0][1].socket_generation, 7);
+  assert.deepEqual(attempted.map((entry) => entry[1].attempt_number), [1]);
+  assert.deepEqual(succeeded.map((entry) => entry[1]), [{
+    successful_attempt_number: 1,
+    socket_generation: 7,
+    http_status: 201,
+  }]);
+  assert.equal(namedEventsSince(firstLog, "fastapi_forward_failed").length, 0);
+  assert.equal(namedEventsSince(firstLog, "fastapi_forward_exhausted").length, 0);
+});
+
+test("three failed attempts log retry decisions and one exhaustion", async () => {
+  const firstLog = logs.length;
+  const rawErrorBody = "synthetic-raw-error-body";
+  let attempts = 0;
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+  try {
+    await withImmediateTimeout(() => bridge.handleInboundUpsert({
+      type: "notify",
+      messages: [message("243812345678@s.whatsapp.net")],
+    }, async () => {
+      attempts += 1;
+      const error = new Error("synthetic-private-error");
+      error.code = "ECONNREFUSED";
+      error.responseBody = rawErrorBody;
+      throw error;
+    }, { socketGeneration: 8 }));
+  } finally {
+    process.env.BAILEYS_CONNECT_ENABLED = "false";
+  }
+  const attempted = namedEventsSince(firstLog, "fastapi_forward_attempted");
+  const failed = namedEventsSince(firstLog, "fastapi_forward_failed");
+  const exhausted = namedEventsSince(firstLog, "fastapi_forward_exhausted");
+  assert.equal(attempts, 3);
+  assert.deepEqual(attempted.map((entry) => entry[1].attempt_number), [1, 2, 3]);
+  assert.deepEqual(failed.map((entry) => entry[1].will_retry), [true, true, false]);
+  assert.ok(failed.every((entry) => entry[1].failure_category === "connection"));
+  assert.deepEqual(exhausted.map((entry) => entry[1]), [{
+    attempts_made: 3,
+    socket_generation: 8,
+    failure_category: "connection",
+  }]);
+  assert.equal(namedEventsSince(firstLog, "fastapi_forward_succeeded").length, 0);
+  assert.equal(JSON.stringify(logs.slice(firstLog)).includes(rawErrorBody), false);
+});
+
+test("success after one retry logs one retry and succeeds on attempt two", async () => {
+  const firstLog = logs.length;
+  let attempts = 0;
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+  try {
+    await withImmediateTimeout(() => bridge.handleInboundUpsert({
+      type: "notify",
+      messages: [message("243812345678@s.whatsapp.net")],
+    }, async () => {
+      attempts += 1;
+      if (attempts === 1) throw Object.assign(new Error("private timeout"), { code: "ETIMEDOUT" });
+      return { status: 200, data: "private response body" };
+    }, { socketGeneration: 9 }));
+  } finally {
+    process.env.BAILEYS_CONNECT_ENABLED = "false";
+  }
+  assert.deepEqual(
+    namedEventsSince(firstLog, "fastapi_forward_attempted").map((entry) => entry[1].attempt_number),
+    [1, 2]
+  );
+  const failed = namedEventsSince(firstLog, "fastapi_forward_failed");
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0][1].will_retry, true);
+  assert.equal(failed[0][1].failure_category, "timeout");
+  assert.equal(namedEventsSince(firstLog, "fastapi_forward_succeeded")[0][1].successful_attempt_number, 2);
+  assert.equal(namedEventsSince(firstLog, "fastapi_forward_exhausted").length, 0);
+});
+
+test("webhook observability logs exclude identity, payload, credentials, and raw responses", async () => {
+  const firstLog = logs.length;
+  const sensitiveMessage = {
+    key: { remoteJid: "243899999999@s.whatsapp.net", id: "full-sensitive-whatsapp-id" },
+    message: { conversation: "synthetic sensitive message content" },
+    messageTimestamp: 1710000000,
+  };
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+  try {
+    await bridge.handleInboundUpsert({ type: "notify", messages: [sensitiveMessage] },
+      async () => ({ status: 200, data: "synthetic private response body" }));
+  } finally {
+    process.env.BAILEYS_CONNECT_ENABLED = "false";
+  }
+  const serialized = JSON.stringify(logs.slice(firstLog));
+  for (const sensitive of [
+    "243899999999",
+    "@s.whatsapp.net",
+    "synthetic sensitive message content",
+    "full-sensitive-whatsapp-id",
+    "Authorization",
+    "test-webhook-secret",
+    "customer_phone",
+    "synthetic private response body",
+    "/app/sessions",
+    "qrDataUrl",
+  ]) assert.equal(serialized.includes(sensitive), false);
+});
+
 test("outbound disabled mode makes zero sendMessage calls and logs no sensitive values", async () => {
   let sendCalls = 0;
   bridge.setSocketForTests({
@@ -748,6 +1033,76 @@ test("logged-out close records suppression and schedules nothing", async () => {
   });
   assert.equal(bridge.getLifecycleStateForTests().loggedOut, true);
   assert.equal(timers.size, 0);
+  disableLifecycle();
+});
+
+test("reconnect logs classify safe disconnect categories with authoritative generations", async () => {
+  const cases = [
+    [{ lastDisconnect: { error: { output: { statusCode: 515 }, private: "restart-private" } } },
+      "restart_required", "baileys.reconnect_scheduled", 1],
+    [{ lastDisconnect: { error: { output: { statusCode: 401 }, private: "logout-private" } } },
+      "logged_out", "baileys.reconnect_skipped", 0],
+    [{ lastDisconnect: { error: { output: { statusCode: 499 }, private: "generic-private" } } },
+      "recoverable_close", "baileys.reconnect_scheduled", 1],
+    [{ lastDisconnect: { error: { private: "unknown-private" } } },
+      "unknown", "baileys.reconnect_scheduled", 1],
+  ];
+
+  for (const [closeFields, category, eventName, expectedTimers] of cases) {
+    enableLifecycle();
+    const firstLog = logs.length;
+    const timers = fakeTimers();
+    const socket = fakeSocket();
+    bridge.setLifecycleDependenciesForTests({
+      loadAuth: async () => ({ state: {}, saveCreds() {} }),
+      fetchVersion: async () => undefined,
+      makeSocket: () => socket,
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      random: () => 0,
+    });
+    await bridge.connectToWhatsApp();
+    const connectStarted = namedEventsSince(firstLog, "baileys.connect_started");
+    assert.equal(connectStarted.length, 1);
+    assert.deepEqual(connectStarted[0][1], {
+      next_socket_generation: 1,
+      reconnect_attempt: 0,
+      initiating_category: "manual_or_startup",
+    });
+    socket.ev.emit("connection.update", { connection: "close", ...closeFields });
+    const lifecycleEvent = namedEventsSince(firstLog, eventName).at(-1);
+    assert.equal(lifecycleEvent[1].socket_generation, 1);
+    assert.equal(lifecycleEvent[1].disconnect_category, category);
+    assert.equal(timers.size, expectedTimers);
+    const serialized = JSON.stringify(logs.slice(firstLog));
+    for (const sensitive of ["restart-private", "logout-private", "generic-private", "unknown-private"]) {
+      assert.equal(serialized.includes(sensitive), false);
+    }
+    disableLifecycle();
+  }
+});
+
+test("duplicate closes retain one timer and report stale generation safely", async () => {
+  enableLifecycle();
+  const firstLog = logs.length;
+  const timers = fakeTimers();
+  const socket = fakeSocket();
+  bridge.setLifecycleDependenciesForTests({
+    loadAuth: async () => ({ state: {}, saveCreds() {} }),
+    fetchVersion: async () => undefined,
+    makeSocket: () => socket,
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+    random: () => 0,
+  });
+  await bridge.connectToWhatsApp();
+  socket.ev.emit("connection.update", { connection: "close" });
+  socket.ev.emit("connection.update", { connection: "close" });
+  assert.equal(timers.size, 1);
+  const skipped = namedEventsSince(firstLog, "baileys.reconnect_skipped").at(-1);
+  assert.equal(skipped[1].skip_reason, "stale_generation");
+  assert.equal(skipped[1].socket_generation, 1);
+  assert.equal(skipped[1].authoritative_socket_generation, 1);
   disableLifecycle();
 });
 
