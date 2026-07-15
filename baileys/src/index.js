@@ -147,27 +147,63 @@ function resolveInboundIdentity(message) {
     return { skipReason: "unsupported_jid_domain", jidDomain: domain };
   }
 
-  const senderPn = normalizePnJid(keyValue(message, "senderPn"));
-  if (senderPn) {
-    return { phone: senderPn, source: "senderPn", jidDomain: domain };
+  const candidates = [];
+  const addCandidate = (value, source) => {
+    const phone = normalizePnJid(value);
+    if (phone) candidates.push({ phone, source });
+    return phone;
+  };
+  const alternatePn = (field, source) => {
+    const value = keyValue(message, field);
+    if (value === undefined || value === null) return true;
+    return Boolean(addCandidate(value, source));
+  };
+
+  if (domain === "s.whatsapp.net") {
+    addCandidate(remoteJid, "remoteJid");
+    addCandidate(keyValue(message, "senderPn"), "senderPn");
+    // In PN-addressed v7 messages this field normally carries a LID. Only a
+    // valid PN value is relevant to conflict detection here.
+    addCandidate(keyValue(message, "remoteJidAlt"), "remoteJidAlt");
+  } else {
+    if (!alternatePn("remoteJidAlt", "remoteJidAlt")) {
+      return { skipReason: "invalid_phone_identity", jidDomain: domain };
+    }
+    addCandidate(keyValue(message, "senderPn"), "senderPn");
+
+    const participant = keyValue(message, "participant");
+    const participantDomain = jidDomain(participant);
+    if (participant) {
+      if (participantDomain === "lid") {
+        if (!alternatePn("participantAlt", "participantAlt")) {
+          return { skipReason: "invalid_phone_identity", jidDomain: domain };
+        }
+        addCandidate(keyValue(message, "participantPn"), "participantPn");
+      } else if (participantDomain === "s.whatsapp.net") {
+        addCandidate(participant, "participant");
+        addCandidate(keyValue(message, "participantAlt"), "participantAlt");
+        addCandidate(keyValue(message, "participantPn"), "participantPn");
+      } else {
+        return { skipReason: "unsupported_participant_identity", jidDomain: domain };
+      }
+    } else {
+      if (!alternatePn("participantAlt", "participantAlt")) {
+        return { skipReason: "invalid_phone_identity", jidDomain: domain };
+      }
+      addCandidate(keyValue(message, "participantPn"), "participantPn");
+    }
   }
 
-  const participantPn = normalizePnJid(keyValue(message, "participantPn"));
-  const participant = keyValue(message, "participant");
-  const participantDomain = jidDomain(participant);
-  const participantContextIsValid =
-    domain === "lid" && (!participant || participantDomain === "lid");
-  if (participantPn && participantContextIsValid) {
-    return { phone: participantPn, source: "participantPn", jidDomain: domain };
+  const identities = new Set(candidates.map(({ phone }) => phone));
+  if (identities.size > 1) {
+    return { skipReason: "identity_conflict", jidDomain: domain };
+  }
+  if (candidates.length > 0) {
+    return { phone: candidates[0].phone, source: candidates[0].source, jidDomain: domain };
   }
 
   if (domain === "lid") {
     return { skipReason: "unresolved_lid", jidDomain: domain };
-  }
-
-  const directPhone = normalizePnJid(remoteJid);
-  if (directPhone) {
-    return { phone: directPhone, source: "remoteJid", jidDomain: domain };
   }
 
   return { skipReason: "invalid_phone_identity", jidDomain: domain };
@@ -493,6 +529,7 @@ let reconnectTimer = null;
 let reconnectAttempt = 0;
 let stopping = false;
 let loggedOut = false;
+let terminalDisconnectReason = null;
 let socketGeneration = 0;
 let httpServer = null;
 
@@ -777,13 +814,20 @@ function reconnectDelayMs(attempt) {
 
 function disconnectCategory(code) {
   if (!Number.isInteger(code)) return "unknown";
+  if ((Number.isInteger(baileysDisconnectReasons.connectionLost) &&
+       code === baileysDisconnectReasons.connectionLost) ||
+      (Number.isInteger(baileysDisconnectReasons.timedOut) &&
+       code === baileysDisconnectReasons.timedOut)) {
+    return "connection_lost_or_timed_out";
+  }
   const mappings = [
     ["loggedOut", "logged_out"],
     ["restartRequired", "restart_required"],
     ["connectionClosed", "connection_closed"],
-    ["connectionLost", "connection_lost"],
-    ["timedOut", "timed_out"],
     ["badSession", "bad_session"],
+    ["connectionReplaced", "connection_replaced"],
+    ["multideviceMismatch", "multidevice_mismatch"],
+    ["unavailableService", "unavailable_service"],
   ];
   for (const [reason, category] of mappings) {
     if (Number.isInteger(baileysDisconnectReasons[reason]) &&
@@ -798,6 +842,7 @@ function reconnectSkipReason() {
   if (!isBaileysConnectEnabled()) return "connection_disabled";
   if (stopping) return "stopping";
   if (loggedOut) return "logged_out";
+  if (terminalDisconnectReason) return "terminal_disconnect";
   if (connectPromise) return "connect_in_progress";
   if (reconnectTimer !== null) return "timer_already_scheduled";
   return null;
@@ -848,7 +893,7 @@ function scheduleReconnect(category = "recoverable_close", generation = socketGe
   const delay = reconnectDelayMs(reconnectAttempt);
   reconnectTimer = lifecycleDeps.setTimer(() => {
     reconnectTimer = null;
-    if (stopping || loggedOut || !isBaileysConnectEnabled()) return;
+    if (stopping || loggedOut || terminalDisconnectReason || !isBaileysConnectEnabled()) return;
     void connectToWhatsApp("scheduled_reconnect").catch((err) => {
       log.error({
         error_type: safeErrorType(err),
@@ -906,19 +951,26 @@ function handleConnectionUpdate(socket, generation, update = {}) {
     }, "baileys.disconnect_classification_failed");
   }
   const category = disconnectCategory(code);
-  const wasLoggedOut = loggedOut || category === "logged_out";
+  const terminalActions = {
+    logged_out: "manual_reauthentication_required",
+    connection_replaced: "another_connection_replaced_this_session",
+    bad_session: "manual_session_review_required",
+    multidevice_mismatch: "manual_compatibility_review_required",
+  };
+  const terminalAction = terminalActions[category];
   currentSocket = null;
   currentQR = null;
   qrTimestamp = 0;
-  if (wasLoggedOut) {
-    loggedOut = true;
+  if (terminalAction) {
+    if (category === "logged_out") loggedOut = true;
+    terminalDisconnectReason = category;
     clearReconnectTimer();
     reconnectAttempt = 0;
     log.info({
-      skip_reason: "logged_out",
       socket_generation: generation,
-      disconnect_category: "logged_out",
-    }, "baileys.reconnect_skipped");
+      disconnect_category: category,
+      action: terminalAction,
+    }, "baileys.disconnect_terminal");
     return;
   }
   if (stopping) {
@@ -933,7 +985,7 @@ function handleConnectionUpdate(socket, generation, update = {}) {
 }
 
 function connectToWhatsApp(initiatingCategory = "manual_or_startup") {
-  if (!isBaileysConnectEnabled() || stopping || loggedOut) {
+  if (!isBaileysConnectEnabled() || stopping || loggedOut || terminalDisconnectReason) {
     clearReconnectTimer();
     log.info({
       skip_reason: reconnectSkipReason() || "unknown",
@@ -956,7 +1008,9 @@ function connectToWhatsApp(initiatingCategory = "manual_or_startup") {
   const attempt = (async () => {
     const { state, saveCreds } = await lifecycleDeps.loadAuth(SESSIONS_DIR);
     const version = await lifecycleDeps.fetchVersion();
-    if (stopping || loggedOut || !isBaileysConnectEnabled()) return undefined;
+    if (stopping || loggedOut || terminalDisconnectReason || !isBaileysConnectEnabled()) {
+      return undefined;
+    }
     const nextSocket = await lifecycleDeps.makeSocket({
       auth: state,
       logger: pino({ level: process.env.BAILEYS_LOG_LEVEL || "silent" }),
@@ -989,6 +1043,7 @@ function connectToWhatsApp(initiatingCategory = "manual_or_startup") {
 
 async function logoutCurrentSocket() {
   loggedOut = true;
+  terminalDisconnectReason = "logged_out";
   clearReconnectTimer();
   reconnectAttempt = 0;
   const socket = currentSocket;
@@ -1067,6 +1122,7 @@ function resetLifecycleForTests() {
   reconnectAttempt = 0;
   stopping = false;
   loggedOut = false;
+  terminalDisconnectReason = null;
   socketGeneration = 0;
   httpServer = null;
   Object.assign(lifecycleDeps, {
@@ -1088,6 +1144,7 @@ function getLifecycleStateForTests() {
     reconnectAttempt,
     stopping,
     loggedOut,
+    terminalDisconnectReason,
     socketGeneration,
     currentQR,
   };

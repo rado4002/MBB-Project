@@ -14,9 +14,12 @@ const fakeBaileysModule = {
     loggedOut: 401,
     connectionClosed: 428,
     connectionLost: 408,
+    connectionReplaced: 440,
     restartRequired: 515,
-    timedOut: 4080,
+    timedOut: 408,
     badSession: 500,
+    multideviceMismatch: 411,
+    unavailableService: 503,
   },
   fetchLatestWaWebVersion: async () => {
     dependencyCalls.version += 1;
@@ -310,6 +313,96 @@ test("resolves LID events from authoritative senderPn or participantPn", () => {
   }));
   assert.equal(direct.phone, "+243812345678");
   assert.equal(direct.source, "remoteJid");
+});
+
+test("resolves v7 direct LID alternates without logging identity", async () => {
+  const firstLog = logs.length;
+  const deliveries = [];
+  const cases = [
+    message("111111111@lid", {
+      remoteJidAlt: "243812345678@s.whatsapp.net",
+    }),
+    message("222222222@lid", {
+      participant: "333333333@lid",
+      participantAlt: "250788123456@s.whatsapp.net",
+    }),
+  ];
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+  try {
+    for (const candidate of cases) {
+      await bridge.handleInboundUpsert({ type: "notify", messages: [candidate] },
+        async (_url, payload) => { deliveries.push(payload.customer_phone); return { status: 200 }; });
+    }
+  } finally {
+    process.env.BAILEYS_CONNECT_ENABLED = "false";
+  }
+
+  assert.deepEqual(deliveries, ["+243812345678", "+250788123456"]);
+  const serialized = JSON.stringify(logs.slice(firstLog));
+  for (const sensitive of ["111111111", "222222222", "333333333", "243812345678", "250788123456"]) {
+    assert.equal(serialized.includes(sensitive), false);
+  }
+});
+
+test("rejects invalid v7 PN alternates and conflicting authoritative identities", async () => {
+  const firstLog = logs.length;
+  const invalidAlternates = [
+    "120363@g.us",
+    "status@broadcast",
+    "list@broadcast",
+    "444444444@lid",
+    "malformed-alternate",
+  ];
+  let attempts = 0;
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+  try {
+    for (const remoteJidAlt of invalidAlternates) {
+      await bridge.handleInboundUpsert({
+        type: "notify",
+        messages: [message("111111111@lid", { remoteJidAlt })],
+      }, async () => { attempts += 1; return { status: 200 }; });
+    }
+    await bridge.handleInboundUpsert({
+      type: "notify",
+      messages: [message("111111111@lid", {
+        remoteJidAlt: "243812345678@s.whatsapp.net",
+        senderPn: "250788123456@s.whatsapp.net",
+      })],
+    }, async () => { attempts += 1; return { status: 200 }; });
+  } finally {
+    process.env.BAILEYS_CONNECT_ENABLED = "false";
+  }
+
+  assert.equal(attempts, 0);
+  assert.equal(namedEventsSince(firstLog, "inbound_message_skipped")
+    .some((entry) => entry[1].skip_reason === "identity_conflict"), true);
+  const serialized = JSON.stringify(logs.slice(firstLog));
+  for (const sensitive of ["111111111", "444444444", "243812345678", "250788123456"]) {
+    assert.equal(serialized.includes(sensitive), false);
+  }
+});
+
+test("allows matching duplicate v7 PN identities", async () => {
+  let attempts = 0;
+  let deliveredPhone;
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+  try {
+    await bridge.handleInboundUpsert({
+      type: "notify",
+      messages: [message("111111111@lid", {
+        remoteJidAlt: "243812345678@s.whatsapp.net",
+        senderPn: "243812345678@s.whatsapp.net",
+      })],
+    }, async (_url, payload) => {
+      attempts += 1;
+      deliveredPhone = payload.customer_phone;
+      return { status: 200 };
+    });
+  } finally {
+    process.env.BAILEYS_CONNECT_ENABLED = "false";
+  }
+  assert.equal(attempts, 1);
+  assert.equal(deliveredPhone, "+243812345678");
 });
 
 test("skips unresolved, group, status, broadcast, fromMe, and invalid identities", () => {
@@ -1093,16 +1186,25 @@ test("logged-out close records suppression and schedules nothing", async () => {
     lastDisconnect: { error: { output: { statusCode: 401 } } },
   });
   assert.equal(bridge.getLifecycleStateForTests().loggedOut, true);
+  assert.equal(bridge.getLifecycleStateForTests().terminalDisconnectReason, "logged_out");
   assert.equal(timers.size, 0);
   disableLifecycle();
 });
 
-test("reconnect logs classify safe disconnect categories with authoritative generations", async () => {
+test("recoverable v7 disconnects use truthful categories and one bounded timer", async () => {
+  assert.equal(
+    fakeBaileysModule.DisconnectReason.connectionLost,
+    fakeBaileysModule.DisconnectReason.timedOut
+  );
   const cases = [
     [{ lastDisconnect: { error: { output: { statusCode: 515 }, private: "restart-private" } } },
       "restart_required", "baileys.reconnect_scheduled", 1],
-    [{ lastDisconnect: { error: { output: { statusCode: 401 }, private: "logout-private" } } },
-      "logged_out", "baileys.reconnect_skipped", 0],
+    [{ lastDisconnect: { error: { output: { statusCode: 408 }, private: "408-private" } } },
+      "connection_lost_or_timed_out", "baileys.reconnect_scheduled", 1],
+    [{ lastDisconnect: { error: { output: { statusCode: 428 }, private: "closed-private" } } },
+      "connection_closed", "baileys.reconnect_scheduled", 1],
+    [{ lastDisconnect: { error: { output: { statusCode: 503 }, private: "unavailable-private" } } },
+      "unavailable_service", "baileys.reconnect_scheduled", 1],
     [{ lastDisconnect: { error: { output: { statusCode: 499 }, private: "generic-private" } } },
       "recoverable_close", "baileys.reconnect_scheduled", 1],
     [{ lastDisconnect: { error: { private: "unknown-private" } } },
@@ -1134,13 +1236,164 @@ test("reconnect logs classify safe disconnect categories with authoritative gene
     const lifecycleEvent = namedEventsSince(firstLog, eventName).at(-1);
     assert.equal(lifecycleEvent[1].socket_generation, 1);
     assert.equal(lifecycleEvent[1].disconnect_category, category);
+    assert.ok(lifecycleEvent[1].delay_ms >= 1000 && lifecycleEvent[1].delay_ms <= 30000);
     assert.equal(timers.size, expectedTimers);
     const serialized = JSON.stringify(logs.slice(firstLog));
-    for (const sensitive of ["restart-private", "logout-private", "generic-private", "unknown-private"]) {
+    for (const sensitive of [
+      "restart-private",
+      "408-private",
+      "closed-private",
+      "unavailable-private",
+      "generic-private",
+      "unknown-private",
+    ]) {
       assert.equal(serialized.includes(sensitive), false);
     }
     disableLifecycle();
   }
+});
+
+test("restart-required timer creates exactly one next connection without terminal suppression", async () => {
+  enableLifecycle();
+  const timers = fakeTimers();
+  const sockets = [fakeSocket(), fakeSocket()];
+  let authLoads = 0;
+  let socketCreations = 0;
+  bridge.setLifecycleDependenciesForTests({
+    loadAuth: async () => { authLoads += 1; return { state: {}, saveCreds() {} }; },
+    fetchVersion: async () => undefined,
+    makeSocket: () => { socketCreations += 1; return sockets.shift(); },
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+    random: () => 0,
+  });
+  const first = await bridge.connectToWhatsApp();
+  first.ev.emit("connection.update", {
+    connection: "close",
+    lastDisconnect: { error: { output: { statusCode: 515 } } },
+  });
+  assert.equal(timers.size, 1);
+  assert.equal(timers.fireNext(), true);
+  await settle();
+  const state = bridge.getLifecycleStateForTests();
+  assert.equal(socketCreations, 2);
+  assert.equal(authLoads, 2);
+  assert.equal(state.socketGeneration, 2);
+  assert.equal(state.terminalDisconnectReason, null);
+  disableLifecycle();
+});
+
+test("terminal v7 disconnects suppress reconnect and preserve session state", async () => {
+  const fs = require("fs");
+  const terminalCases = [
+    [401, "logged_out", "manual_reauthentication_required"],
+    [440, "connection_replaced", "another_connection_replaced_this_session"],
+    [500, "bad_session", "manual_session_review_required"],
+    [411, "multidevice_mismatch", "manual_compatibility_review_required"],
+  ];
+
+  for (const [statusCode, category, action] of terminalCases) {
+    enableLifecycle();
+    const firstLog = logs.length;
+    const timers = fakeTimers();
+    const socket = fakeSocket();
+    let authLoads = 0;
+    let credentialSaves = 0;
+    let sessionDeletes = 0;
+    let sessionCreates = 0;
+    const originals = { rmSync: fs.rmSync, mkdirSync: fs.mkdirSync };
+    fs.rmSync = () => { sessionDeletes += 1; };
+    fs.mkdirSync = () => { sessionCreates += 1; };
+    bridge.setLifecycleDependenciesForTests({
+      loadAuth: async () => {
+        authLoads += 1;
+        return { state: {}, saveCreds() { credentialSaves += 1; } };
+      },
+      fetchVersion: async () => undefined,
+      makeSocket: () => socket,
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      random: () => 0,
+    });
+    try {
+      await bridge.connectToWhatsApp();
+      socket.ev.emit("connection.update", {
+        connection: "close",
+        lastDisconnect: { error: { output: { statusCode }, raw: "terminal-private" } },
+      });
+      assert.equal(timers.size, 0);
+      assert.equal(bridge.getLifecycleStateForTests().terminalDisconnectReason, category);
+      await bridge.connectToWhatsApp();
+      assert.equal(authLoads, 1);
+      assert.equal(credentialSaves, 0);
+      assert.equal(sessionDeletes, 0);
+      assert.equal(sessionCreates, 0);
+      assert.equal(socket.logoutCalls, 0);
+      const terminalEvent = namedEventsSince(firstLog, "baileys.disconnect_terminal").at(-1);
+      assert.deepEqual(terminalEvent[1], {
+        socket_generation: 1,
+        disconnect_category: category,
+        action,
+      });
+      assert.equal(JSON.stringify(logs.slice(firstLog)).includes("terminal-private"), false);
+    } finally {
+      fs.rmSync = originals.rmSync;
+      fs.mkdirSync = originals.mkdirSync;
+      disableLifecycle();
+    }
+  }
+});
+
+test("stale terminal closes cannot suppress a newer socket", async () => {
+  for (const statusCode of [440, 500, 411]) {
+    enableLifecycle();
+    const timers = fakeTimers();
+    const staleSocket = fakeSocket();
+    const currentSocket = fakeSocket();
+    bridge.setLifecycleDependenciesForTests({
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+    });
+    bridge.setSocketForTests(staleSocket);
+    const staleGeneration = bridge.getLifecycleStateForTests().socketGeneration;
+    bridge.setSocketForTests(currentSocket);
+    bridge.handleConnectionUpdate(staleSocket, staleGeneration, {
+      connection: "close",
+      lastDisconnect: { error: { output: { statusCode } } },
+    });
+    const state = bridge.getLifecycleStateForTests();
+    assert.equal(state.currentSocket, currentSocket);
+    assert.equal(state.terminalDisconnectReason, null);
+    assert.equal(timers.size, 0);
+    disableLifecycle();
+  }
+});
+
+test("terminal close clears an existing reconnect timer before it can connect", async () => {
+  enableLifecycle();
+  const timers = fakeTimers();
+  const socket = fakeSocket();
+  let authLoads = 0;
+  bridge.setLifecycleDependenciesForTests({
+    loadAuth: async () => { authLoads += 1; return { state: {}, saveCreds() {} }; },
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+    random: () => 0,
+  });
+  bridge.setSocketForTests(socket);
+  const generation = bridge.getLifecycleStateForTests().socketGeneration;
+  assert.equal(bridge.scheduleReconnect("connection_lost_or_timed_out", generation), true);
+  assert.equal(timers.size, 1);
+  bridge.handleConnectionUpdate(socket, generation, {
+    connection: "close",
+    lastDisconnect: { error: { output: { statusCode: 500 } } },
+  });
+  assert.equal(timers.size, 0);
+  assert.equal(timers.fireNext(), false);
+  await settle();
+  assert.equal(authLoads, 0);
+  assert.equal(bridge.getLifecycleStateForTests().terminalDisconnectReason, "bad_session");
+  disableLifecycle();
 });
 
 test("duplicate closes retain one timer and report stale generation safely", async () => {
@@ -1194,6 +1447,7 @@ test("logout clears reconnect and close caused by logout cannot reconnect", asyn
   assert.equal(socket.logoutCalls, 1);
   assert.equal(timers.size, 0);
   assert.equal(bridge.getLifecycleStateForTests().loggedOut, true);
+  assert.equal(bridge.getLifecycleStateForTests().terminalDisconnectReason, "logged_out");
   delete process.env.BAILEYS_LOGOUT_ENABLED;
   delete process.env.BAILEYS_RECOVERY_TOKEN;
   disableLifecycle();
@@ -1225,6 +1479,7 @@ test("logout suppresses an in-flight connection before socket creation", async (
   assert.equal(res.body.success, true);
   assert.equal(socketCalls, 0);
   assert.equal(bridge.getLifecycleStateForTests().loggedOut, true);
+  assert.equal(bridge.getLifecycleStateForTests().terminalDisconnectReason, "logged_out");
   delete process.env.BAILEYS_LOGOUT_ENABLED;
   delete process.env.BAILEYS_RECOVERY_TOKEN;
   disableLifecycle();
@@ -1242,14 +1497,20 @@ test("shutdown clears timers, ends socket and server, and never logs out", async
     random: () => 0,
   });
   bridge.setSocketForTests(socket);
+  const generation = bridge.getLifecycleStateForTests().socketGeneration;
   bridge.scheduleReconnect();
   await bridge.shutdownBridge(server);
+  bridge.handleConnectionUpdate(socket, generation, {
+    connection: "close",
+    lastDisconnect: { error: { output: { statusCode: 500 } } },
+  });
   assert.equal(timers.size, 0);
   assert.equal(timers.fireNext(), false);
   assert.equal(socket.endCalls, 1);
   assert.equal(socket.logoutCalls, 0);
   assert.equal(serverCloseCalls, 1);
   assert.equal(bridge.getLifecycleStateForTests().stopping, true);
+  assert.equal(bridge.getLifecycleStateForTests().terminalDisconnectReason, null);
   disableLifecycle();
 });
 
