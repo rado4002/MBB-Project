@@ -1,16 +1,76 @@
 "use strict";
 
-const {
-  makeWASocket,
-  DisconnectReason,
-  useMultiFileAuthState,
-  fetchLatestWaWebVersion,
-} = require("@whiskeysockets/baileys");
 const axios = require("axios");
 const crypto = require("crypto");
 const express = require("express");
 const fs = require("fs");
 const pino = require("pino");
+
+let baileysModulePromise = null;
+let baileysDisconnectReasons = {};
+let baileysImporter = () => import("@whiskeysockets/baileys");
+
+function validateBaileysModule(module) {
+  const requiredExports = [
+    ["makeWASocket/default", module?.makeWASocket || module?.default, "function"],
+    ["useMultiFileAuthState", module?.useMultiFileAuthState, "function"],
+    ["fetchLatestWaWebVersion", module?.fetchLatestWaWebVersion, "function"],
+    ["DisconnectReason", module?.DisconnectReason, "object"],
+  ];
+  for (const [name, value, type] of requiredExports) {
+    if (typeof value !== type || value === null) {
+      throw new TypeError(`Baileys module missing required export: ${name}`);
+    }
+  }
+  return module;
+}
+
+function setBaileysImporterForTests(importer) {
+  if (typeof importer !== "function") throw new TypeError("Baileys importer must be a function");
+  baileysImporter = importer;
+  baileysDisconnectReasons = {};
+  baileysModulePromise = null;
+}
+
+function setBaileysModuleForTests(module) {
+  const validatedModule = validateBaileysModule(module);
+  baileysImporter = () => Promise.resolve(validatedModule);
+  baileysDisconnectReasons = validatedModule.DisconnectReason;
+  baileysModulePromise = Promise.resolve(validatedModule);
+}
+
+function loadBaileysModule() {
+  if (!baileysModulePromise) {
+    baileysModulePromise = Promise.resolve()
+      .then(() => baileysImporter())
+      .then(validateBaileysModule)
+      .then((module) => {
+        baileysDisconnectReasons = module.DisconnectReason;
+        return module;
+      })
+      .catch((err) => {
+        baileysModulePromise = null;
+        throw err;
+      });
+  }
+  return baileysModulePromise;
+}
+
+async function defaultLoadAuth(...args) {
+  const module = await loadBaileysModule();
+  return module.useMultiFileAuthState(...args);
+}
+
+async function defaultFetchLatestVersion(...args) {
+  const module = await loadBaileysModule();
+  return module.fetchLatestWaWebVersion(...args);
+}
+
+async function defaultMakeSocket(options) {
+  const module = await loadBaileysModule();
+  const makeSocket = module.makeWASocket || module.default;
+  return makeSocket(options);
+}
 
 const log = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -441,9 +501,10 @@ const RECONNECT_MAX_MS = 30000;
 const RECONNECT_JITTER_MS = 250;
 
 const lifecycleDeps = {
-  loadAuth: useMultiFileAuthState,
+  loadAuth: defaultLoadAuth,
   fetchVersion: () => fetchVersionWithRetry(3, 10000),
-  makeSocket: makeWASocket,
+  makeSocket: defaultMakeSocket,
+  fetchLatestVersion: defaultFetchLatestVersion,
   random: Math.random,
   setTimer: setTimeout,
   clearTimer: clearTimeout,
@@ -673,7 +734,7 @@ async function fetchVersionWithRetry(maxAttempts = 3, timeoutMs = 10000) {
       log.info({ attempt, timeout_ms: timeoutMs }, "fetching_wa_web_version");
 
       // Wrap in timeout promise
-      const versionPromise = fetchLatestWaWebVersion({});
+      const versionPromise = lifecycleDeps.fetchLatestVersion({});
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error(`Timeout after ${timeoutMs}ms`)), timeoutMs)
       );
@@ -725,7 +786,8 @@ function disconnectCategory(code) {
     ["badSession", "bad_session"],
   ];
   for (const [reason, category] of mappings) {
-    if (Number.isInteger(DisconnectReason[reason]) && code === DisconnectReason[reason]) {
+    if (Number.isInteger(baileysDisconnectReasons[reason]) &&
+        code === baileysDisconnectReasons[reason]) {
       return category;
     }
   }
@@ -895,7 +957,7 @@ function connectToWhatsApp(initiatingCategory = "manual_or_startup") {
     const { state, saveCreds } = await lifecycleDeps.loadAuth(SESSIONS_DIR);
     const version = await lifecycleDeps.fetchVersion();
     if (stopping || loggedOut || !isBaileysConnectEnabled()) return undefined;
-    const nextSocket = lifecycleDeps.makeSocket({
+    const nextSocket = await lifecycleDeps.makeSocket({
       auth: state,
       logger: pino({ level: process.env.BAILEYS_LOG_LEVEL || "silent" }),
       browser: ["MBB ya Kin", "Chrome", "1.0.0"],
@@ -1008,9 +1070,10 @@ function resetLifecycleForTests() {
   socketGeneration = 0;
   httpServer = null;
   Object.assign(lifecycleDeps, {
-    loadAuth: useMultiFileAuthState,
+    loadAuth: defaultLoadAuth,
     fetchVersion: () => fetchVersionWithRetry(3, 10000),
-    makeSocket: makeWASocket,
+    makeSocket: defaultMakeSocket,
+    fetchLatestVersion: defaultFetchLatestVersion,
     random: Math.random,
     setTimer: setTimeout,
     clearTimer: clearTimeout,
@@ -1044,6 +1107,8 @@ module.exports = {
   resolveInboundIdentity,
   resetLifecycleForTests,
   scheduleReconnect,
+  setBaileysImporterForTests,
+  setBaileysModuleForTests,
   setLifecycleDependenciesForTests,
   setSocketForTests,
   shutdownBridge,

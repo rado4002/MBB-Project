@@ -9,6 +9,32 @@ const routes = { get: {}, post: {} };
 const dependencyCalls = { auth: 0, version: 0, socket: 0, saveCreds: 0 };
 const originalLoad = Module._load;
 
+const fakeBaileysModule = {
+  DisconnectReason: {
+    loggedOut: 401,
+    connectionClosed: 428,
+    connectionLost: 408,
+    restartRequired: 515,
+    timedOut: 4080,
+    badSession: 500,
+  },
+  fetchLatestWaWebVersion: async () => {
+    dependencyCalls.version += 1;
+    return { version: [1, 1, 1] };
+  },
+  makeWASocket: () => {
+    dependencyCalls.socket += 1;
+    return { ev: { on() {} } };
+  },
+  useMultiFileAuthState: async () => {
+    dependencyCalls.auth += 1;
+    return {
+      state: {},
+      saveCreds() { dependencyCalls.saveCreds += 1; },
+    };
+  },
+};
+
 function fakeLogger() {
   return {
     info: (...args) => logs.push(["info", ...args]),
@@ -29,33 +55,6 @@ function fakeExpress() {
 fakeExpress.json = () => () => {};
 
 Module._load = function load(request, parent, isMain) {
-  if (request === "@whiskeysockets/baileys") {
-    return {
-      DisconnectReason: {
-        loggedOut: 401,
-        connectionClosed: 428,
-        connectionLost: 408,
-        restartRequired: 515,
-        timedOut: 4080,
-        badSession: 500,
-      },
-      fetchLatestWaWebVersion: async () => {
-        dependencyCalls.version += 1;
-        return { version: [1, 1, 1] };
-      },
-      makeWASocket: () => {
-        dependencyCalls.socket += 1;
-        return { ev: { on() {} } };
-      },
-      useMultiFileAuthState: async () => {
-        dependencyCalls.auth += 1;
-        return {
-          state: {},
-          saveCreds() { dependencyCalls.saveCreds += 1; },
-        };
-      },
-    };
-  }
   if (request === "axios") return { post: async () => ({ status: 200 }) };
   if (request === "express") return fakeExpress;
   if (request === "pino") return () => fakeLogger();
@@ -78,6 +77,7 @@ process.env.FASTAPI_WEBHOOK_URL = "http://test.invalid/webhook";
 process.env.WHATSAPP_SEND_ENABLED = "false";
 process.env.BAILEYS_CONNECT_ENABLED = "false";
 const bridge = require("../src/index.js");
+bridge.setBaileysModuleForTests(fakeBaileysModule);
 
 after(() => {
   Module._load = originalLoad;
@@ -880,44 +880,91 @@ function disableLifecycle() {
   process.env.BAILEYS_CONNECT_ENABLED = "false";
 }
 
-test("single-flight concurrent connects reuse one exact promise and dependency chain", async () => {
+test("single-flight concurrent connects reuse one import, auth state, version lookup, and socket", async () => {
   enableLifecycle();
-  const auth = deferred();
-  const calls = { auth: 0, version: 0, socket: 0 };
+  const moduleImport = deferred();
+  const calls = { import: 0, auth: 0, version: 0, socket: 0 };
   const socket = fakeSocket();
-  bridge.setLifecycleDependenciesForTests({
-    loadAuth: async () => { calls.auth += 1; return auth.promise; },
-    fetchVersion: async () => { calls.version += 1; return [1, 2, 3]; },
-    makeSocket: () => { calls.socket += 1; return socket; },
+  const v7LikeAuthState = {
+    creds: { registered: true },
+    keys: {
+      get: async () => ({}),
+      set: async () => {},
+    },
+  };
+  let socketAuth;
+  bridge.setBaileysImporterForTests(() => {
+    calls.import += 1;
+    return moduleImport.promise;
   });
   const first = bridge.connectToWhatsApp();
   const second = bridge.connectToWhatsApp();
   assert.equal(first, second);
-  assert.deepEqual(calls, { auth: 1, version: 0, socket: 0 });
-  auth.resolve({ state: {}, saveCreds() {} });
+  await settle();
+  assert.deepEqual(calls, { import: 1, auth: 0, version: 0, socket: 0 });
+  moduleImport.resolve({
+    ...fakeBaileysModule,
+    useMultiFileAuthState: async () => {
+      calls.auth += 1;
+      return { state: v7LikeAuthState, saveCreds() {} };
+    },
+    fetchLatestWaWebVersion: async () => {
+      calls.version += 1;
+      return { version: [1, 2, 3] };
+    },
+    makeWASocket: (options) => {
+      calls.socket += 1;
+      socketAuth = options.auth;
+      return socket;
+    },
+  });
   assert.equal(await first, socket);
-  assert.deepEqual(calls, { auth: 1, version: 1, socket: 1 });
+  assert.deepEqual(calls, { import: 1, auth: 1, version: 1, socket: 1 });
+  assert.equal(socketAuth, v7LikeAuthState);
   assert.equal(bridge.getLifecycleStateForTests().connectPromise, null);
+  bridge.setBaileysModuleForTests(fakeBaileysModule);
   disableLifecycle();
 });
 
-test("failed connect clears single-flight state and permits a caught retry", async () => {
+test("async ESM socket factory is awaited before lifecycle registration", async () => {
   enableLifecycle();
-  let authCalls = 0;
   const socket = fakeSocket();
+  let factoryResolved = false;
   bridge.setLifecycleDependenciesForTests({
-    loadAuth: async () => {
-      authCalls += 1;
-      if (authCalls === 1) throw new Error("mock auth failure");
-      return { state: {}, saveCreds() {} };
-    },
+    loadAuth: async () => ({ state: {}, saveCreds() {} }),
     fetchVersion: async () => [1, 2, 3],
-    makeSocket: () => socket,
+    makeSocket: async () => {
+      await new Promise((resolve) => setImmediate(resolve));
+      factoryResolved = true;
+      return socket;
+    },
   });
-  await assert.rejects(bridge.connectToWhatsApp(), /mock auth failure/);
+  const connected = await bridge.connectToWhatsApp();
+  assert.equal(factoryResolved, true);
+  assert.equal(connected, socket);
+  assert.equal(bridge.getLifecycleStateForTests().currentSocket, socket);
+  disableLifecycle();
+});
+
+test("failed dynamic import clears connection state and permits a controlled retry", async () => {
+  enableLifecycle();
+  let importCalls = 0;
+  const socket = fakeSocket();
+  bridge.setBaileysImporterForTests(async () => {
+    importCalls += 1;
+    if (importCalls === 1) throw new Error("mock import failure");
+    return {
+      ...fakeBaileysModule,
+      useMultiFileAuthState: async () => ({ state: {}, saveCreds() {} }),
+      fetchLatestWaWebVersion: async () => ({ version: [1, 2, 3] }),
+      makeWASocket: () => socket,
+    };
+  });
+  await assert.rejects(bridge.connectToWhatsApp(), /mock import failure/);
   assert.equal(bridge.getLifecycleStateForTests().connectPromise, null);
   await assert.doesNotReject(() => bridge.connectToWhatsApp());
-  assert.equal(authCalls, 2);
+  assert.equal(importCalls, 2);
+  bridge.setBaileysModuleForTests(fakeBaileysModule);
   disableLifecycle();
 });
 
@@ -966,12 +1013,21 @@ test("close while a connect is pending never overlaps socket creation", async ()
   disableLifecycle();
 });
 
-test("stale socket events cannot mutate or reconnect a newer generation", async () => {
+test("stale socket events cannot mutate, reconnect, or persist credentials for a newer generation", async () => {
   enableLifecycle();
   const timers = fakeTimers();
   const sockets = [fakeSocket(), fakeSocket()];
+  const credentialSaves = [0, 0];
+  let authLoads = 0;
   bridge.setLifecycleDependenciesForTests({
-    loadAuth: async () => ({ state: {}, saveCreds() {} }),
+    loadAuth: async () => {
+      const index = authLoads;
+      authLoads += 1;
+      return {
+        state: {},
+        saveCreds() { credentialSaves[index] += 1; },
+      };
+    },
     fetchVersion: async () => undefined,
     makeSocket: () => sockets.shift(),
     setTimer: timers.setTimer,
@@ -979,8 +1035,12 @@ test("stale socket events cannot mutate or reconnect a newer generation", async 
   });
   const socketA = await bridge.connectToWhatsApp();
   const generationA = bridge.getLifecycleStateForTests().socketGeneration;
+  socketA.ev.emit("creds.update", {});
+  assert.deepEqual(credentialSaves, [1, 0]);
   const socketB = await bridge.connectToWhatsApp();
   const stateB = bridge.getLifecycleStateForTests();
+  socketA.ev.emit("creds.update", {});
+  socketB.ev.emit("creds.update", {});
   bridge.handleConnectionUpdate(socketA, generationA, { connection: "close", qr: "stale-secret-qr" });
   const after = bridge.getLifecycleStateForTests();
   assert.equal(after.currentSocket, socketB);
@@ -988,6 +1048,7 @@ test("stale socket events cannot mutate or reconnect a newer generation", async 
   assert.equal(after.currentQR, null);
   assert.equal(timers.size, 0);
   assert.equal(socketA.endCalls, 1);
+  assert.deepEqual(credentialSaves, [1, 1]);
   disableLifecycle();
 });
 
