@@ -15,7 +15,7 @@ class Customer(Base):
             name="chk_language",
         ),
         CheckConstraint(
-            r"phone_number ~ '^\+243[0-9]{9}$'",
+            r"phone_number ~ '^\+[1-9][0-9]{6,14}$'",
             name="chk_phone_format",
         ),
         CheckConstraint("club_points >= 0", name="chk_club_points"),

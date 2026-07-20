@@ -12,7 +12,7 @@ Validates (without a live DB):
   [8] Route HTTP method correctness
   [9] Route response model binding
   [10] Migration ↔ ORM model table drift check
-  [11] DRC-specific constraints (phone format, languages, currencies)
+  [11] International phone and DRC-specific business constraints
   [12] Schema field-level validation rules
 
 Run:
@@ -468,7 +468,7 @@ LLD_CORE_ENDPOINTS = [
     ("POST", "/api/v1/maps/tags"),
     ("GET",  "/api/v1/maps/insights"),
     # EP-17 / EP-18 / EP-19 (escalations — may be under conversations)
-    # EP-20 / EP-21 / EP-22 — :path converter for +243 phone format
+    # EP-20 / EP-21 / EP-22 — :path converter for leading-plus phone format
     ("GET",  "/api/v1/customers/{phone_number:path}"),
     ("PUT",  "/api/v1/customers/{phone_number:path}/opt-out"),
     # EP-23 / EP-24
@@ -608,14 +608,26 @@ for table_name in UUID_PK_TABLES:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# [11] DRC-SPECIFIC CONSTRAINTS
+# [11] INTERNATIONAL PHONE AND DRC-SPECIFIC BUSINESS CONSTRAINTS
 # ═══════════════════════════════════════════════════════════════════════════════
-n, label = check("[11] DRC-Specific Constraints")
+n, label = check("[11] Phone and DRC-Specific Constraints")
 print(f"\n{label}")
 
 # Phone format validation in Pydantic schema
-valid_phones = ["+243812345678", "+243970000001"]
-invalid_phones = ["+123456789012", "0812345678", "+24381234", "+243812345678901"]
+valid_phones = [
+    "+243996123456",
+    "+8613812345678",
+    "+4915123456789",
+    "+12025550123",
+]
+invalid_phones = [
+    "243996123456",
+    "+0123456789",
+    "+1",
+    "+1234567890123456",
+    "+49 151 23456789",
+    "+49-151-23456789",
+]
 
 for phone in valid_phones:
     try:

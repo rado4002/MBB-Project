@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import re
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated
@@ -31,6 +30,7 @@ from app.schemas.messages import (
     InboundMessageRequest,
     MessageHistoryResponse,
     QueuedMessageResponse,
+    validate_customer_phone_value,
     validate_whatsapp_message_id_value,
 )
 
@@ -41,9 +41,6 @@ router = APIRouter(prefix="/messages", tags=["M1 — Gateway"])
 
 def _safe_ref(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
-
-_DRC_PHONE_RE = re.compile(r"^\+243[0-9]{9}$")
-
 
 # ── Shared processing helper ───────────────────────────────────────────────────
 
@@ -176,7 +173,7 @@ async def receive_message(
 class BaileysWebhookPayload(BaseModel):
     """Normalized payload from the Baileys Node.js bridge."""
     message_id: uuid.UUID = Field(default_factory=uuid.uuid4)
-    customer_phone: str = Field(..., description="DRC E.164 phone: +243XXXXXXXXX")
+    customer_phone: str = Field(..., description="Canonical international E.164 phone")
     content: str = Field(..., min_length=1, max_length=4096)
     content_type: str = Field(default="text")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -185,9 +182,7 @@ class BaileysWebhookPayload(BaseModel):
     @field_validator("customer_phone")
     @classmethod
     def validate_phone(cls, v: str) -> str:
-        if not _DRC_PHONE_RE.match(v):
-            raise ValueError("Phone must be DRC E.164 format: +243XXXXXXXXX")
-        return v
+        return validate_customer_phone_value(v)
 
     @field_validator("whatsapp_message_id")
     @classmethod
@@ -404,16 +399,14 @@ async def receive_webhook(
 # ── EP-02: Internal outbound send ────────────────────────────────────────────
 
 class OutboundSendRequest(BaseModel):
-    customer_phone: str = Field(..., description="DRC E.164 phone: +243XXXXXXXXX")
+    customer_phone: str = Field(..., description="Canonical international E.164 phone")
     text: str = Field(..., min_length=1, max_length=4096)
     conversation_id: uuid.UUID | None = None
 
     @field_validator("customer_phone")
     @classmethod
     def validate_phone(cls, v: str) -> str:
-        if not _DRC_PHONE_RE.match(v):
-            raise ValueError("Phone must be DRC E.164 format: +243XXXXXXXXX")
-        return v
+        return validate_customer_phone_value(v)
 
 
 class OutboundSendResponse(BaseModel):

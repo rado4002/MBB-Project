@@ -23,7 +23,7 @@ class CustomerResponse(BaseModel):
 
 
 class OptOutRequest(BaseModel):
-    phone_number: str = Field(..., description="DRC E.164: +243XXXXXXXXX")
+    phone_number: str = Field(..., description="Canonical international E.164 phone")
     reason: str | None = Field(None, max_length=200)
 
 

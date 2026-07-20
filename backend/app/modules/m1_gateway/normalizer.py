@@ -16,7 +16,16 @@ from datetime import datetime, timezone
 
 import structlog
 
+from app.schemas.messages import validate_customer_phone_value
+
 log = structlog.get_logger(__name__)
+
+
+def _canonical_phone(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("Phone must be a string")
+    candidate = value if value.startswith("+") else f"+{value}"
+    return validate_customer_phone_value(candidate)
 
 
 def normalize_baileys_webhook(payload: dict) -> dict:
@@ -42,11 +51,7 @@ def normalize_baileys_webhook(payload: dict) -> dict:
     remote_jid = key.get("remoteJid", "")
     phone_raw = remote_jid.split("@")[0] if "@" in remote_jid else remote_jid
 
-    # Ensure +243 prefix for DRC
-    if not phone_raw.startswith("+"):
-        phone_raw = f"+{phone_raw}"
-    if not phone_raw.startswith("+243"):
-        phone_raw = f"+243{phone_raw.lstrip('+243')}"
+    phone_raw = _canonical_phone(phone_raw)
 
     # Extract content and type
     content = ""
@@ -133,10 +138,7 @@ def normalize_official_webhook(payload: dict) -> dict:
 
     # Extract phone number
     phone_raw = msg.get("from", "")
-    if not phone_raw.startswith("+"):
-        phone_raw = f"+{phone_raw}"
-    if not phone_raw.startswith("+243"):
-        phone_raw = f"+243{phone_raw.lstrip('+243')}"
+    phone_raw = _canonical_phone(phone_raw)
 
     # Extract content and type
     msg_type = msg.get("type", "text")

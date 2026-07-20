@@ -7,7 +7,16 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.schemas.common import ContentType, Language
 
-_DRC_PHONE_RE = re.compile(r"^\+243[0-9]{9}$")
+_E164_PHONE_RE = re.compile(r"^\+[1-9][0-9]{6,14}$")
+
+
+def validate_customer_phone_value(value: str) -> str:
+    if not isinstance(value, str) or not _E164_PHONE_RE.fullmatch(value):
+        raise ValueError(
+            "Phone must be canonical international E.164: "
+            "leading + and 7 to 15 digits, starting with 1-9"
+        )
+    return value
 
 
 def validate_whatsapp_message_id_value(value: str) -> str:
@@ -18,7 +27,7 @@ def validate_whatsapp_message_id_value(value: str) -> str:
 
 class InboundMessageRequest(BaseModel):
     message_id: uuid.UUID
-    customer_phone: str = Field(..., description="DRC E.164 phone: +243XXXXXXXXX")
+    customer_phone: str = Field(..., description="Canonical international E.164 phone")
     content: str = Field(..., min_length=1, max_length=4096)
     content_type: ContentType
     timestamp: datetime
@@ -27,9 +36,7 @@ class InboundMessageRequest(BaseModel):
     @field_validator("customer_phone")
     @classmethod
     def validate_phone(cls, v: str) -> str:
-        if not _DRC_PHONE_RE.match(v):
-            raise ValueError("Phone must be DRC E.164 format: +243XXXXXXXXX")
-        return v
+        return validate_customer_phone_value(v)
 
     @field_validator("whatsapp_message_id")
     @classmethod

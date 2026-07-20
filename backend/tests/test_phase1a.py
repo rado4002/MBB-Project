@@ -781,8 +781,8 @@ def test_integration_scoring_pipeline():
 # [20] DRC-specific constraints
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def test_drc_phone_validation():
-    """Phone numbers must match +243XXXXXXXXX format."""
+def test_international_e164_phone_validation():
+    """Phone numbers must use canonical international E.164 format."""
     from app.schemas.messages import InboundMessageRequest
     from app.schemas.common import ContentType
     # Valid
@@ -801,7 +801,7 @@ def test_drc_phone_validation():
     try:
         InboundMessageRequest(
             message_id=uuid.uuid4(),
-            customer_phone="+1234567890",
+            customer_phone="+0123456789",
             content="test",
             content_type=ContentType.text,
             timestamp=datetime.now(timezone.utc),
@@ -809,7 +809,7 @@ def test_drc_phone_validation():
         )
     except Exception:
         raised = True
-    assert raised, "Non-DRC phone should be rejected"
+    assert raised, "Noncanonical phone should be rejected"
 
 
 def test_baileys_payload_phone_validation():
@@ -817,13 +817,13 @@ def test_baileys_payload_phone_validation():
     raised = False
     try:
         BaileysWebhookPayload(
-            customer_phone="+1234567890",
+            customer_phone="+0123456789",
             content="test",
             whatsapp_message_id="wa_789",
         )
     except Exception:
         raised = True
-    assert raised, "BaileysWebhookPayload should reject non-DRC phone"
+    assert raised, "BaileysWebhookPayload should reject noncanonical phone"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -942,9 +942,9 @@ if __name__ == "__main__":
     print("\n[13] Integration Tests")
     run_test("Scoring pipeline", test_integration_scoring_pipeline)
 
-    # Group 14: DRC constraints
-    print("\n[14] DRC Constraints")
-    run_test("DRC phone validation", test_drc_phone_validation)
+    # Group 14: Phone and DRC business constraints
+    print("\n[14] Phone and DRC Business Constraints")
+    run_test("International E.164 phone validation", test_international_e164_phone_validation)
     run_test("Baileys phone validation", test_baileys_payload_phone_validation)
 
     # Summary
