@@ -88,6 +88,46 @@ def _dispatch_maps_fanout(*, conversation_id: str, message_id: str, content: str
     )
 
 
+async def _persist_outbound(
+    *,
+    conversation_id: uuid.UUID,
+    content: str,
+    language: str,
+    processing_time_ms: int,
+) -> uuid.UUID | None:
+    """Persist and commit the response identity before any outbound attempt."""
+    from app.database import async_session_factory
+    from app.modules.m1_gateway.service import persist_outbound
+
+    async with async_session_factory() as session:
+        try:
+            outbound_id = await persist_outbound(
+                session=session,
+                conversation_id=conversation_id,
+                content=content,
+                language=language,
+                processing_time_ms=processing_time_ms,
+            )
+            await session.commit()
+            return outbound_id
+        except Exception as exc:
+            await session.rollback()
+            log.error(
+                "m1.persist_outbound.failed_closed",
+                conversation_id=str(conversation_id),
+                error_type=type(exc).__name__,
+            )
+            return None
+
+
+def _persistence_failure_result(conversation_id: str) -> dict:
+    return {
+        "status": "persistence_failed",
+        "conversation_id": conversation_id,
+        "send_status": "unknown_or_failed",
+    }
+
+
 # ── Main processing task ──────────────────────────────────────────────────────
 
 @celery_app.task(
@@ -145,7 +185,7 @@ async def _process(
     whatsapp_message_id: str,
 ) -> dict:
     from app.database import async_session_factory
-    from app.modules.m1_gateway.service import process_inbound, persist_outbound
+    from app.modules.m1_gateway.service import process_inbound
     from app.modules.m1_gateway.session_cache import get_session, save_session, SessionState
     from app.adapters import get_ai_adapter
     from sqlalchemy import select
@@ -196,8 +236,26 @@ async def _process(
 
         # ── Opt-out ────────────────────────────────────────────────────────────
         if inbound.is_opted_out:
-            await _send_safe(customer_phone, t("opt_out_ack", language))
-            return {"status": "opt_out", "phone": customer_phone}
+            response_text = t("opt_out_ack", language)
+            outbound_id = await _persist_outbound(
+                conversation_id=inbound.conversation_id,
+                content=response_text,
+                language=language,
+                processing_time_ms=int((time.monotonic() - t0) * 1000),
+            )
+            if outbound_id is None:
+                return _persistence_failure_result(conv_id)
+            send_result = await _send_safe(
+                customer_phone,
+                response_text,
+                idempotency_key=str(outbound_id),
+            )
+            return {
+                "status": "opt_out",
+                "phone": customer_phone,
+                "outbound_message_id": str(outbound_id),
+                "send_status": send_result["status"],
+            }
 
         # ── Voice note escalation ──────────────────────────────────────────────
         if inbound.is_voice_note:
@@ -207,8 +265,26 @@ async def _process(
                 conversation_id=inbound.conversation_id,
                 language=language,
             )
-            await _send_safe(customer_phone, t("voice_note_ack", language))
-            return {"status": "escalated_voice_note", "conversation_id": conv_id}
+            response_text = t("voice_note_ack", language)
+            outbound_id = await _persist_outbound(
+                conversation_id=inbound.conversation_id,
+                content=response_text,
+                language=language,
+                processing_time_ms=int((time.monotonic() - t0) * 1000),
+            )
+            if outbound_id is None:
+                return _persistence_failure_result(conv_id)
+            send_result = await _send_safe(
+                customer_phone,
+                response_text,
+                idempotency_key=str(outbound_id),
+            )
+            return {
+                "status": "escalated_voice_note",
+                "conversation_id": conv_id,
+                "outbound_message_id": str(outbound_id),
+                "send_status": send_result["status"],
+            }
 
         # ── Step 5: Load Redis session cache ──────────────────────────────────
         session_state = await get_session(conv_id)
@@ -254,20 +330,14 @@ async def _process(
         processing_ms = int((time.monotonic() - t0) * 1000)
 
         # ── Step 7: Persist outbound message ──────────────────────────────────
-        async with async_session_factory() as session2:
-            try:
-                out_msg_id = await persist_outbound(
-                    session=session2,
-                    conversation_id=inbound.conversation_id,
-                    content=ai_response,
-                    language=language,
-                    processing_time_ms=processing_ms,
-                )
-                await session2.commit()
-            except Exception as exc:
-                await session2.rollback()
-                log.error("m1.persist_outbound.error", conv_id=conv_id, error=str(exc))
-                out_msg_id = uuid.uuid4()  # fallback — don't fail the whole task
+        out_msg_id = await _persist_outbound(
+            conversation_id=inbound.conversation_id,
+            content=ai_response,
+            language=language,
+            processing_time_ms=processing_ms,
+        )
+        if out_msg_id is None:
+            return _persistence_failure_result(conv_id)
 
         # ── Step 8: Dispatch MAPS tag generation ──────────────────────────────
         try:
@@ -326,32 +396,69 @@ async def _process(
         await save_session(conv_id, session_state)
 
         # ── Step 10: Send response ─────────────────────────────────────────────
-        await _send_safe(customer_phone, ai_response)
+        send_result = await _send_safe(
+            customer_phone,
+            ai_response,
+            idempotency_key=str(out_msg_id),
+        )
 
         log.info(
             "m1.processed",
-            phone=customer_phone,
             conv_id=conv_id,
             lang=language,
             processing_ms=processing_ms,
+            send_status=send_result["status"],
         )
-        return {
+        result = {
             "status": "processed",
             "conversation_id": conv_id,
             "outbound_message_id": str(out_msg_id),
             "language": language,
             "processing_ms": processing_ms,
+            "send_status": send_result["status"],
         }
+        if send_result.get("provider_message_id"):
+            result["provider_message_id"] = send_result["provider_message_id"]
+        return result
 
 
-async def _send_safe(phone: str, text: str) -> None:
-    """Send a message, swallowing errors (message is already persisted in DB)."""
+async def _send_safe(
+    phone: str,
+    text: str,
+    *,
+    idempotency_key: str,
+) -> dict[str, str]:
+    """Send once through the adapter and report only confirmed outcomes."""
     from app.adapters import get_messaging_adapter
+
+    if not settings.whatsapp_send_enabled:
+        log.info("m1.send_message.skipped", reason="whatsapp_send_disabled")
+        return {"status": "skipped"}
+
     try:
         adapter = get_messaging_adapter()
-        await adapter.send_message(phone, text)
+        provider_message_id = await adapter.send_message(
+            phone,
+            text,
+            idempotency_key=idempotency_key,
+        )
+        if not isinstance(provider_message_id, str) or not provider_message_id.strip():
+            log.error(
+                "m1.send_message.unknown_or_failed",
+                error_type="UnconfirmedProviderMessageId",
+            )
+            return {"status": "unknown_or_failed"}
+        log.info("m1.send_message.sent")
+        return {
+            "status": "sent",
+            "provider_message_id": provider_message_id.strip(),
+        }
     except Exception as exc:
-        log.error("m1.send_message.failed", phone=phone, error=str(exc))
+        log.error(
+            "m1.send_message.unknown_or_failed",
+            error_type=type(exc).__name__,
+        )
+        return {"status": "unknown_or_failed"}
 
 
 async def _handle_voice_note(

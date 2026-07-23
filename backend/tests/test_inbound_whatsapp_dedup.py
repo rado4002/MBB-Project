@@ -12,18 +12,56 @@ from unittest.mock import Mock, patch
 from types import ModuleType
 
 
-celery_module = ModuleType("celery")
-celery_module.Task = type("Task", (), {})
-sys.modules["celery"] = celery_module
+_MISSING_MODULE = object()
 
-fake_celery_app = SimpleNamespace(
-    send_task=Mock(),
-    task=lambda *args, **kwargs: lambda function: function,
-)
-celery_app_module = ModuleType("app.tasks.celery_app")
-celery_app_module.celery_app = fake_celery_app
-celery_app_module.run_async = Mock()
-sys.modules["app.tasks.celery_app"] = celery_app_module
+
+def _load_isolated_m1():
+    """Load a private M1 module while restoring temporary Celery fakes exactly."""
+    celery_module = ModuleType("celery")
+    celery_module.Task = type("Task", (), {})
+    fake_celery_app = SimpleNamespace(
+        send_task=Mock(),
+        task=lambda *args, **kwargs: lambda function: function,
+    )
+    celery_app_module = ModuleType("app.tasks.celery_app")
+    celery_app_module.celery_app = fake_celery_app
+    celery_app_module.run_async = Mock()
+    fake_modules = {
+        "celery": celery_module,
+        "app.tasks.celery_app": celery_app_module,
+    }
+    originals = {
+        name: sys.modules.get(name, _MISSING_MODULE)
+        for name in fake_modules
+    }
+
+    try:
+        sys.modules.update(fake_modules)
+        module_path = Path(__file__).parents[1] / "app/tasks/m1.py"
+        spec = importlib.util.spec_from_file_location(
+            "app.tasks._test_inbound_dedup_m1",
+            module_path,
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError("Unable to load isolated M1 test module")
+        isolated_m1 = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(isolated_m1)
+    finally:
+        for name, original in originals.items():
+            if original is _MISSING_MODULE:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
+
+    restored = all(
+        (
+            name not in sys.modules
+            if original is _MISSING_MODULE
+            else sys.modules.get(name) is original
+        )
+        for name, original in originals.items()
+    )
+    return isolated_m1, fake_modules, restored
 
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
@@ -32,7 +70,9 @@ from app.models.message import Message
 from app.modules.m1_gateway.service import ProcessedInbound, process_inbound
 from app.schemas.common import ContentType
 from app.schemas.messages import InboundMessageRequest, validate_whatsapp_message_id_value
-from app.tasks import m1
+
+
+m1, _FAKE_CELERY_MODULES, _FAKE_CELERY_STATE_RESTORED = _load_isolated_m1()
 
 
 WHATSAPP_ID_INDEX = "uq_messages_inbound_whatsapp_message_id"
@@ -56,6 +96,11 @@ def _inbound_payload(whatsapp_message_id: str):
 
 
 class SchemaModelMigrationTests(unittest.TestCase):
+    def test_fake_celery_modules_are_restored_after_isolated_import(self):
+        self.assertTrue(_FAKE_CELERY_STATE_RESTORED)
+        for name, fake_module in _FAKE_CELERY_MODULES.items():
+            self.assertIsNot(sys.modules.get(name), fake_module)
+
     def test_whatsapp_message_id_validation(self):
         for invalid_id in ("", "   ", " leading", "trailing ", "x" * 101):
             with self.subTest(invalid_id=invalid_id):

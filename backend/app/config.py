@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -81,6 +82,7 @@ class Settings(BaseSettings):
     baileys_host: str = "baileys"
     baileys_port: int = 3000
     baileys_webhook_secret: str = _read_secret("baileys_webhook_secret", "")
+    baileys_send_max_attempts: int = Field(default=1, ge=1)
 
     # ── Payment ───────────────────────────────────────────────────────────────
     orange_money_key: str = _read_secret("orange_money_key", "")

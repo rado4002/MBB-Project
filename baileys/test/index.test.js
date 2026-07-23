@@ -2,7 +2,16 @@
 
 const assert = require("node:assert/strict");
 const { test, after } = require("node:test");
+const crypto = require("node:crypto");
+const fs = require("node:fs");
 const Module = require("node:module");
+const os = require("node:os");
+const path = require("node:path");
+const {
+  OutboundLedger,
+  hashValue,
+  payloadFingerprint,
+} = require("../src/outbound_idempotency");
 
 const logs = [];
 const routes = { get: {}, post: {} };
@@ -72,6 +81,7 @@ const originalEnvironment = {
   BAILEYS_CONNECT_ENABLED: process.env.BAILEYS_CONNECT_ENABLED,
   BAILEYS_QR_ENDPOINTS_ENABLED: process.env.BAILEYS_QR_ENDPOINTS_ENABLED,
   BAILEYS_LOGOUT_ENABLED: process.env.BAILEYS_LOGOUT_ENABLED,
+  BAILEYS_OUTBOUND_LEDGER_DIR: process.env.BAILEYS_OUTBOUND_LEDGER_DIR,
   BAILEYS_RECOVERY_TOKEN: process.env.BAILEYS_RECOVERY_TOKEN,
 };
 
@@ -862,11 +872,13 @@ test("webhook observability logs exclude identity, payload, credentials, and raw
 });
 
 test("outbound disabled mode makes zero sendMessage calls and logs no sensitive values", async () => {
+  const ledgerDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "mbb-ledger-disabled-"));
   let sendCalls = 0;
   bridge.setSocketForTests({
     user: { id: "244923456789@s.whatsapp.net" },
     sendMessage: async () => { sendCalls += 1; },
   });
+  process.env.BAILEYS_OUTBOUND_LEDGER_DIR = ledgerDirectory;
 
   const response = {
     statusCode: null,
@@ -881,11 +893,20 @@ test("outbound disabled mode makes zero sendMessage calls and logs no sensitive 
     },
   };
 
-  await bridge.handleSend({
-    body: { phone: "+244923456789", message: "private message text" },
-  }, response);
+  try {
+    await bridge.handleSend({
+      body: {
+        phone: "+244923456789",
+        message: "private message text",
+        idempotency_key: crypto.randomUUID(),
+      },
+    }, response);
+  } finally {
+    delete process.env.BAILEYS_OUTBOUND_LEDGER_DIR;
+  }
 
   assert.equal(sendCalls, 0);
+  assert.deepEqual(fs.readdirSync(ledgerDirectory), []);
   assert.equal(response.statusCode, 200);
   assert.deepEqual(response.body, {
     success: false,
@@ -900,6 +921,431 @@ test("outbound disabled mode makes zero sendMessage calls and logs no sensitive 
   assert.equal(serializedLogs.includes("message-id"), false);
   assert.equal(serializedLogs.includes("@s.whatsapp.net"), false);
   assert.equal(serializedLogs.includes("test-webhook-secret"), false);
+  fs.rmSync(ledgerDirectory, { recursive: true, force: true });
+});
+
+function outboundRequest(idempotencyKey, overrides = {}) {
+  return {
+    body: {
+      phone: "+243812345678",
+      message: "private outbound message",
+      idempotency_key: idempotencyKey,
+      ...overrides,
+    },
+  };
+}
+
+function enableOutbound(ledgerDirectory, socket) {
+  bridge.resetLifecycleForTests();
+  process.env.WHATSAPP_SEND_ENABLED = "true";
+  process.env.BAILEYS_CONNECT_ENABLED = "true";
+  process.env.BAILEYS_OUTBOUND_LEDGER_DIR = ledgerDirectory;
+  bridge.setSocketForTests(socket);
+}
+
+function disableOutbound(ledgerDirectory) {
+  process.env.WHATSAPP_SEND_ENABLED = "false";
+  process.env.BAILEYS_CONNECT_ENABLED = "false";
+  delete process.env.BAILEYS_OUTBOUND_LEDGER_DIR;
+  bridge.resetLifecycleForTests();
+  if (ledgerDirectory) {
+    fs.rmSync(ledgerDirectory, { recursive: true, force: true });
+  }
+}
+
+function newLedgerDirectory(label) {
+  return fs.mkdtempSync(path.join(os.tmpdir(), `mbb-ledger-${label}-`));
+}
+
+test("enabled outbound rejects missing or malformed idempotency keys before sendMessage", async () => {
+  for (const invalidKey of [
+    undefined,
+    "",
+    "not-a-uuid",
+    "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+    "aaaaaaaa-aaaa-0aaa-8aaa-aaaaaaaaaaaa",
+  ]) {
+    const ledgerDirectory = newLedgerDirectory("invalid-key");
+    let sendCalls = 0;
+    enableOutbound(ledgerDirectory, fakeSocket({
+      user: { id: "redacted@s.whatsapp.net" },
+      sendMessage: async () => { sendCalls += 1; },
+    }));
+    try {
+      const res = response();
+      await bridge.handleSend(outboundRequest(invalidKey), res);
+      assert.equal(res.statusCode, 400);
+      assert.equal(res.body.reason, "invalid_idempotency_key");
+      assert.equal(sendCalls, 0);
+      assert.deepEqual(fs.readdirSync(ledgerDirectory), []);
+    } finally {
+      disableOutbound(ledgerDirectory);
+    }
+  }
+});
+
+test("enabled outbound fails closed without usable ledger storage", async () => {
+  const parent = newLedgerDirectory("missing-storage");
+  const missingDirectory = path.join(parent, "not-created");
+  let sendCalls = 0;
+  enableOutbound(missingDirectory, fakeSocket({
+    user: { id: "redacted@s.whatsapp.net" },
+    sendMessage: async () => { sendCalls += 1; },
+  }));
+  try {
+    const res = response();
+    await bridge.handleSend(outboundRequest(crypto.randomUUID()), res);
+    assert.equal(res.statusCode, 503);
+    assert.equal(res.body.status, "unknown");
+    assert.equal(sendCalls, 0);
+  } finally {
+    disableOutbound(parent);
+  }
+});
+
+test("first claim sends once, persists sent, and sequential replay is cached", async () => {
+  const ledgerDirectory = newLedgerDirectory("sequential");
+  const key = crypto.randomUUID();
+  let sendCalls = 0;
+  enableOutbound(ledgerDirectory, fakeSocket({
+    user: { id: "redacted@s.whatsapp.net" },
+    sendMessage: async () => {
+      sendCalls += 1;
+      return { key: { id: "provider-sequential" } };
+    },
+  }));
+  try {
+    const first = response();
+    await bridge.handleSend(outboundRequest(key), first);
+    assert.deepEqual(first.body, {
+      success: true,
+      status: "sent",
+      provider_message_id: "provider-sequential",
+    });
+    assert.equal(sendCalls, 1);
+    const files = fs.readdirSync(ledgerDirectory);
+    assert.equal(files.length, 1);
+    const persisted = JSON.parse(
+      fs.readFileSync(path.join(ledgerDirectory, files[0]), "utf8"),
+    );
+    assert.equal(persisted.state, "sent");
+    assert.equal(persisted.provider_message_id, "provider-sequential");
+
+    const replay = response();
+    await bridge.handleSend(outboundRequest(key), replay);
+    assert.deepEqual(replay.body, {
+      success: true,
+      status: "sent",
+      duplicate: true,
+      provider_message_id: "provider-sequential",
+    });
+    assert.equal(sendCalls, 1);
+  } finally {
+    disableOutbound(ledgerDirectory);
+  }
+});
+
+test("concurrent requests have one claim winner and one total sendMessage call", async () => {
+  const ledgerDirectory = newLedgerDirectory("concurrent");
+  const key = crypto.randomUUID();
+  const pendingSend = deferred();
+  let sendCalls = 0;
+  enableOutbound(ledgerDirectory, fakeSocket({
+    user: { id: "redacted@s.whatsapp.net" },
+    sendMessage: async () => {
+      sendCalls += 1;
+      return pendingSend.promise;
+    },
+  }));
+  try {
+    const winner = response();
+    const blocked = response();
+    const winnerPromise = bridge.handleSend(outboundRequest(key), winner);
+    await bridge.handleSend(outboundRequest(key), blocked);
+    assert.equal(blocked.statusCode, 409);
+    assert.equal(blocked.body.reason, "in_progress");
+    assert.equal(sendCalls, 1);
+    pendingSend.resolve({ key: { id: "provider-concurrent" } });
+    await winnerPromise;
+    assert.equal(winner.body.status, "sent");
+    assert.equal(sendCalls, 1);
+  } finally {
+    disableOutbound(ledgerDirectory);
+  }
+});
+
+test("durable sent replay survives simulated outbound ledger module restart", async () => {
+  const ledgerDirectory = newLedgerDirectory("restart");
+  const key = crypto.randomUUID();
+  let sendCalls = 0;
+  enableOutbound(ledgerDirectory, fakeSocket({
+    user: { id: "redacted@s.whatsapp.net" },
+    sendMessage: async () => {
+      sendCalls += 1;
+      return { key: { id: "provider-restart" } };
+    },
+  }));
+  try {
+    const first = response();
+    await bridge.handleSend(outboundRequest(key), first);
+    delete require.cache[require.resolve("../src/outbound_idempotency")];
+    const RestartedLedger = require("../src/outbound_idempotency").OutboundLedger;
+    bridge.setOutboundLedgerFactoryForTests(
+      () => new RestartedLedger(ledgerDirectory),
+    );
+    const replay = response();
+    await bridge.handleSend(outboundRequest(key), replay);
+    assert.equal(replay.body.duplicate, true);
+    assert.equal(replay.body.provider_message_id, "provider-restart");
+    assert.equal(sendCalls, 1);
+  } finally {
+    disableOutbound(ledgerDirectory);
+  }
+});
+
+test("in_progress and unknown records remain blocking after restart", async () => {
+  for (const state of ["in_progress", "unknown"]) {
+    const ledgerDirectory = newLedgerDirectory(state);
+    const key = crypto.randomUUID();
+    const fingerprint = payloadFingerprint(
+      "+243812345678",
+      "private outbound message",
+    );
+    const ledger = new OutboundLedger(ledgerDirectory);
+    const claim = ledger.claim(key, fingerprint);
+    if (state === "unknown") ledger.markUnknown(claim);
+    let sendCalls = 0;
+    enableOutbound(ledgerDirectory, fakeSocket({
+      user: { id: "redacted@s.whatsapp.net" },
+      sendMessage: async () => { sendCalls += 1; },
+    }));
+    try {
+      bridge.setOutboundLedgerFactoryForTests(
+        () => new OutboundLedger(ledgerDirectory),
+      );
+      const res = response();
+      await bridge.handleSend(outboundRequest(key), res);
+      assert.equal(res.statusCode, 409);
+      assert.equal(res.body.reason, state);
+      assert.equal(sendCalls, 0);
+    } finally {
+      disableOutbound(ledgerDirectory);
+    }
+  }
+});
+
+test("same key with changed payload is rejected without another send", async () => {
+  const ledgerDirectory = newLedgerDirectory("conflict");
+  const key = crypto.randomUUID();
+  let sendCalls = 0;
+  enableOutbound(ledgerDirectory, fakeSocket({
+    user: { id: "redacted@s.whatsapp.net" },
+    sendMessage: async () => {
+      sendCalls += 1;
+      return { key: { id: "provider-conflict" } };
+    },
+  }));
+  try {
+    await bridge.handleSend(outboundRequest(key), response());
+    const conflict = response();
+    await bridge.handleSend(
+      outboundRequest(key, { message: "different private outbound message" }),
+      conflict,
+    );
+    assert.equal(conflict.statusCode, 409);
+    assert.equal(conflict.body.reason, "idempotency_conflict");
+    assert.equal(sendCalls, 1);
+  } finally {
+    disableOutbound(ledgerDirectory);
+  }
+});
+
+test("throwing sendMessage becomes unknown and never retries", async () => {
+  const ledgerDirectory = newLedgerDirectory("throw");
+  const key = crypto.randomUUID();
+  let sendCalls = 0;
+  enableOutbound(ledgerDirectory, fakeSocket({
+    user: { id: "redacted@s.whatsapp.net" },
+    sendMessage: async () => {
+      sendCalls += 1;
+      throw new Error("+243812345678 private outbound message test-webhook-secret");
+    },
+  }));
+  try {
+    const first = response();
+    await bridge.handleSend(outboundRequest(key), first);
+    assert.equal(first.body.status, "unknown");
+    const replay = response();
+    await bridge.handleSend(outboundRequest(key), replay);
+    assert.equal(replay.body.reason, "unknown");
+    assert.equal(sendCalls, 1);
+  } finally {
+    disableOutbound(ledgerDirectory);
+  }
+});
+
+test("resolved send without provider ID becomes unknown and never retries", async () => {
+  const ledgerDirectory = newLedgerDirectory("missing-provider");
+  const key = crypto.randomUUID();
+  let sendCalls = 0;
+  enableOutbound(ledgerDirectory, fakeSocket({
+    user: { id: "redacted@s.whatsapp.net" },
+    sendMessage: async () => {
+      sendCalls += 1;
+      return { key: {} };
+    },
+  }));
+  try {
+    const first = response();
+    await bridge.handleSend(outboundRequest(key), first);
+    assert.equal(first.body.reason, "provider_message_id_missing");
+    const replay = response();
+    await bridge.handleSend(outboundRequest(key), replay);
+    assert.equal(replay.body.reason, "unknown");
+    assert.equal(sendCalls, 1);
+  } finally {
+    disableOutbound(ledgerDirectory);
+  }
+});
+
+test("lost successful HTTP response replay returns recorded result without resending", async () => {
+  const ledgerDirectory = newLedgerDirectory("lost-response");
+  const key = crypto.randomUUID();
+  let sendCalls = 0;
+  enableOutbound(ledgerDirectory, fakeSocket({
+    user: { id: "redacted@s.whatsapp.net" },
+    sendMessage: async () => {
+      sendCalls += 1;
+      return { key: { id: "provider-lost-response" } };
+    },
+  }));
+  try {
+    await bridge.handleSend(outboundRequest(key), response());
+    const replay = response();
+    await bridge.handleSend(outboundRequest(key), replay);
+    assert.equal(replay.body.duplicate, true);
+    assert.equal(replay.body.provider_message_id, "provider-lost-response");
+    assert.equal(sendCalls, 1);
+  } finally {
+    disableOutbound(ledgerDirectory);
+  }
+});
+
+test("corrupt partial ledger data fails closed with zero sendMessage calls", async () => {
+  const ledgerDirectory = newLedgerDirectory("corrupt");
+  const key = crypto.randomUUID();
+  fs.writeFileSync(
+    path.join(ledgerDirectory, `${hashValue(key)}.json`),
+    "{\"schema_version\":",
+    "utf8",
+  );
+  let sendCalls = 0;
+  enableOutbound(ledgerDirectory, fakeSocket({
+    user: { id: "redacted@s.whatsapp.net" },
+    sendMessage: async () => { sendCalls += 1; },
+  }));
+  try {
+    const res = response();
+    await bridge.handleSend(outboundRequest(key), res);
+    assert.equal(res.statusCode, 503);
+    assert.equal(res.body.reason, "ledger_unavailable");
+    assert.equal(sendCalls, 0);
+  } finally {
+    disableOutbound(ledgerDirectory);
+  }
+});
+
+test("sent-record storage failure is unknown and leaves replay blocking", async () => {
+  const ledgerDirectory = newLedgerDirectory("storage-failure");
+  const key = crypto.randomUUID();
+  const realLedger = new OutboundLedger(ledgerDirectory);
+  let sendCalls = 0;
+  enableOutbound(ledgerDirectory, fakeSocket({
+    user: { id: "redacted@s.whatsapp.net" },
+    sendMessage: async () => {
+      sendCalls += 1;
+      return { key: { id: "provider-storage-failure" } };
+    },
+  }));
+  bridge.setOutboundLedgerFactoryForTests(() => ({
+    claim: (...args) => realLedger.claim(...args),
+    markSent: () => { throw new Error("simulated durable update failure"); },
+    markUnknown: (...args) => realLedger.markUnknown(...args),
+  }));
+  try {
+    const first = response();
+    await bridge.handleSend(outboundRequest(key), first);
+    assert.equal(first.body.reason, "ledger_update_failed");
+    bridge.setOutboundLedgerFactoryForTests(
+      () => new OutboundLedger(ledgerDirectory),
+    );
+    const replay = response();
+    await bridge.handleSend(outboundRequest(key), replay);
+    assert.equal(replay.body.reason, "in_progress");
+    assert.equal(sendCalls, 1);
+  } finally {
+    disableOutbound(ledgerDirectory);
+  }
+});
+
+test("ledger, logs, and responses contain no raw customer payload or secret", async () => {
+  const ledgerDirectory = newLedgerDirectory("redaction");
+  const key = crypto.randomUUID();
+  const sensitivePhone = "+243899999999";
+  const sensitiveMessage = "unique-private-outbound-text";
+  const sensitiveSecret = "unique-outbound-secret";
+  const firstLog = logs.length;
+  let sendCalls = 0;
+  enableOutbound(ledgerDirectory, fakeSocket({
+    user: { id: "redacted@s.whatsapp.net" },
+    sendMessage: async () => {
+      sendCalls += 1;
+      return {
+        key: { id: "provider-redaction" },
+        complete_private_object: sensitiveSecret,
+      };
+    },
+  }));
+  try {
+    const res = response();
+    await bridge.handleSend(
+      outboundRequest(key, {
+        phone: sensitivePhone,
+        message: sensitiveMessage,
+      }),
+      res,
+    );
+    assert.equal(sendCalls, 1);
+    const persisted = fs.readdirSync(ledgerDirectory)
+      .map((name) => fs.readFileSync(path.join(ledgerDirectory, name), "utf8"))
+      .join("");
+    const exposed = JSON.stringify([logs.slice(firstLog), res.body, persisted]);
+    for (const sensitive of [
+      sensitivePhone,
+      sensitivePhone.slice(1),
+      "@s.whatsapp.net",
+      sensitiveMessage,
+      sensitiveSecret,
+      key,
+    ]) {
+      assert.equal(exposed.includes(sensitive), false);
+    }
+    const record = JSON.parse(persisted);
+    assert.deepEqual(
+      Object.keys(record).sort(),
+      [
+        "created_at",
+        "key_hash",
+        "payload_fingerprint",
+        "provider_message_id",
+        "schema_version",
+        "state",
+        "updated_at",
+      ],
+    );
+  } finally {
+    disableOutbound(ledgerDirectory);
+  }
 });
 
 class FakeEmitter {

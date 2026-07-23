@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 
 import httpx
 import structlog
@@ -73,39 +74,75 @@ class BaileysAdapter(BaseMessagingAdapter):
 
     # ── BaseMessagingAdapter interface ────────────────────────────────────────
 
-    async def send_message(self, phone: str, text: str) -> str:
+    async def send_message(
+        self,
+        phone: str,
+        text: str,
+        *,
+        idempotency_key: str | None = None,
+    ) -> str:
         """
-        POST /send/text to Baileys bridge.
-        Returns the bridge-assigned message ID.
+        POST /send to Baileys bridge using the persisted outbound row UUID.
+        Returns a validated provider message ID.
         """
         if not settings.whatsapp_send_enabled:
             log.warning(
                 "baileys.send_skipped_safety_gate",
-                phone=_mask_phone(phone),
-                chars=len(text),
                 whatsapp_send_enabled=False,
             )
             return ""
 
-        self._check_circuit()
-        payload = {"phone": phone, "message": text}
+        try:
+            parsed_key = uuid.UUID(idempotency_key or "")
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise MessagingAdapterError("A persisted outbound UUID is required") from exc
+        stable_key = str(parsed_key)
+        if idempotency_key != stable_key:
+            raise MessagingAdapterError("A canonical persisted outbound UUID is required")
 
-        for attempt, delay in enumerate((*_RETRY_DELAYS, None), start=1):
+        self._check_circuit()
+        payload = {
+            "phone": phone,
+            "message": text,
+            "idempotency_key": stable_key,
+        }
+
+        max_attempts = settings.baileys_send_max_attempts
+        for attempt in range(1, max_attempts + 1):
             try:
                 async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
                     resp = await client.post(f"{self._base_url}/send", json=payload)
                     resp.raise_for_status()
                     data = resp.json()
+                    if not isinstance(data, dict):
+                        raise MessagingAdapterError("Baileys returned a non-object response")
+                    provider_message_id = data.get("provider_message_id")
+                    if (
+                        data.get("success") is not True
+                        or data.get("status") != "sent"
+                        or not isinstance(provider_message_id, str)
+                        or not provider_message_id.strip()
+                    ):
+                        raise MessagingAdapterError("Baileys send was not confirmed")
                     self._record_success()
-                    msg_id: str = data.get("id", "")
-                    log.info("baileys.sent", phone=phone, msg_id=msg_id)
-                    return msg_id
-            except (httpx.HTTPError, Exception) as exc:
-                log.warning("baileys.send_failed", attempt=attempt, error=str(exc))
+                    log.info(
+                        "baileys.sent",
+                        duplicate=data.get("duplicate") is True,
+                    )
+                    return provider_message_id.strip()
+            except Exception as exc:
+                log.warning(
+                    "baileys.send_failed",
+                    attempt=attempt,
+                    error_type=type(exc).__name__,
+                )
                 self._record_failure()
-                if delay is None:
-                    raise MessagingAdapterError(f"Baileys unreachable after {attempt} attempts") from exc
-                await asyncio.sleep(delay)
+                if attempt >= max_attempts:
+                    raise MessagingAdapterError(
+                        f"Baileys send was not confirmed after {attempt} attempt(s)"
+                    ) from exc
+                delay_index = min(attempt - 1, len(_RETRY_DELAYS) - 1)
+                await asyncio.sleep(_RETRY_DELAYS[delay_index])
 
         return ""  # unreachable
 

@@ -57,7 +57,13 @@ class BasePaymentAdapter(ABC):
 
 class BaseMessagingAdapter(ABC):
     @abstractmethod
-    async def send_message(self, phone: str, text: str) -> str:
+    async def send_message(
+        self,
+        phone: str,
+        text: str,
+        *,
+        idempotency_key: str | None = None,
+    ) -> str:
         """Send a text message. Returns provider message ID."""
 
     @abstractmethod

@@ -5,6 +5,12 @@ const crypto = require("crypto");
 const express = require("express");
 const fs = require("fs");
 const pino = require("pino");
+const {
+  OutboundLedger,
+  OutboundLedgerError,
+  payloadFingerprint,
+  validateIdempotencyKey,
+} = require("./outbound_idempotency");
 
 let baileysModulePromise = null;
 let baileysDisconnectReasons = {};
@@ -84,6 +90,11 @@ const FASTAPI_WEBHOOK_URL =
 const WEBHOOK_SECRET = process.env.BAILEYS_WEBHOOK_SECRET || "";
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const SESSIONS_DIR = "/app/sessions";
+const defaultOutboundLedgerFactory = () => new OutboundLedger(
+  process.env.BAILEYS_OUTBOUND_LEDGER_DIR,
+  { forbiddenDirectories: [SESSIONS_DIR] },
+);
+let outboundLedgerFactory = defaultOutboundLedgerFactory;
 
 const PHONE_DIGITS_RE = /^[1-9][0-9]{6,14}$/;
 
@@ -327,7 +338,7 @@ function normalizedMessageTimestamp(value) {
 }
 
 async function handleSend(req, res) {
-  const { phone, message } = req.body || {};
+  const { phone, message, idempotency_key: idempotencyKey } = req.body || {};
 
   if (!phone || !message) {
     return res.status(400).json({ error: "phone and message are required" });
@@ -356,15 +367,112 @@ async function handleSend(req, res) {
   if (!normalized) {
     return res.status(400).json({ error: "phone must be an international number" });
   }
+  if (!validateIdempotencyKey(idempotencyKey)) {
+    log.warn({ reason: "invalid_idempotency_key" }, "send_rejected");
+    return res.status(400).json({
+      success: false,
+      status: "unknown",
+      reason: "invalid_idempotency_key",
+    });
+  }
 
+  let ledger;
+  let claim;
+  try {
+    ledger = outboundLedgerFactory();
+    const fingerprint = payloadFingerprint(normalized, message);
+    claim = ledger.claim(idempotencyKey, fingerprint);
+  } catch (err) {
+    const reason = err instanceof OutboundLedgerError ? err.code : "ledger_unavailable";
+    log.error({ reason }, "send_ledger_failed_closed");
+    return res.status(503).json({
+      success: false,
+      status: "unknown",
+      reason: "ledger_unavailable",
+    });
+  }
+
+  if (claim.outcome === "sent") {
+    log.info({ duplicate: true }, "message_send_replayed");
+    return res.json({
+      success: true,
+      status: "sent",
+      duplicate: true,
+      provider_message_id: claim.record.provider_message_id,
+    });
+  }
+  if (claim.outcome === "conflict") {
+    log.warn({ reason: "idempotency_conflict" }, "send_rejected");
+    return res.status(409).json({
+      success: false,
+      status: "unknown",
+      reason: "idempotency_conflict",
+    });
+  }
+  if (claim.outcome === "blocked") {
+    log.warn({ state: claim.record.state }, "send_blocked");
+    return res.status(409).json({
+      success: false,
+      status: "unknown",
+      reason: claim.record.state,
+    });
+  }
+
+  const sendSocket = currentSocket;
   try {
     const jid = `${normalized.slice(1)}@s.whatsapp.net`;
-    await currentSocket.sendMessage(jid, { text: message });
-    log.info({ content_type: "text", message_present: true }, "message_sent");
-    return res.json({ success: true });
+    const providerResult = await sendSocket.sendMessage(jid, { text: message });
+    const providerMessageId = (
+      typeof providerResult?.key?.id === "string"
+        ? providerResult.key.id
+        : providerResult?.id
+    );
+    if (typeof providerMessageId !== "string" || !providerMessageId.trim()) {
+      try {
+        ledger.markUnknown(claim);
+      } catch {
+        log.error({ reason: "ledger_update_failed" }, "send_unknown_record_failed");
+      }
+      log.error({ reason: "provider_message_id_missing" }, "send_inconclusive");
+      return res.status(500).json({
+        success: false,
+        status: "unknown",
+        reason: "provider_message_id_missing",
+      });
+    }
+
+    let sentRecord;
+    try {
+      sentRecord = ledger.markSent(claim, providerMessageId);
+    } catch {
+      log.error({ reason: "ledger_update_failed" }, "send_inconclusive");
+      return res.status(500).json({
+        success: false,
+        status: "unknown",
+        reason: "ledger_update_failed",
+      });
+    }
+    log.info({ duplicate: false }, "message_sent");
+    return res.json({
+      success: true,
+      status: "sent",
+      provider_message_id: sentRecord.provider_message_id,
+    });
   } catch (err) {
-    log.error({ error_type: safeErrorType(err), status_category: safeStatusCategory(err) }, "send_failed");
-    return res.status(500).json({ error: "send failed" });
+    try {
+      ledger.markUnknown(claim);
+    } catch {
+      log.error({ reason: "ledger_update_failed" }, "send_unknown_record_failed");
+    }
+    log.error(
+      { error_type: safeErrorType(err), status_category: safeStatusCategory(err) },
+      "send_inconclusive",
+    );
+    return res.status(500).json({
+      success: false,
+      status: "unknown",
+      reason: "send_inconclusive",
+    });
   }
 }
 
@@ -1176,6 +1284,13 @@ function setLifecycleDependenciesForTests(overrides = {}) {
   Object.assign(lifecycleDeps, overrides);
 }
 
+function setOutboundLedgerFactoryForTests(factory) {
+  if (typeof factory !== "function") {
+    throw new TypeError("Outbound ledger factory must be a function");
+  }
+  outboundLedgerFactory = factory;
+}
+
 function resetLifecycleForTests() {
   clearReconnectTimer();
   currentSocket = null;
@@ -1188,6 +1303,7 @@ function resetLifecycleForTests() {
   terminalDisconnectReason = null;
   socketGeneration = 0;
   httpServer = null;
+  outboundLedgerFactory = defaultOutboundLedgerFactory;
   Object.assign(lifecycleDeps, {
     loadAuth: defaultLoadAuth,
     fetchVersion: () => fetchVersionWithRetry(3, 10000),
@@ -1231,6 +1347,7 @@ module.exports = {
   setBaileysImporterForTests,
   setBaileysModuleForTests,
   setLifecycleDependenciesForTests,
+  setOutboundLedgerFactoryForTests,
   setSocketForTests,
   shutdownBridge,
   startBridge,

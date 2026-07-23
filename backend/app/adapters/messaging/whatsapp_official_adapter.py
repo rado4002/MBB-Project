@@ -69,11 +69,18 @@ class WhatsAppOfficialAdapter(BaseMessagingAdapter):
 
     # ── BaseMessagingAdapter interface ────────────────────────────────────────
 
-    async def send_message(self, phone: str, text: str) -> str:
+    async def send_message(
+        self,
+        phone: str,
+        text: str,
+        *,
+        idempotency_key: str | None = None,
+    ) -> str:
         """
         Send a free-form text message via the WhatsApp Cloud API.
         Returns the WA message ID.
         """
+        del idempotency_key
         if not settings.whatsapp_send_enabled:
             log.warning(
                 "wa_official.send_skipped_safety_gate",

@@ -25,8 +25,13 @@ import sys
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 sys.path.insert(0, ".")
+
+I18N_TEMPLATE_DIR = (
+    Path(__file__).resolve().parents[1] / "app" / "i18n" / "templates"
+)
 
 # Minimal env for Settings()
 os.environ.setdefault("APP_ENV", "development")
@@ -670,11 +675,9 @@ def test_adapter_factory_crm():
 
 def test_i18n_json_consistency():
     """All 3 language files must have the exact same keys."""
-    from pathlib import Path
-    template_dir = Path("app/i18n/templates")
-    french = json.loads((template_dir / "french.json").read_text(encoding="utf-8"))
-    lingala = json.loads((template_dir / "lingala.json").read_text(encoding="utf-8"))
-    swahili = json.loads((template_dir / "swahili.json").read_text(encoding="utf-8"))
+    french = json.loads((I18N_TEMPLATE_DIR / "french.json").read_text(encoding="utf-8"))
+    lingala = json.loads((I18N_TEMPLATE_DIR / "lingala.json").read_text(encoding="utf-8"))
+    swahili = json.loads((I18N_TEMPLATE_DIR / "swahili.json").read_text(encoding="utf-8"))
     assert set(french.keys()) == set(lingala.keys()), (
         f"Key mismatch FR/LN: {set(french.keys()) ^ set(lingala.keys())}"
     )
@@ -685,10 +688,8 @@ def test_i18n_json_consistency():
 
 def test_i18n_no_empty_values():
     """No empty string values in any catalog."""
-    from pathlib import Path
-    template_dir = Path("app/i18n/templates")
     for fname in ("french.json", "lingala.json", "swahili.json"):
-        data = json.loads((template_dir / fname).read_text(encoding="utf-8"))
+        data = json.loads((I18N_TEMPLATE_DIR / fname).read_text(encoding="utf-8"))
         for key, val in data.items():
             assert val.strip(), f"{fname}: key '{key}' has empty value"
 
