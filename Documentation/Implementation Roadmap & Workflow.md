@@ -3,8 +3,8 @@
 **MBB ya Kin — Multi-Language Lead Nurturer Bot**
 
 Date: May 2026
-Version: 1.3
-Status: Phase 0 ✅ — Phase 1.A ✅ — Phase 1.B ✅ — Phase 1.C ✅ — Phase 1.D ✅ — Phase 1.E ✅ COMPLETE — Pilot Ready
+Version: 1.4 recovery-status overlay
+Status: Recovery and local stabilization nearly complete — not publicly deployed, production-ready, or pilot-ready
 
 ---
 
@@ -13,6 +13,22 @@ Status: Phase 0 ✅ — Phase 1.A ✅ — Phase 1.B ✅ — Phase 1.C ✅ — Ph
 This document defines the implementation roadmap for MBB ya Kin, broken into **3 phases across 18+ months**. Each phase is subdivided into **sprints (2 weeks each)** with clear deliverables, acceptance criteria, and module dependencies.
 
 The roadmap follows the principle: **infrastructure first → core conversation loop → business logic → intelligence → optimization**.
+
+### Current Recovery Overlay
+
+The sprint completion markers below are historical implementation records. They do not prove current feature, pilot, production, or public-deployment readiness.
+
+Current validated recovery state at baseline `f45a45d49f79d4c05d1d1be1253c8ba7ab11bedc`:
+
+- Baileys is the validated local WhatsApp transport. Controlled live inbound, session restoration, international phone handling, persistence, and exactly-one outbound fallback delivery passed. Recovery is closed for that controlled inbound-to-fallback-send scope; no permanent production approval is claimed for the unofficial transport.
+- PostgreSQL, Redis, FastAPI, Celery worker, dashboard, and Nginx passed isolated local production-like startup. Authentication, routing, healthchecks, restart recovery, and database persistence passed.
+- The worker consumes `default`, `relance`, `maps`, `escalation`, and `conversion`. Production PostgreSQL is not host-published.
+- Dashboard access requires Basic Auth and an explicitly provisioned API token. It does not auto-mint an administrator JWT.
+- The application is provider-neutral and currently disconnected from external AI APIs.
+- Monitoring, backup, Celery Beat, and Baileys are excluded from the default production scope. External AI, WhatsApp sending, CRM, payments, relance, scheduled tasks, and MAPS fanout remain disabled by default.
+- `scripts/init_db.sql` currently assumes the database identifier `mbb`; database naming is not freely configurable.
+
+Public deployment is a deferred phase requiring domain ownership, a public deployment host, DNS, public ports 80 and 443, permanent production secrets, CA-issued TLS, certificate renewal, Nginx certificate reload, and public deployment validation.
 
 ### 1.1 Phase 1 Metrics Dashboard
 
@@ -297,7 +313,7 @@ Phase 1 is divided into **5 strategic stages**, each with a clear milestone and 
 
 **Modules:** All M1–M9
 
-**Milestone:** ✅ **ACHIEVED** — Full integration test suite (15 scenarios), security audit (0 critical issues), Locust load test script, 9 native relance templates, pilot runbook, and production docker-compose delivered. System is pilot-ready.
+**Historical milestone record:** Integration-test assets, a security checklist, a Locust script, relance templates, a pilot runbook, and a production Compose overlay were delivered. This record is not proof that the system is pilot-ready; the current recovery overlay above governs readiness claims.
 
 **Deliverables Completed (2026-05-08):**
 - ✅ **15 integration scenarios** covering M1–M9 end-to-end (`backend/tests/integration/test_full_flow.py`)
@@ -501,7 +517,7 @@ Phase 1 is divided into **5 strategic stages**, each with a clear milestone and 
 
 ---
 
-### Sprint 1.9 (Weeks 21–22): Integration Testing + Pilot Preparation ✅ COMPLETE
+### Sprint 1.9 (Weeks 21–22): Historical Integration Testing + Pilot Preparation Record
 
 | Task | Deliverable | Status |
 |------|-------------|--------|
@@ -524,16 +540,16 @@ Phase 1 is divided into **5 strategic stages**, each with a clear milestone and 
 
 ---
 
-### Sprint 1.10 (Weeks 23–24): Production Migration + Pilot Launch ✅ INFRA READY
+### Sprint 1.10 (Weeks 23–24): Public Deployment + Pilot Launch — DEFERRED
 
 | Task | Deliverable | Status |
 |------|-------------|--------|
-| Register WhatsApp Business API with Meta | Approved business number | ⬜ External |
+| Select and approve a public WhatsApp transport | Provider/transport approval | ⬜ Deferred |
 | Official WhatsApp API adapter in M1 | `backend/app/adapters/messaging/whatsapp_official_adapter.py` | ✅ Done (prior) |
-| Webhook: Meta → Nginx → FastAPI | `GET/POST /api/v1/messages/webhook` | ✅ Done (prior) |
-| Production docker-compose overlay | `docker-compose.prod.yml` | ✅ Done |
-| Production Nginx SSL config | `nginx/conf.d/mbb.ssl.conf` | ✅ Done |
-| pg_dump backup sidecar (6h/7d) | In `docker-compose.prod.yml` | ✅ Done |
+| Public webhook: provider → Nginx → FastAPI | `GET/POST /api/v1/messages/webhook` | ⬜ Public validation deferred |
+| Production-like Compose overlay | `docker-compose.prod.yml` | ✅ Isolated local startup passed |
+| Public Nginx TLS | `nginx/conf.d/mbb.ssl.conf` | ⬜ CA-issued TLS and public validation deferred |
+| pg_dump backup sidecar (6h/7d) | Opt-in `backup` profile in `docker-compose.prod.yml` | ⬜ Excluded from default production scope; operational validation deferred |
 | Onboard 100–150 pilot leads | Hub Team action | ⬜ Pending |
 | Production monitoring alerts | Grafana alert rules | ⬜ Pending |
 | Daily monitoring during pilot | Issue log + fix cycle | ⬜ Pending |
@@ -757,8 +773,8 @@ Each sprint follows this exact workflow:
 
 | Risk | Impact | Probability | Mitigation |
 |------|--------|-------------|------------|
-| WhatsApp Business API approval delayed | Blocks prod launch | Medium | Use Baileys bridge for extended pilot; apply early |
-| Claude API rate limits or outages | Degrades response quality | Medium | Circuit breaker + template fallback; Phase 2 Gemini adapter |
+| Public WhatsApp transport approval delayed | Blocks public launch | Medium | Keep Baileys limited to its validated local scope; evaluate an approved public transport separately |
+| External AI provider limits or outages | Could degrade response quality after connection | Medium | Keep provider-neutral boundary and local fallback; connect and validate a provider separately |
 | Lingala/Swahili AI quality issues | Robotic tone → user distrust | High | Weekly native tone audits; French fallback with escalation |
 | Power outage during deployment | Data corruption risk | Medium | Redis AOF; PostgreSQL WAL; Docker restart policies |
 | Mobile Money API instability | Failed payments | Medium | Retry with exponential backoff; manual payment path (COD) |
@@ -770,7 +786,7 @@ Each sprint follows this exact workflow:
 
 ## 11. Success Milestones
 
-**Phase 0 & Phase 1 Milestones:**
+**Historical Phase 0 & Phase 1 target milestones (not current achievement claims):**
 
 | Milestone | Target Date | Success Criteria |
 |-----------|------------|------------------|
@@ -779,7 +795,7 @@ Each sprint follows this exact workflow:
 | **M1.B: Lead Pipeline Active** | Week 16 | Bot qualifies leads (70%+ rate), sends relances (35–45% response), < 8% opt-out |
 | **M1.C: Revenue Generation** | Week 18 | First end-to-end order: product → Mobile Money → CRM sync in < 10 min |
 | **M1.D: Intelligence & Oversight** | Week 20 | MAPS tags on 100% conversations, dashboard live, admin ops functional, role-based access enforced |
-| **M1.E: Pilot Validated** | Week 24 | 100–150 real leads, 80%+ automation, 15%+ conversion, security audit passed |
+| **M1.E: Pilot Validation Target** | Week 24 | 100–150 real leads, 80%+ automation, 15%+ conversion, security audit passed |
 
 **Phase 2+ Milestones:**
 
@@ -800,9 +816,9 @@ Each sprint follows this exact workflow:
 
 | Environment | Purpose | WhatsApp Mode | URL |
 |-------------|---------|---------------|-----|
-| **Local** | Developer machine | `baileys` | `http://localhost:8000` |
-| **Staging** | Integration testing | `baileys` | `https://staging.mbb.cd` |
-| **Production** | Live customers | `official` | `https://api.mbb.cd` |
+| **Local** | Validated controlled recovery and production-like testing | `baileys` for the controlled live scope | Localhost routes |
+| **Staging** | Future integration testing | To be selected and validated | Not deployed |
+| **Production** | Future live customers | To be approved and validated | Not deployed |
 
 | Tool | Purpose |
 |------|---------|

@@ -2,6 +2,8 @@
 
 **MBB ya Kin — Sub-Phase Specification**
 
+> **Current-status boundary:** This is a historical Phase 1.E plan and implementation record, not current launch evidence. Recovery and local stabilization are nearly complete, but the project is not publicly deployed, production-ready, or pilot-ready. The controlled Baileys local flow and isolated production-like runtime passed; public hosting, DNS, ports 80/443, permanent secrets, CA-issued TLS, renewal/reload, and public deployment validation remain deferred.
+
 | Field | Value |
 |-------|-------|
 | **Phase** | 1.E |
@@ -9,13 +11,13 @@
 | **Weeks** | 21–24 (4 weeks) |
 | **Sprints** | 1.9, 1.10 |
 | **Modules** | All M1–M9 (integration) |
-| **Status** | ✅ Complete (2026-05-08) — Pilot Ready |
+| **Status** | Historical implementation record; public deployment and pilot validation deferred |
 
 ---
 
 ## 1. Goal
 
-Validate the entire system through integration testing, security audit, load testing, and native tone review. Then migrate to WhatsApp Business API (official) and launch a 2-week pilot with 100–150 real leads.
+Historical target: validate the entire system through integration testing, security audit, load testing, and native tone review, then migrate to a publicly approved WhatsApp transport and launch a 2-week pilot with 100–150 real leads.
 
 **Milestone:** System passes all quality gates. Pilot achieves 80%+ automation rate and 15%+ conversion rate with < 8% opt-out.
 

@@ -1,26 +1,28 @@
 # Baileys Live Inbound Issue — Step 12 Recovery Note
 
+> **Closure addendum (current baseline `f45a45d49f79d4c05d1d1be1253c8ba7ab11bedc`):** This document preserves the historical Step 12 investigation and its then-current unresolved findings. Those findings are no longer the current Baileys status. Subsequent controlled validation passed live inbound, session restoration, international phone handling, persistence, and exactly-one outbound fallback delivery. Baileys is now the validated local WhatsApp transport, and its recovery is closed for the controlled inbound-to-fallback-send scope. Earlier “unresolved” statements below remain only as chronological evidence. Because Baileys is an unofficial transport, this closure is not permanent production approval or proof of public-deployment suitability.
+
 ## 1. Purpose
 
 This document records the full Baileys live inbound investigation from **Step 12A through Step 12W** before the project moved to **Step 13A — Core MVP Message Pipeline Closure**.
 
 The purpose is to preserve the technical history of the Baileys issue so future recovery work can resume from known evidence instead of repeating the same investigation.
 
-This note is **not** a claim that Baileys live inbound is fixed.
+At the close of Step 12, this note did **not** claim that Baileys live inbound was fixed. The closure addendum above records the subsequent controlled success.
 
 It documents:
 
 ```text
 What was discovered
 What was fixed
-What remains unresolved
+What was unresolved at Step 12 close
 What was proven
 What was not proven
 Why Step 12 was stopped
 How future Baileys work should resume
 ```
 
-MBB-Project remains in **recovery and stabilization mode**. It is **not production-ready**, **not pilot-ready**, **not feature-ready**, and **not fully stabilized**.
+The project remains in **recovery and stabilization mode**. Recovery and local stabilization are now nearly complete, but the project is **not publicly deployed**, **not production-ready**, and **not pilot-ready**.
 
 ---
 
@@ -43,7 +45,7 @@ runtime wiring
 → final no-payload stub event
 ```
 
-The final classification is:
+The Step 12 classification at that time was:
 
 ```text
 Core backend message pipeline:
@@ -63,7 +65,7 @@ no extractable text
 event skipped before FastAPI
 ```
 
-Therefore, Step 12 was stopped as an open-ended Baileys live-adapter investigation. The project moved to **Step 13A**, focused on validating the **core backend MVP pipeline at webhook level**, while Baileys live inbound remained isolated as an adapter reliability risk.
+Therefore, Step 12 was stopped as an open-ended Baileys live-adapter investigation. The project moved to **Step 13A**, focused on validating the **core backend MVP pipeline at webhook level**, while Baileys live inbound was temporarily isolated as an adapter reliability risk.
 
 ---
 
@@ -80,7 +82,7 @@ Therefore, Step 12 was stopped as an open-ended Baileys live-adapter investigati
 | MAPS task                 | Working after async fixes                                              |
 | DB persistence            | Working for valid payloads                                             |
 | Dashboard/API visibility  | Previously validated for seeded and backend-visible messages           |
-| Baileys live inbound      | Blocked/inconclusive for controlled confirmed content-bearing evidence |
+| Baileys live inbound      | Blocked/inconclusive at Step 12 for controlled content-bearing evidence |
 | Known sender `+243***221` | Maps through `senderPn`, but arrives as stub/no-payload                |
 | Fully stabilized project  | Not yet                                                                |
 
@@ -1007,15 +1009,15 @@ Redacted payload diagnostics added.
 
 ---
 
-## 7. What Remains Unresolved
+## 7. What Was Unresolved at Step 12 Close
 
-The main unresolved Baileys issue is:
+The main unresolved Baileys issue at that time was:
 
 ```text
 Why does the known +243***221 sender produce a mapped @lid event with no msg.message payload?
 ```
 
-Open questions:
+Open questions at that time:
 
 ```text
 Does a content-bearing event arrive later through messages.update?
@@ -1028,7 +1030,7 @@ Would another Baileys version expose content correctly?
 Would WhatsApp Cloud API avoid this class of problem?
 ```
 
-Not resolved:
+Not resolved during Step 12:
 
 ```text
 Controlled confirmed content-bearing live evidence from Baileys.
@@ -1243,9 +1245,11 @@ Final decision:
 
 ```text
 Step 12 is closed by classification, not by full Baileys success.
-Baileys live inbound remains an adapter risk.
+Baileys live inbound was classified as an adapter risk at this decision point.
 Core backend MVP recovery continues with Step 13A.
 ```
+
+This block records the historical decision before Step 13A; it is superseded by the closure addendum at the top of this note.
 
 Step 13A should validate:
 
@@ -1316,17 +1320,19 @@ safe text extraction
 redacted diagnostics
 ```
 
-However, the final controlled live blocker is outside the core backend pipeline:
+At Step 12 close, the final controlled live blocker appeared outside the core backend pipeline:
 
 ```text
 Baileys receives the known sender as a valid mapped @lid,
 but the event has no message payload.
 ```
 
-Therefore:
+Therefore, at that historical point:
 
 ```text
-Baileys live inbound is an adapter reliability risk.
+Baileys live inbound was classified as an adapter reliability risk.
 The core system should be validated through the webhook path.
 Step 13A was the correct next move.
 ```
+
+Subsequent work resolved this current-status classification for the controlled local scope: live inbound, session restoration, international phone handling, persistence, and exactly-one outbound fallback delivery passed. The remaining boundary is product/transport approval, not an unresolved controlled Baileys recovery test.

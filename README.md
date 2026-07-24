@@ -9,27 +9,31 @@
 
 ## 🎯 What is MBB ya Kin?
 
-**MBB ya Kin** is a self-hosted WhatsApp-first chatbot project designed specifically for the **Democratic Republic of Congo (DRC)** market. It is currently in **recovery and stabilization mode**, focused on proving one clean MVP flow before feature expansion.
+**MBB ya Kin** is a self-hosted WhatsApp-first chatbot project designed specifically for the **Democratic Republic of Congo (DRC)** market. It remains in **recovery and stabilization mode**, focused on proving and protecting one clean MVP flow before feature expansion.
 
-The project is **not production-ready**, **not pilot-ready**, **not feature-ready**, and **not fully stabilized** yet.
+Recovery and local stabilization are nearly complete. The project is **not publicly deployed**, **not production-ready**, and **not pilot-ready**.
 
 ## Current Recovery Status
 
-- **Step 13 CLOSED**: controlled backend MVP webhook pipeline validated from a clean repo.
-- **Step 14A CLOSED**: Dashboard/API read safety validated.
-- Current recovery mode uses `AI_ADAPTER=disabled`; no external AI provider is connected.
-- `WHATSAPP_SEND_ENABLED=false`; real WhatsApp outbound is disabled by safety gate.
-- `celery_beat` remains stopped/exited during recovery validation.
-- Live Baileys inbound remains unresolved as an adapter reliability risk.
-- Production compose/nginx behavior is not validated.
-- Payment, CRM, conversion, relance, and escalation domains are not validated.
-- Next work should continue in small validated recovery steps.
+Current validated recovery evidence at baseline `f45a45d49f79d4c05d1d1be1253c8ba7ab11bedc`:
 
-### Built for DRC Constraints
-- ✅ Works on **3G/4G networks** with frequent power outages
-- ✅ **Offline-first** architecture with Redis queuing
-- ✅ **Zero code changes** when switching CRM/Payment providers (Adapter Pattern)
-- ✅ **WhatsApp-first** interface (no website needed)
+- **Baileys is the validated local WhatsApp transport.** Controlled live inbound, session restoration, international phone handling, persistence, and exactly-one outbound fallback delivery passed. Baileys recovery is closed for that controlled inbound-to-fallback-send scope.
+- Baileys uses an unofficial WhatsApp transport. The local result is not permanent production approval and does not establish public-service suitability.
+- **PostgreSQL, Redis, FastAPI, the Celery worker, the Streamlit dashboard, and Nginx** passed isolated local production-like startup. Authentication, routing, healthchecks, restart recovery, and database persistence passed.
+- The worker consumes `default`, `relance`, `maps`, `escalation`, and `conversion`. PostgreSQL is not published to the host by the production configuration.
+- Dashboard access requires Nginx Basic Auth and an explicitly provisioned dashboard API token. The dashboard does not hold the JWT signing secret and does not auto-mint an administrator JWT.
+- The application is provider-neutral and currently disconnected from external AI APIs. `AI_ADAPTER=disabled` selects the local fallback path; Claude, OpenAI, Gemini, and other external AI providers are not connected.
+- Monitoring, backup, Celery Beat, and Baileys are outside the default production scope. External AI, WhatsApp sending, CRM writes, payments, relance, scheduled tasks, and MAPS fanout remain disabled by default.
+
+Public deployment remains deferred. It requires domain ownership, a public deployment host, DNS, public ports 80 and 443, permanent production secrets, CA-issued TLS, certificate renewal, Nginx certificate reload, and public deployment validation.
+
+Known non-blocking constraint: `scripts/init_db.sql` currently assumes the database identifier `mbb`. Do not treat the database name as freely configurable until that script supports another identifier.
+
+### Design Priorities for DRC Constraints
+- Operate safely across **unstable 3G/4G networks** and power recovery
+- Use persistent queues and idempotent boundaries where validated
+- Keep CRM, payment, AI, and messaging providers behind adapter boundaries
+- Preserve a lightweight **WhatsApp-first** customer interface
 
 ---
 
@@ -47,10 +51,10 @@ The project is **not production-ready**, **not pilot-ready**, **not feature-read
 
 | Component | Technology | Purpose |
 | :--- | :--- | :--- |
-| **Messaging** | Baileys / WhatsApp adapter boundary | User-facing channel; live inbound remains an adapter risk |
+| **Messaging** | Baileys / WhatsApp adapter boundary | Baileys is validated locally for the controlled inbound-to-fallback-send scope |
 | **Backend** | FastAPI | REST API & business logic |
-| **Orchestration** | Celery worker; Celery Beat defined but stopped in recovery | Async tasks; periodic scheduling not validated |
-| **Intelligence** | Disabled/local fallback mode | External AI provider not connected in current recovery mode |
+| **Orchestration** | Celery worker; Celery Beat opt-in | Worker validated on five queues; scheduled tasks disabled by default |
+| **Intelligence** | Provider-neutral adapter boundary; disabled/local fallback mode | No external AI provider is currently connected |
 | **Database** | PostgreSQL | Leads, orders, sessions |
 | **Cache/Queues** | Redis | Sessions, message queues |
 | **Adapters** | Python ABC | Pluggable integrations |
@@ -116,9 +120,9 @@ The `.env` file controls adapter selection and service addresses. Key settings f
 
 ```ini
 APP_ENV=development
-WHATSAPP_MODE=baileys          # Uses Baileys bridge; live inbound remains an adapter risk
+WHATSAPP_MODE=baileys          # Validated local transport for the controlled MVP scope
 AI_ADAPTER=disabled            # recovery mode; no external AI provider connected
-WHATSAPP_SEND_ENABLED=false    # recovery safety gate; no real WhatsApp outbound
+WHATSAPP_SEND_ENABLED=false    # default safety gate; controlled outbound validation already passed
 CRM_ADAPTER=airtable           # airtable | mbb_hub
 TZ=Africa/Kinshasa
 ```
@@ -144,7 +148,7 @@ First run takes 3–5 minutes (pulling images + building). Subsequent starts tak
 | **api** | Internal `:8000` | FastAPI backend (behind nginx) |
 | **celery_worker** | — | 4 async workers, 5 task queues |
 | **celery_beat** | — | RedBeat periodic scheduler; keep stopped/exited during recovery validation |
-| **baileys** | `localhost:3000` | WhatsApp bridge; live inbound remains an adapter reliability risk |
+| **baileys** | `localhost:3000` | Validated local WhatsApp bridge; unofficial transport, not production-approved |
 | **dashboard** | Internal `:8501` | Streamlit analytics (behind nginx) |
 | **nginx** | `localhost:80` | Reverse proxy (routes to api + dashboard) |
 | **prometheus** | `localhost:9090` | Metrics collection |
@@ -243,7 +247,7 @@ make down-prod     # Stop production
 | **Baileys Health** | http://localhost:3000/health | None |
 | **API Docs** (Swagger) | http://localhost/api/docs | None |
 | **API Health** | http://localhost/health | None |
-| **Streamlit Dashboard** | http://localhost/dashboard/ | None |
+| **Streamlit Dashboard** | http://localhost/dashboard/ | Nginx Basic Auth plus explicitly provisioned API token |
 | **Grafana** | http://localhost:3001 | admin / (see `secrets/grafana_admin_password.txt`) |
 | **Prometheus** | http://localhost:9090 | None |
 | **PostgreSQL** | `localhost:5433` | user/pass from `secrets/` |
@@ -398,8 +402,8 @@ mbb-ya-kin/
 ```
 
 ### Key Architectural Decisions
-- **Adapter Pattern**: Switch AI (Claude/Gemini), CRM (Airtable/MBB HUB), Inventory (Static/MBB BOX) via env vars
-- **Dual WhatsApp Mode**: `WHATSAPP_MODE=baileys` (dev) or `official` (prod) — zero code changes
+- **Adapter Pattern**: Keep AI, CRM, payment, inventory, and messaging providers behind explicit boundaries; provider selection still requires configuration and validation
+- **Dual WhatsApp Mode**: `WHATSAPP_MODE=baileys` is the validated local transport; the official/public path is deferred
 - **DRC-First Design**: Redis AOF persistence, circuit breakers, < 10KB payloads, blackout recovery
 - **Modular (M1-M9)**: Each business domain is isolated; modules communicate via FastAPI + Celery
 
@@ -418,8 +422,8 @@ APP_ENV=development              # development | production
 WHATSAPP_MODE=baileys            # baileys (dev) | official (prod)
 TZ=Africa/Kinshasa
 
-# Adapter Selection — switch providers without code changes
-AI_ADAPTER=claude                # claude | gemini
+# Adapter selection — external integrations remain disabled until separately validated
+AI_ADAPTER=disabled              # disabled | claude
 CRM_ADAPTER=airtable             # airtable | mbb_hub
 INVENTORY_ADAPTER=static         # static | mbb_box
 PAYMENT_ADAPTER=mobile_money     # mobile_money
@@ -428,7 +432,7 @@ PAYMENT_ADAPTER=mobile_money     # mobile_money
 POSTGRES_HOST=postgres
 REDIS_HOST=redis
 
-# AI tuning
+# Optional Claude adapter settings; the provider is not connected in the current state
 CLAUDE_MODEL=claude-sonnet-4-5
 CLAUDE_MAX_TOKENS=1024
 CLAUDE_TIMEOUT_S=25
@@ -448,19 +452,23 @@ echo -n "my_real_password" > secrets/postgres_password.txt
 ### 3. Docker Compose Overrides
 - `docker-compose.yml` — Base: all 11 services defined
 - `docker-compose.dev.yml` — Dev: hot-reload, Baileys, exposed debug ports
-- `docker-compose.prod.yml` — Prod: 3 API replicas, SSL, resource limits
+- `docker-compose.prod.yml` — Production-like safety overlay validated locally; public deployment and CA-issued TLS remain deferred
 
 ```bash
 # Dev (Baileys + hot-reload + debug ports)
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 
-# Prod (WhatsApp Official + 3 replicas + SSL)
+# Isolated local production-like validation only; not public deployment guidance
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
+The default production scope starts PostgreSQL, Redis, API, Celery worker, dashboard, and Nginx. It excludes Baileys, monitoring, backup, and Celery Beat unless their separate scope/profile is intentionally enabled. PostgreSQL has no production host-port publication.
+
 ---
 
-## 🤖 Core Features
+## 🤖 Product and Implementation Areas
+
+This section describes product intent and implemented surfaces. It is not evidence that every area is enabled, externally connected, or ready for pilot use. The default recovery configuration keeps external AI, sending, CRM, payments, relance, schedules, and MAPS fanout off.
 
 ### 1. **Multi-Language Conversation Engine**
 Detects user language from first message:
@@ -468,7 +476,7 @@ Detects user language from first message:
 - **French** (default fallback)
 - **Swahili** (Goma/East)
 
-The AI responds naturally, like a helpful young Congolese friend (not a corporate chatbot).
+The conversation layer is designed to respond naturally, like a helpful young Congolese friend rather than a corporate chatbot. The current validated path uses local fallback behavior because no external AI provider is connected.
 
 ### 2. **Lead Qualification** (Automated)
 Bot asks 2–3 smart questions → scores lead:
@@ -489,8 +497,8 @@ Smart reminders at optimal times:
 - **+7–10d**: Final reminder before opt-out
 - **Respects**: User timezone, power outage patterns, opt-out signals
 
-### 5. **Payment Integration**
-Accepts payments via:
+### 5. **Payment Integration** (disabled by default)
+The adapter surface is intended to support:
 - **Mobile Money** (Orange/Airtel)
 - **Bank Transfer** (COD available)
 - **Future**: MBB Payments API (Phase 2)
@@ -521,7 +529,7 @@ Streamlit dashboard showing:
 
 ## 🎮 How Adapters Work (The "Plug & Play" Strategy)
 
-The bot's "Brain" never talks directly to Airtable, Claude, or Orange Money. Instead, it uses **Universal Sockets** (Adapter Interfaces). Swap the **Plug** in `.env`—the bot logic stays unchanged.
+The bot's "Brain" accesses provider-specific services through adapter interfaces. The application is provider-neutral; choosing and enabling a provider still requires credentials, safety-gate changes, and separate validation.
 
 ### Example: Switching AI Models
 ```bash
@@ -545,7 +553,7 @@ For full details, see [Adapter Architecture Guide](Documentation/Architecture/Ad
 
 ### Message Inbound Flow
 
-The intended live path is:
+The controlled local MVP path is:
 
 ```
 WhatsApp Phone
@@ -555,13 +563,17 @@ Baileys Bridge (/messages.upsert event)
 FastAPI POST /api/v1/messages/baileys
     ↓ (M1 service layer: upsert customer, conversation, message)
 PostgreSQL (tables: customers, conversations, messages)
-    ↓ (Celery task processes async)
+    ↓ (Celery task processes and selects local fallback)
+Outbound response persisted
+    ↓ (Baileys adapter send-back with idempotency boundary)
+Exactly one fallback response delivered
+    ↓
 Streamlit Dashboard (Conversation Mirror page)
     ↓ (Auto-refresh shows new conversations)
 User sees conversation in UI
 ```
 
-Current validated recovery evidence is narrower: Step 13 validated the controlled backend webhook pipeline, and Step 14A validated Dashboard/API read safety. Live Baileys inbound remains unresolved as an adapter reliability risk, and real WhatsApp outbound remains disabled by `WHATSAPP_SEND_ENABLED=false`.
+Controlled live inbound, session restoration, international phone handling, persistence, and exactly-one outbound fallback delivery passed. Dashboard/API read safety also passed. This closes Baileys recovery for the controlled inbound-to-fallback-send scope. It does not grant permanent production approval to the unofficial transport; the default send gate remains off outside explicitly controlled validation.
 
 ### Baileys Webhook Payload Schema
 
@@ -615,7 +627,7 @@ This ensures each worker gets fresh connections bound to its own event loop.
 
 ### Testing the WhatsApp → Dashboard Pipeline
 
-Do not use live Baileys or real WhatsApp sends during the current recovery validation unless a task explicitly authorizes it. The currently closed recovery evidence is the controlled backend webhook path plus Dashboard/API read safety.
+Baileys is now validated for the controlled local scope described above. Repeat live tests only as explicitly controlled work with the external-send safety gates and idempotency boundary understood.
 
 Historical/manual live-path checklist:
 
@@ -700,13 +712,13 @@ alembic downgrade -1
 
 ## 🔒 Security & Compliance
 
-- **HMAC Verification** on all WhatsApp webhooks
-- **API Key Authentication** with Bearer tokens
-- **Idempotency Keys** on all financial transactions
-- **PII Encryption** at rest (PostgreSQL encryption)
-- **Rate Limiting** per user (max 10 msgs/min)
-- **GDPR Compliance** with opt-out respect
-- **DRC Data Residency** (self-hosted VPS in/near DRC)
+- **Dashboard authentication**: Nginx Basic Auth plus a separately and explicitly provisioned dashboard API token.
+- **Fail-closed dashboard startup**: no token means no dashboard access to the API; the dashboard does not auto-mint an administrator JWT.
+- **Messaging safety**: webhook authentication, validation, persistence, and outbound idempotency are present on the controlled Baileys path.
+- **Network isolation**: PostgreSQL is not host-published in the production configuration.
+- **Default-off external effects**: external AI, WhatsApp sends, CRM writes, payments, relance, scheduled tasks, and MAPS fanout require deliberate enablement and separate validation.
+
+The wider security design contains target-state controls as well as implementation detail. Public TLS and public deployment security have not been validated.
 
 See [Security Design](Documentation/Architecture/Low%20Level%20Design/4.%20Security%20Design.md) for full details.
 
@@ -782,21 +794,9 @@ Internal MBB Project. Not for external distribution.
 
 ### Recovery Mode
 
-The project is in recovery and stabilization mode. Current validated evidence is limited to:
+Recovery and local stabilization are nearly complete. The controlled Baileys inbound-to-fallback-send scope and the isolated local production-like runtime are validated as summarized in [Current Recovery Status](#current-recovery-status).
 
-- Step 13: controlled backend MVP webhook pipeline closed from a clean repo.
-- Step 14A: Dashboard/API read safety closed.
-
-Current recovery constraints:
-
-- `AI_ADAPTER=disabled`; no external AI provider is connected.
-- `WHATSAPP_SEND_ENABLED=false`; real WhatsApp outbound is disabled.
-- `celery_beat` remains stopped/exited during recovery validation.
-- Live Baileys inbound remains unresolved as an adapter reliability risk.
-- Production compose/nginx behavior is not validated.
-- Payment, CRM, conversion, relance, and escalation domains are not validated.
-
-Next work should continue as small validated recovery steps. Do not treat older roadmap items or historical runbooks as proof that the project is production-ready, pilot-ready, feature-ready, or fully stabilized.
+The next step is a final stabilization audit. Public deployment work remains a separate deferred phase, and no current evidence establishes production or pilot readiness. Older roadmap completion markers and the historical pilot runbook are planning/history, not readiness proof.
 
 ---
 

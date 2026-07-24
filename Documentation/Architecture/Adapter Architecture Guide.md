@@ -1,12 +1,14 @@
 # MBB ya Kin: Universal Adapter Architecture Guide
 **"Structure as a Service" - Build Once, Scale Infinitely**
 
+> **Current implementation status:** The application is provider-neutral and currently disconnected from external AI APIs. `AI_ADAPTER=disabled` uses the local fallback; Claude, OpenAI, Gemini, and other external providers are not connected. External CRM and payment actions are also disabled by default. Baileys is the validated local WhatsApp transport for the controlled inbound-to-fallback-send scope, but its unofficial nature means this is not permanent production approval.
+
 ---
 
 ## 1. Vision & Purpose
 To ensure **MBB ya Kin** is resilient to DRC infrastructure challenges and scalable for Phase 2+, we adopt the **Adapter Pattern**. This decouples the "Conversation Brain" from specific tools like Airtable, Claude, or Orange Money.
 
-**Primary Goal:** Switch backends (CRM, Inventory, AI, Payments) via `.env` configuration with **zero code changes** to the core bot logic.
+**Primary Goal:** Keep backends (CRM, Inventory, AI, Payments, and messaging) behind interfaces so the core bot logic does not depend directly on a provider. Provider changes still require credentials, safety-gate review, and validation.
 
 ---
 
@@ -24,11 +26,11 @@ The bot communicates through an **Interface Contract**. The **Active Adapter** t
 ## 3. Integration Catalog (Phased Roadmap)
 
 ### A. Intelligence (AI Models)
-| Env Variable (`AI_ADAPTER`) | Provider | Phase | DRC Strategic Use |
+| Env Variable (`AI_ADAPTER`) | Provider | Current status | DRC Strategic Use |
 | :--- | :--- | :--- | :--- |
-| `ANTHROPIC_CLAUDE` | Claude 3.5 | Phase 1 | High-quality lead reasoning & multi-language detection. |
-| `GOOGLE_GEMINI` | Gemini 1.5 | Phase 1/2 | Backup for high volumes; better edge performance in Africa. |
-| `LOCAL_LLAMA` | Llama 3 | Phase 3 | Edge computing for privacy or during complete internet outages. |
+| `disabled` | Local fallback | **Validated default** | No external API client or network call. |
+| `claude` | Claude | Available adapter, not connected | Candidate external reasoning provider; requires separate enablement and validation. |
+| Future adapter | OpenAI, Gemini, local model, or another provider | Not connected / not selected | Provider-neutral boundary permits future evaluation without a current-provider claim. |
 
 ### B. CRM & Lead Management 
 | Env Variable (`CRM_ADAPTER`) | Provider | Phase | DRC Strategic Use |
@@ -51,10 +53,11 @@ The bot communicates through an **Interface Contract**. The **Active Adapter** t
 | `MBB_PAYMENTS` | Internal API | Phase 2 | Unified financial reconciliation across MBB. |
 
 ### E. Messaging Channels
-| Env Variable (`MESSAGING_ADAPTER`) | Provider | Phase | DRC Strategic Use |
+| Selection | Provider | Current status | DRC Strategic Use |
 | :--- | :--- | :--- | :--- |
-| `WHATSAPP_API` | WhatsApp | Phase 1 | Primary user channel. |
-| `SMS_FALLBACK` | Local SMS | Phase 2 | Delivery backup for weak network areas. |
+| `WHATSAPP_MODE=baileys` | Baileys | **Validated local transport** | Controlled live inbound-to-fallback-send scope; unofficial and not permanently production-approved. |
+| `WHATSAPP_MODE=official` | Official WhatsApp adapter | Public deployment deferred | Candidate public user channel; sending remains disabled by default. |
+| Future adapter | SMS or another channel | Not implemented/validated for the current scope | Possible future delivery alternative. |
 
 ### F. Growth & Digital Presence
 This is intentionally **outside** the bot's adapter core.
@@ -78,7 +81,7 @@ class AIAdapterInterface(ABC):
         pass
 ```
 
-### Step 2: Implement Concrete Adapters
+### Step 2: Implement Concrete Adapters (Illustrative Target Example)
 ```python
 # Claude implementation
 class ClaudeAdapter(AIAdapterInterface):
@@ -96,10 +99,10 @@ class GeminiAdapter(AIAdapterInterface):
 ### Step 3: The Factory Pattern (Switching Logic)
 ```python
 def get_ai_adapter():
-    choice = os.getenv("AI_ADAPTER", "ANTHROPIC_CLAUDE")
-    if choice == "GOOGLE_GEMINI":
-        return GeminiAdapter()
-    return ClaudeAdapter()
+    choice = os.getenv("AI_ADAPTER", "disabled")
+    if choice == "claude":
+        return ClaudeAdapter()
+    return DisabledAIAdapter()
 ```
 
 ---
@@ -114,10 +117,11 @@ def get_ai_adapter():
 ---
 
 ## 6. How to Switch Model/Backend
-1. Open `.env` file.
-2. Update the target variable (e.g., `AI_ADAPTER=GOOGLE_GEMINI`).
-3. Restart the Docker container.
-4. **Done.** No logic changes needed.
+1. Select an implemented adapter.
+2. Provision its credentials without documenting secret values.
+3. Update the non-secret adapter selection and the relevant default-off safety gate.
+4. Restart the affected service in an isolated environment.
+5. Validate failure behavior, timeouts, retries, and external effects before expanding scope.
 
 ---
 
@@ -125,5 +129,5 @@ def get_ai_adapter():
 - [ ] **Interface Match**: Implements all abstract methods.
 - [ ] **Timeout Handling**: Returns/fails within 10 seconds.
 - [ ] **3G Simulation**: Works correctly under throttled network conditions.
-- [ ] **Environmental Security**: Credentials loaded via `.env` only.
+- [ ] **Credential Security**: Secret values are loaded from provisioned secret files and are never committed or documented.
 

@@ -1,6 +1,14 @@
 # High Level Design (HLD) - MBB ya Kin Architecture
 
-This folder contains the **system-wide architectural vision** for **MBB ya Kin**. These documents describe **WHAT** the system does and **HOW** the major components interact.
+This folder contains the **system-wide target architectural vision** for **MBB ya Kin**. It includes planned integrations and deployment models that are not all enabled or validated.
+
+## Current Implementation Overlay
+
+The current application remains provider-neutral and disconnected from external AI APIs. Baileys is the validated local WhatsApp transport for the controlled inbound-to-fallback-send scope; it is unofficial and has no permanent production approval. The isolated local production-like runtime validated PostgreSQL, Redis, FastAPI, Celery worker, dashboard, and Nginx, including authentication, routing, healthchecks, restart recovery, and database persistence.
+
+The default production scope excludes monitoring, backup, Celery Beat, and Baileys. It keeps external AI, WhatsApp sending, CRM, payments, relance, scheduled tasks, and MAPS fanout disabled. PostgreSQL is not host-published. Dashboard access requires Basic Auth plus an explicitly provisioned API token; the dashboard does not auto-mint an administrator JWT.
+
+No public deployment exists. Domain ownership, a public host, DNS, public ports 80 and 443, permanent production secrets, CA-issued TLS, certificate renewal, Nginx certificate reload, and public deployment validation are deferred. Treat provider-specific diagrams and VPS/TLS descriptions in the architecture documents as target design, not current runtime evidence.
 
 ---
 
@@ -13,7 +21,7 @@ This folder contains the **system-wide architectural vision** for **MBB ya Kin**
 - System boundary & scope
 - Major components (Bot Engine, CRM Interface, Payment Gateway, etc.)
 - Data flow between components
-- Integration points with external systems (WhatsApp, Airtable, Claude)
+- Target integration points with external systems (messaging, CRM, and AI providers)
 - System constraints & assumptions for DRC environment
 
 **Read This When:** You need to understand how the 7 major modules interact and where data flows.
@@ -24,11 +32,11 @@ This folder contains the **system-wide architectural vision** for **MBB ya Kin**
 **Purpose**: Technology selection rationale and system model
 
 **Contains:**
-- Why we chose FastAPI, Celery, PostgreSQL, Redis, Claude
+- Why the design considered FastAPI, Celery, PostgreSQL, Redis, and external AI providers
 - Alternative options considered & rejected
 - Technology matrix (Framework vs. Performance vs. Cost)
 - DRC-specific justifications (e.g., why Docker instead of serverless)
-- Deployment model (self-hosted VPS in Kinshasa)
+- Target deployment model (public host not yet selected or deployed)
 - Scaling strategy (vertical first, horizontal in Phase 2)
 
 **Read This When:** You want to know **WHY** we picked each technology and what trade-offs we made.
@@ -63,7 +71,7 @@ This folder contains the **system-wide architectural vision** for **MBB ya Kin**
 
 ---
 
-## 🏛️ Architecture Overview (Quick Visual)
+## 🏛️ Target Architecture Overview (Quick Visual)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -114,22 +122,24 @@ This folder contains the **system-wide architectural vision** for **MBB ya Kin**
 
 ---
 
-## 🔄 Data Flow: A Lead's Journey
+## 🔄 Target Data Flow: A Lead's Journey
 
-1. **User sends WhatsApp message** → WhatsApp API webhook
+The validated local flow uses Baileys, local fallback response selection, persistence, and exactly-one outbound fallback delivery. The provider-specific steps below remain target examples for future external integrations.
+
+1. **User sends WhatsApp message** → selected messaging adapter webhook
 2. **FastAPI router (M1)** receives & validates → passes to Celery worker (M3)
 3. **Celery worker** processes the task → calls Conversation Engine (M4)
 4. **Conversation Engine (M4)** asks: "Is this lead hot/warm/cold?"
 5. **Lead Qualification (M5)** scores the lead → calls AI via **AIAdapter**
-6. **AIAdapter** (Plug A: Claude) → scores lead as **85 (Hot)**
-7. **CRMAdapter** (Plug B: Airtable) → saves lead to Airtable base
+6. **AIAdapter** (future selected provider) → scores the lead
+7. **CRMAdapter** (future selected provider) → synchronizes the lead
 8. **Nurturing Engine (M6)** → schedules follow-up message in +24h
 9. **Message queued in Redis** → waits for delivery window
 10. **Response sent back** via WhatsApp API
 
 **What Makes This Great for DRC:**
-- If Airtable times out → CRMAdapter falls back to Redis queue (no lead lost)
-- If Claude is slow → switch AI_ADAPTER to Gemini in `.env` (zero code changes)
+- If a future CRM provider times out → the adapter should fail safely and preserve retryable work
+- If a future AI provider is unavailable → the application should use the validated local fallback rather than assume another provider is connected
 - If power cuts out → Redis queue survives; messages retry when power returns
 
 ---
@@ -163,7 +173,7 @@ Every external system is accessed via an **Adapter Interface**:
    Llama      LOCAL_MOCK  MBB Payments
 ```
 
-**Why This Matters:** On Day 1, use **Airtable + Claude + Orange Money**. On Day 180, swap to **MBB HUB + Gemini + MBB Payments**—all in `.env`, zero code changes.
+**Why This Matters:** Provider boundaries allow future integrations to change without rewriting core conversation logic. No CRM, payment, or external AI provider is connected in the current validated state, and any future provider still requires configuration and separate validation.
 
 **Boundary Reminder:** Social media pages, ad campaigns, content publishing, and the future official website belong to a separate Digital Presence Platform. MBB ya Kin consumes only the resulting leads and conversation entry points.
 
@@ -183,8 +193,8 @@ Every external system is accessed via an **Adapter Interface**:
    - Solution: Lightweight messages, 2–3 sentences max
 
 3. **CRM & Payments are Evolving**
-   - Today: Airtable + Orange Money
-   - Tomorrow: MBB HUB + MBB Payments
+   - Current validated state: external CRM and payment actions disabled
+   - Future target: select and validate provider adapters
    - Solution: Adapter Pattern ensures no rewrite needed
 
 4. **Human Escalation is Required**
@@ -207,17 +217,20 @@ Every external system is accessed via an **Adapter Interface**:
 **Q: Why FastAPI instead of Django REST Framework?**  
 A: FastAPI is async-first (better for high concurrency), has automatic OpenAPI docs, and is lighter-weight for DRC bandwidth constraints.
 
-**Q: Why self-hosted instead of cloud?**  
-A: DRC regulatory concerns, cost predictability, and network reliability. VPS in Kinshasa = lower latency for local users.
+**Q: Why consider self-hosting instead of a managed cloud?**
+
+A: DRC regulatory concerns, cost predictability, and network reliability motivate the target design. A public deployment host and domain have not yet been selected or validated.
 
 **Q: Can we scale to 100K+ leads?**  
-A: Phase 1 handles 10K leads on a 2-core VPS. Phase 2 adds horizontal scaling via load balancer + read replicas.
+A: That remains a target requiring load and public-deployment validation. Current evidence covers the isolated local production-like recovery runtime, not that scale.
 
-**Q: What if a third-party API (Airtable/Claude) changes pricing?**  
-A: Adapter Pattern means we swap providers in 1 line. Built-in insurance against vendor lock-in.
+**Q: What if a future third-party API changes pricing?**
 
-**Q: How do we handle GDPR/DRC data protection?**  
-A: Self-hosted (no data leaves your VPS), encryption at rest, opt-out mechanism respected, audit logs for compliance.
+A: The adapter pattern limits provider coupling, but switching still requires credentials, configuration, safety review, and validation.
+
+**Q: How do we handle GDPR/DRC data protection?**
+
+A: Data minimization, consent, access control, retention, encryption, and audit requirements belong in the deployment security plan. No public host or data-residency posture has yet been validated.
 
 ---
 

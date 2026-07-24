@@ -1,15 +1,25 @@
-# MBB ya Kin — Pilot Runbook
+# MBB ya Kin — Historical Pilot Runbook (Not Current Launch Guidance)
 **Phase 1.E — Sprint 1.10**
-**Version:** 1.0
+**Version:** 1.1 recovery-status overlay
 **Audience:** Hub Team, DevOps, Lab Team
 
 ---
 
-> **Recovery status warning:** This runbook is historical and is not current launch guidance. The project remains in recovery/stabilization mode and is not production-ready, pilot-ready, feature-ready, or fully stabilized. Step 13 validated only the controlled backend MVP webhook pipeline, and Step 14A validated Dashboard/API read safety. Live Baileys inbound, real WhatsApp outbound, external AI provider integration, production compose/nginx behavior, and payment/CRM/conversion/relance/escalation domains are not currently validated.
+> **Current status:** This runbook is preserved as historical planning evidence and is not executable launch guidance. Recovery and local stabilization are nearly complete, but the project is not publicly deployed, production-ready, or pilot-ready.
+>
+> Baileys is the validated local WhatsApp transport. Controlled live inbound, session restoration, international phone handling, persistence, and exactly-one outbound fallback delivery passed, closing Baileys recovery for that controlled scope. This does not grant permanent production approval to the unofficial transport.
+>
+> PostgreSQL, Redis, API, Celery worker, dashboard, and Nginx passed isolated local production-like startup, including authentication, routing, healthchecks, restart recovery, and database persistence. The worker consumes `default`, `relance`, `maps`, `escalation`, and `conversion`; production PostgreSQL is not host-published.
+>
+> Dashboard access requires Basic Auth and an explicitly provisioned API token; the dashboard does not auto-mint an administrator JWT. The application is provider-neutral and disconnected from external AI APIs. Monitoring, backup, Celery Beat, and Baileys are excluded from the default production scope. External AI, WhatsApp sending, CRM, payments, relance, scheduled tasks, and MAPS fanout remain disabled by default.
+>
+> Public deployment requirements are deferred: domain ownership, a public deployment host, DNS, public ports 80 and 443, permanent production secrets, CA-issued TLS, certificate renewal, Nginx certificate reload, and public deployment validation. `scripts/init_db.sql` also still assumes the database identifier `mbb`.
 
 ---
 
-## 1. Pre-Launch Checklist
+Everything below this point is the original historical pilot plan. Unchecked or previously completed planning items are not current validation evidence.
+
+## 1. Historical Pre-Launch Checklist
 
 Complete all items before sending the first pilot message.
 
@@ -61,7 +71,7 @@ Complete all items before sending the first pilot message.
 
 ---
 
-## 2. Deployment Steps
+## 2. Historical Deployment Steps
 
 ```bash
 # 1. Pull latest code
@@ -91,7 +101,7 @@ curl https://api.mbb.cd/api/v1/health
 
 ---
 
-## 3. Daily Monitoring Checklist (Morning Review)
+## 3. Historical Daily Monitoring Checklist (Morning Review)
 
 Run every morning during the 2-week pilot (10 min).
 
@@ -132,7 +142,7 @@ curl https://api.mbb.cd/qr.json
 
 ---
 
-## 4. Alert Thresholds
+## 4. Historical Alert Thresholds
 
 | Metric | Warning | Critical | Action |
 |--------|---------|----------|--------|
@@ -148,7 +158,7 @@ curl https://api.mbb.cd/qr.json
 
 ---
 
-## 5. Escalation Procedures
+## 5. Historical Escalation Procedures
 
 ### 5.1 Issue Classification
 
@@ -197,7 +207,7 @@ docker compose exec celery_beat celery -A app.tasks.celery_app beat --detach --p
 
 ---
 
-## 6. Rollback Plan
+## 6. Historical Rollback Plan
 
 Target: revert to previous version in < 5 minutes.
 
@@ -238,7 +248,7 @@ Roll back immediately if:
 
 ---
 
-## 7. Communication Plan
+## 7. Historical Communication Plan
 
 ### 7.1 Pilot Start Announcement (to Hub Team)
 > "The MBB bot pilot is live. For the next 2 weeks, the bot will handle initial customer contact automatically. You will receive escalations in the dashboard when customers need human help. Please respond to escalations within 30 minutes. Report any issues to [DevOps contact]."
@@ -257,7 +267,7 @@ Report each Friday during pilot:
 
 ---
 
-## 8. Post-Pilot Retrospective (Week 24)
+## 8. Historical Post-Pilot Retrospective Plan (Week 24)
 
 Schedule a 2-hour retrospective with all stakeholders.
 
