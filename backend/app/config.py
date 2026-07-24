@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     whatsapp_api_token: str = _read_secret("whatsapp_api_token", "")
     whatsapp_business_account_id: str = ""
     whatsapp_phone_number_id: str = ""
-    whatsapp_verify_token: str = _read_secret("whatsapp_verify_token", "mbb_webhook_verify_2026")
+    whatsapp_verify_token: str = _read_secret("whatsapp_verify_token", "")
     whatsapp_api_secret: str = _read_secret("whatsapp_api_secret", "")
 
     # ── Baileys ───────────────────────────────────────────────────────────────

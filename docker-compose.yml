@@ -37,8 +37,6 @@ services:
       - postgres_db
       - postgres_user
       - postgres_password
-    ports:
-      - "5433:5432"
     networks:
       - mbb_internal
     restart: unless-stopped
@@ -77,6 +75,8 @@ services:
       - claude_api_key
       - airtable_api_key
       - whatsapp_api_token
+      - whatsapp_verify_token
+      - whatsapp_api_secret
       - orange_money_key
       - airtel_money_key
       - mpesa_key
@@ -109,6 +109,12 @@ services:
       - postgres_db
       - postgres_user
       - postgres_password
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.tasks.celery_app inspect ping --destination celery@$$HOSTNAME --timeout=5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   celery_beat:
     <<: *api-common
@@ -143,7 +149,7 @@ services:
       - postgres_db
       - postgres_user
       - postgres_password
-      - jwt_secret
+      - dashboard_api_token
 
   # ── Reverse Proxy ────────────────────────────────────────────────────────────
 
@@ -154,17 +160,25 @@ services:
       - "443:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/conf.d/mbb.conf:/etc/nginx/conf.d/mbb.conf:ro
+      - ./nginx/conf.d/mbb.conf:/etc/nginx/conf.d/default.conf:ro
       - nginx_certs:/etc/nginx/certs
       - nginx_logs:/var/log/nginx
     depends_on:
       api:
         condition: service_healthy
       dashboard:
-        condition: service_started
+        condition: service_healthy
     networks:
       - mbb_internal
     restart: unless-stopped
+    secrets:
+      - dashboard_basic_auth
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/nginx-health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   # ── Observability Layer ──────────────────────────────────────────────────────
 
@@ -255,6 +269,14 @@ secrets:
     file: ./secrets/airtable_api_key.txt
   whatsapp_api_token:
     file: ./secrets/whatsapp_api_token.txt
+  whatsapp_verify_token:
+    file: ./secrets/whatsapp_verify_token.txt
+  whatsapp_api_secret:
+    file: ./secrets/whatsapp_api_secret.txt
+  dashboard_api_token:
+    file: ./secrets/dashboard_api_token.txt
+  dashboard_basic_auth:
+    file: ./secrets/dashboard_basic_auth.txt
   orange_money_key:
     file: ./secrets/orange_money_key.txt
   airtel_money_key:

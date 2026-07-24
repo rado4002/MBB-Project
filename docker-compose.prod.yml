@@ -14,13 +14,22 @@
 #   - Automated pg_dump backup sidecar (every 6h, 7-day retention)
 # ─────────────────────────────────────────────────────────────────────────────
 
+x-production-safety: &production-safety
+  AI_ADAPTER: disabled
+  WHATSAPP_SEND_ENABLED: "false"
+  CRM_SEND_ENABLED: "false"
+  PAYMENT_SEND_ENABLED: "false"
+  RELANCE_ENABLED: "false"
+  SCHEDULED_TASKS_ENABLED: "false"
+  M1_MAPS_FANOUT_ENABLED: "false"
+
 services:
 
   api:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
     environment:
+      <<: *production-safety
       WHATSAPP_MODE: official
-      WHATSAPP_SEND_ENABLED: "false"
       APP_ENV: production
       DEBUG: "false"
       LOG_LEVEL: INFO
@@ -50,10 +59,10 @@ services:
       --loglevel=info
       --concurrency=4
       --max-tasks-per-child=1000
-      --queues=default,relance,maps
+      --queues=default,relance,maps,escalation,conversion
     environment:
+      <<: *production-safety
       WHATSAPP_MODE: official
-      WHATSAPP_SEND_ENABLED: "false"
       APP_ENV: production
       DEBUG: "false"
       LOG_LEVEL: INFO
@@ -68,8 +77,8 @@ services:
     profiles:
       - scheduled-tasks
     environment:
+      <<: *production-safety
       WHATSAPP_MODE: official
-      WHATSAPP_SEND_ENABLED: "false"
       APP_ENV: production
       DEBUG: "false"
     deploy:
@@ -81,8 +90,8 @@ services:
 
   dashboard:
     environment:
+      <<: *production-safety
       WHATSAPP_MODE: official
-      WHATSAPP_SEND_ENABLED: "false"
       APP_ENV: production
       DEBUG: "false"
     deploy:
@@ -94,7 +103,7 @@ services:
   nginx:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/conf.d/mbb.ssl.conf:/etc/nginx/conf.d/mbb.conf:ro
+      - ./nginx/conf.d/mbb.ssl.conf:/etc/nginx/conf.d/default.conf:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
       - ./nginx/certbot/www:/var/www/certbot:ro
       - nginx_logs:/var/log/nginx
@@ -138,11 +147,25 @@ services:
           cpus: "0.5"
           memory: 512M
 
+  prometheus:
+    profiles:
+      - monitoring
+
+  grafana:
+    profiles:
+      - monitoring
+
+  loki:
+    profiles:
+      - monitoring
+
   # Automated pg_dump backup — runs every 6h, retains 7 days of dumps
   postgres_backup:
+    profiles:
+      - backup
     image: postgres:16-alpine
     volumes:
-      - ./backups:/backups
+      - postgres_backups:/backups
     secrets:
       - postgres_password
     entrypoint: >
@@ -167,3 +190,6 @@ services:
           cpus: "0.25"
           memory: 128M
     restart: unless-stopped
+
+volumes:
+  postgres_backups:

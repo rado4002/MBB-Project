@@ -4,11 +4,6 @@ MBB ya Kin — Streamlit Dashboard
 Roles: admin (Toronto), hub (Hub Team), lab (Lab Team)
 All write ops routed through FastAPI /admin/* endpoints.
 """
-import base64
-import hashlib
-import hmac
-import json
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import streamlit as st
@@ -21,34 +16,20 @@ st.set_page_config(
 )
 
 
-def _b64url(data: bytes) -> str:
-    """Base64url-encode without padding (JWT standard)."""
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
-
-
-def _make_dashboard_token(role: str = "admin") -> str:
-    """
-    Auto-generate a HS256 JWT using only Python stdlib — no extra deps.
-    Reads the shared secret from the Docker secret mount that docker-compose
-    provides to the dashboard service (/run/secrets/jwt_secret).
-    """
-    secret_path = Path("/run/secrets/jwt_secret")
-    secret = secret_path.read_text().strip() if secret_path.exists() else ""
-    if not secret:
+def _load_dashboard_api_token() -> str:
+    """Load the explicitly provisioned API token without granting signing access."""
+    token_path = Path("/run/secrets/dashboard_api_token")
+    try:
+        token = token_path.read_text().strip()
+    except OSError:
         return ""
+    return token if token.count(".") == 2 else ""
 
-    now = datetime.now(timezone.utc)
-    header = _b64url(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
-    payload = _b64url(json.dumps({
-        "iss": "dashboard-mbb",
-        "sub": "dashboard",
-        "role": role,
-        "iat": int(now.timestamp()),
-        "exp": int((now + timedelta(hours=24)).timestamp()),
-    }).encode())
-    signing_input = f"{header}.{payload}".encode()
-    sig = _b64url(hmac.new(secret.encode(), signing_input, hashlib.sha256).digest())
-    return f"{header}.{payload}.{sig}"
+
+dashboard_api_token = _load_dashboard_api_token()
+if not dashboard_api_token:
+    st.error("Dashboard authentication is not configured.")
+    st.stop()
 
 
 # ── Session state defaults ────────────────────────────────────────────────────
@@ -56,9 +37,7 @@ if "role" not in st.session_state:
     st.session_state.role = "admin"
 if "api_url" not in st.session_state:
     st.session_state.api_url = "http://api:8000/api/v1"
-if "token" not in st.session_state:
-    # Auto-authenticate using the shared JWT secret (internal service, no login form needed)
-    st.session_state.token = _make_dashboard_token("admin")
+st.session_state.token = dashboard_api_token
 
 # ── Sidebar: Role selector + Navigation ───────────────────────────────────────
 with st.sidebar:

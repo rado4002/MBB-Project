@@ -280,7 +280,13 @@ async def verify_webhook(
 
     You must respond with the challenge string to verify ownership.
     """
-    expected_token = getattr(settings, "whatsapp_verify_token", "mbb_webhook_verify_2026")
+    expected_token = getattr(settings, "whatsapp_verify_token", "")
+    if not expected_token:
+        log.error("webhook.verification.no_token_configured")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="webhook_verify_token_not_configured",
+        )
 
     if hub_mode == "subscribe" and hub_verify_token == expected_token:
         log.info("webhook.verified", mode=hub_mode)
