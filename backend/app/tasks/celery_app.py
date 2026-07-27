@@ -64,7 +64,7 @@ _BEAT_SCHEDULE = {
         "options": {"queue": "default"},
     },
 
-    # M7 — Daily MAPS aggregation at 02:00 Kinshasa (00:00 UTC)
+    # M7 — Daily MAPS aggregation at midnight Kinshasa (23:00 UTC, previous day)
     "maps-aggregate-daily": {
         "task": "app.tasks.maps.aggregate_daily",
         "schedule": crontab(hour=0, minute=0),
@@ -91,7 +91,7 @@ celery_app.conf.update(
     accept_content=["json"],
     result_serializer="json",
 
-    # Timezone (Kinshasa = UTC+2)
+    # Timezone (Kinshasa = UTC+1)
     timezone=settings.celery_timezone,
     enable_utc=True,
 
@@ -126,7 +126,7 @@ celery_app.conf.update(
     task_max_retries=3,
 
     # ── Beat schedule ─────────────────────────────────────────────────────────
-    # All times are in Africa/Kinshasa (UTC+2).
+    # All times are in Africa/Kinshasa (UTC+1).
     # No relance tasks are dispatched between 22:00–07:00 (enforced in M6 service).
     beat_schedule=beat_schedule_for(settings.scheduled_tasks_enabled),
 )

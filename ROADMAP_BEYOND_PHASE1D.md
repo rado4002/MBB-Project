@@ -117,7 +117,7 @@ Remaining Tasks:
 
 4. Implement M8 (MAPS) Aggregation Task
    Task name: m8_maps.aggregate_daily_insights
-   Trigger: Celery Beat (every 24h at 02:00 Kinshasa time)
+   Trigger: Celery Beat (every 24h at midnight Kinshasa time)
    Logic: Materialized view refresh (tags → patterns → insights)
    Blackout handling: Runs on recovery ✅
 

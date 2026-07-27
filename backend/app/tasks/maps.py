@@ -74,7 +74,7 @@ def tag_event(
 )
 def aggregate_daily_maps() -> dict:
     """
-    Periodic beat task (runs daily at 02:00 Kinshasa time).
+    Periodic beat task (runs daily at midnight Kinshasa time).
 
     Computes daily demand patterns, silence rates, and conversion triggers.
     Results are stored in the maps_tags table and invalidate dashboard cache.

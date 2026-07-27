@@ -273,30 +273,9 @@ async def _send_relance_message(relance_id_str: str) -> dict:
     acks_late=True,
 )
 def process_due_relances() -> dict:
-    """
-    Periodic beat task (runs every 15 min).
-
-    Queries the DB for relances that are due and not yet sent, checks the
-    Kinshasa time window, then dispatches individual send_relance tasks.
-
-    Safe to run multiple times (idempotent — each relance row has a status).
-    """
-    log.info("relance.process_due.start")
-    if not settings.relance_enabled:
-        log.warning("relance.process_due.skipped_safety_gate", relance_enabled=False)
-        return {
-            "status": "skipped",
-            "reason": "relance_disabled",
-            "dispatched": 0,
-        }
-
-    from app.modules.m6_relance import service as relance_svc  # type: ignore[import]
-
-    result = run_async(
-        relance_svc.process_due_relances()
-    )
-    log.info("relance.process_due.done", dispatched=result.get("dispatched", 0))
-    return result
+    """Deprecated compatibility task; relances are delivered by ETA tasks."""
+    log.warning("relance.process_due.obsolete")
+    return {"status": "obsolete", "skipped": True, "dispatched": 0}
 
 
 # Backward-compatible task export expected by setup validation.

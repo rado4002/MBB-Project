@@ -1,3 +1,4 @@
+import asyncio
 import json
 import unittest
 import uuid
@@ -5,10 +6,11 @@ from contextlib import ExitStack
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+from zoneinfo import ZoneInfo
 
 from app import redis_client
 from app.tasks import celery_app as celery_config
-from app.tasks import conversion, m1
+from app.tasks import conversion, m1, relance
 
 
 def _payload(message_id=None, whatsapp_message_id="safe-wa-id"):
@@ -286,6 +288,52 @@ class ScheduleAndObsoleteConsumerTests(unittest.TestCase):
         self.assertEqual(set(celery_config.beat_schedule_for(True)), expected)
         self.assertNotIn("conversion-drain-blackout", celery_config._BEAT_SCHEDULE)
 
+    def test_maps_schedule_is_midnight_in_kinshasa_timezone(self):
+        maps_schedule = celery_config.beat_schedule_for(True)["maps-aggregate-daily"]["schedule"]
+        self.assertEqual(celery_config.celery_app.conf.timezone, "Africa/Kinshasa")
+        self.assertEqual(maps_schedule.hour, {0})
+        self.assertEqual(maps_schedule.minute, {0})
+        midnight = datetime(2026, 7, 27, tzinfo=ZoneInfo("Africa/Kinshasa"))
+        self.assertEqual(midnight.astimezone(timezone.utc).hour, 23)
+
+    def test_relance_scanner_preserves_eta_delivery_flow(self):
+        lead = SimpleNamespace(lead_id=uuid.uuid4(), conversation_id=uuid.uuid4())
+        conversation = SimpleNamespace()
+        scheduled = SimpleNamespace(
+            relance_id=uuid.uuid4(),
+            scheduled_at=datetime(2026, 7, 27, 8, tzinfo=timezone.utc),
+        )
+        session = AsyncMock()
+        session.execute.return_value = SimpleNamespace(
+            scalar_one_or_none=Mock(return_value=conversation)
+        )
+        session_context = AsyncMock()
+        session_context.__aenter__.return_value = session
+
+        with (
+            patch.object(relance, "AsyncSessionLocal", return_value=session_context),
+            patch.object(
+                relance,
+                "find_eligible_leads",
+                new=AsyncMock(return_value=[lead]),
+            ),
+            patch.object(
+                relance,
+                "create_and_schedule_relance",
+                new=AsyncMock(return_value=scheduled),
+            ),
+            patch.object(relance.send_relance, "apply_async") as send,
+        ):
+            result = asyncio.run(relance._scan_and_schedule_relances())
+
+        self.assertEqual(result["eligible_count"], 1)
+        self.assertEqual(result["scheduled_count"], 1)
+        send.assert_called_once_with(
+            args=[str(scheduled.relance_id)],
+            eta=scheduled.scheduled_at,
+        )
+        session.commit.assert_awaited_once()
+
     def test_obsolete_conversion_consumer_has_no_queue_or_publication_effect(self):
         with (
             patch.object(redis_client, "blackout_claim_one") as claim,
@@ -297,6 +345,18 @@ class ScheduleAndObsoleteConsumerTests(unittest.TestCase):
         claim.assert_not_called()
         dequeue.assert_not_called()
         publish.assert_not_called()
+
+    def test_obsolete_relance_consumer_is_inert(self):
+        with (
+            patch.object(relance, "run_async") as run_async,
+            patch.object(relance, "AsyncSessionLocal") as open_session,
+            patch.object(relance.send_relance, "apply_async") as send,
+        ):
+            result = relance.process_due_relances.run()
+        self.assertEqual(result, {"status": "obsolete", "skipped": True, "dispatched": 0})
+        run_async.assert_not_called()
+        open_session.assert_not_called()
+        send.assert_not_called()
 
 
 if __name__ == "__main__":
