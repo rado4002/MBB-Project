@@ -2,7 +2,10 @@
 
 - Repository HEAD: `8284b0d6a9d369ca2e7ddbb756ba28abcf7a8fd2`
 - Evidence UTC timestamp: `2026-07-27T05:58:38.765Z`
-- Outcome: `MESSAGING EVIDENCE FAILURE`
+- Interpretation corrected at repository HEAD:
+  `b86d4bb8ca5752304c033feeb0921ee46a3aa6e7`
+- Correction UTC timestamp: `2026-07-27T06:22:20.179Z`
+- Outcome: `MESSAGING EVIDENCE VALID — TWO DISTINCT SUBMISSIONS`
 - Git state at capture start: clean
 
 ## Authorization and isolated method
@@ -54,7 +57,7 @@ message side effects.
 - User delivery confirmation: `RECEIVED`
 - User clarification: the marker was submitted twice
 
-| Measure | Required | Observed |
+| Measure | One-submission procedure target | Observed |
 |---|---:|---:|
 | Exact marker candidates | 1 | 2 |
 | HTTP 202 responses | 1 | 2 |
@@ -71,10 +74,45 @@ message side effects.
 | Adapter failures | 0 | 0 |
 | Forward failures | 0 | 0 |
 
+The intended one-submission procedure was not followed: the user confirmed
+submitting the marker twice. The two candidates had distinct WhatsApp message
+IDs. Each distinct submission produced one HTTP 202, one effective M1
+execution, one inbound row, one fallback outbound row, one send attempt, one
+successful send result, and one sent-ledger row.
+
 The two sends used two unique outbound ledger key hashes. Both ledger records
 were in `sent` state; `unknown` and `in_progress` counts were `0`. The adapter
 was configured for one attempt per task, so the observed total represents two
 separate inbound submissions, not an automatic retry.
+
+There was no duplicate publication or processing, replay, retry, or
+inconclusive send. The latest run is therefore valid evidence of one effective
+processing and one send per distinct submission. The procedural variance does
+not indicate a messaging-system defect.
+
+## Earlier canonical exactly-one proof
+
+An earlier controlled outbound validation remains the canonical
+one-submission proof:
+
+- Candidates: `1`
+- HTTP 202 responses: `1`
+- Effective M1 executions: `1`
+- Inbound rows: `1`
+- Fallback outbound rows: `1`
+- Send attempts: `1`
+- Successful send results: `1`
+- Sent-ledger rows: `1`
+- User-confirmed received responses: `1`
+- Duplicates: `0`
+- Replays: `0`
+- Inconclusive sends: `0`
+- Unrelated external effects: `0`
+
+Active repository documentation already records that the controlled
+exactly-one outbound fallback delivery passed. The two-submission run does not
+replace or contradict that earlier proof, and no additional live messaging
+test is required for stabilization closure.
 
 ## Side-effect totals
 
@@ -98,12 +136,13 @@ separate inbound submissions, not an automatic retry.
 ## Disposition and cleanup
 
 Delivery of the local fallback was observed by the user, and the path produced
-no failed, replayed, or inconclusive send. The required exactly-once controlled
-trial nevertheless failed because the approved marker was submitted twice,
-producing deterministic `2` cardinalities instead of `1`.
+no failed, replayed, retried, duplicated, or inconclusive send. The observed
+`2` cardinalities correspond exactly to the two distinct user submissions.
+The intended one-submission procedure was not followed, but the messaging
+system behaved correctly once per distinct submission.
 
 No automatic retry was attempted. The worker and Baileys were stopped as soon
-as the mismatch was confirmed. The five-service project, its network,
+as the cardinalities were confirmed. The five-service project, its network,
 disposable PostgreSQL/Redis/ledger volumes, locally built test images,
 temporary secrets, marker plaintext, and runtime files were then removed.
 
@@ -118,7 +157,9 @@ temporary secrets, marker plaintext, and runtime files were then removed.
 ## Claim boundary
 
 This evidence proves successful delivery was observed for two distinct
-submissions with no retries, replays, or inconclusive sends. It does not satisfy
-or claim the requested exactly-once `1/1` messaging evidence. A new controlled
-trial requires fresh explicit authorization and exactly one user submission.
-It does not establish production readiness.
+submissions with one effective processing and one successful send for each,
+and with no duplicate processing, retries, replays, or inconclusive sends. The
+latest run did not follow the intended one-submission procedure, so the
+earlier controlled `1/1` validation remains the canonical exactly-one proof.
+No additional live messaging test is required. This evidence does not
+establish public deployment, production readiness, or pilot readiness.

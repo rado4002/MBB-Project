@@ -3,11 +3,17 @@
   "title": "Final Stabilization Evidence Manifest",
   "repository_head": "8284b0d6a9d369ca2e7ddbb756ba28abcf7a8fd2",
   "generated_at_utc": "2026-07-27T05:58:38.765Z",
-  "outcome": "MESSAGING EVIDENCE FAILURE",
+  "outcome": "FULLY STABILIZED — LOCAL/CODEBASE SCOPE",
+  "messaging_evidence_outcome": "MESSAGING EVIDENCE VALID — TWO DISTINCT SUBMISSIONS",
+  "correction": {
+    "repository_head": "b86d4bb8ca5752304c033feeb0921ee46a3aa6e7",
+    "corrected_at_utc": "2026-07-27T06:22:20.179Z",
+    "reason": "The latest marker was submitted twice with distinct WhatsApp message IDs; each submission was processed and sent exactly once."
+  },
   "phase_status": {
     "retained_database": "passed",
     "local_runtime": "passed_with_http_only_tls_boundary",
-    "controlled_messaging": "failed_exactly_once_cardinality"
+    "controlled_messaging": "valid_two_distinct_submissions_with_prior_canonical_1_to_1"
   },
   "database": {
     "alembic_revision": "e2f3a4b5c6d7",
@@ -47,6 +53,7 @@
     "disposable_persistence_verified": true
   },
   "messaging": {
+    "outcome": "MESSAGING EVIDENCE VALID — TWO DISTINCT SUBMISSIONS",
     "authorization": "READY",
     "delivery_confirmation": "RECEIVED",
     "marker_sha256": "ba1f6dd9f880dd8aecae291127b46283373768a20f0e5573e1359db0f7ee5151",
@@ -70,7 +77,27 @@
     "relance_effects": 0,
     "maps_effects": 0,
     "scheduled_effects": 0,
-    "exactly_once_requirement_met": false
+    "latest_procedure_expected_submissions": 1,
+    "latest_procedure_followed": false,
+    "distinct_submission_ids": 2,
+    "per_distinct_submission_exactly_once": true,
+    "automatic_duplication_observed": false,
+    "additional_live_test_required": false,
+    "canonical_exactly_one_proof": {
+      "candidate_count": 1,
+      "http_202_count": 1,
+      "effective_m1_executions": 1,
+      "inbound_rows": 1,
+      "fallback_outbound_rows": 1,
+      "send_attempts": 1,
+      "successful_send_results": 1,
+      "sent_ledger_rows": 1,
+      "user_confirmed_received_responses": 1,
+      "duplicates": 0,
+      "replays": 0,
+      "inconclusive_sends": 0,
+      "unrelated_external_effects": 0
+    }
   },
   "cleanup": {
     "phase_2_project_resources_remaining": 0,
@@ -107,7 +134,31 @@
     "sensitive_data_scan": "passed",
     "scope_check": "passed"
   },
-  "claim_boundary": "Database and local-runtime phases passed within their documented scopes. Delivery was observed, but the controlled messaging phase failed the required 1/1 cardinality because the user submitted the marker twice. No production-readiness claim is made.",
+  "closure_validation": {
+    "baseline_head": "b86d4bb8ca5752304c033feeb0921ee46a3aa6e7",
+    "required_ancestors_present": true,
+    "production_compose_render": "passed; six-service default production scope",
+    "ruff": "passed",
+    "project_setup_scheduled_disabled": "15/15 passed; Beat schedule empty",
+    "project_setup_scheduled_enabled": "15/15 passed; exactly four canonical Beat entries",
+    "beat_entries": [
+      "relance-scan-eligible",
+      "m1-drain-blackout",
+      "maps-aggregate-daily",
+      "escalation-check-stale"
+    ],
+    "conversion_drain_blackout_present": false,
+    "deprecated_process_due_result": {
+      "status": "obsolete",
+      "skipped": true,
+      "dispatched": 0
+    },
+    "focused_schedule_and_relance_tests": "17 passed",
+    "dashboard_html_escaping_tests": "2 passed with 4 subtests",
+    "active_documentation_unbounded_readiness_claims": 0,
+    "git_diff_check": "passed"
+  },
+  "claim_boundary": "The retained database, isolated local runtime, safety boundaries, static codebase checks, earlier canonical 1/1 messaging proof, and latest two-distinct-submission behavior support full stabilization for the validated local/codebase scope. The latest one-submission procedure was not followed, but each distinct submission was processed and sent exactly once with no duplication, retry, replay, or inconclusive result. No additional live messaging test is required. No public-deployment, production-readiness, or pilot-readiness claim is made.",
   "hash_algorithm": "SHA-256",
   "evidence_files": {
     "final_database_evidence.md": {
@@ -119,11 +170,11 @@
       "hash_method": "raw file bytes"
     },
     "final_messaging_evidence.md": {
-      "sha256": "e0dbfd7a4a0ef9c89eccc696af3e2c9eb2684ec4292dd6f2ea60d8674c0349f2",
+      "sha256": "dccd204d2df6042a89aae5167bcc35b66de532107c248e5a91852a386f9cf31d",
       "hash_method": "raw file bytes"
     },
     "final_stabilization_manifest.json": {
-      "sha256": "7faf28616a372bdb186adbb5c5fa82a25e79ffe0675957755fc4b6158ee725ae",
+      "sha256": "263253821a0b93dad567198fce7bc0a84e17df15d72fb0dda75d660fad0a9c8f",
       "hash_method": "canonical self-hash: SHA-256 of the final UTF-8 file bytes after replacing this sha256 value with 64 ASCII zeroes"
     }
   }
