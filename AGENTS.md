@@ -2,25 +2,59 @@
 
 ## Project Status
 
-MBB-Project is in recovery and stabilization mode. Do not describe the project as production-ready, pilot-ready, or feature-ready unless the user asks for an assessment and the claim is proven by current validation.
+MBB-Project is fully stabilized for the validated local/codebase scope.
+Recovery and local/codebase stabilization are complete. This is not a
+production-ready, pilot-ready, publicly deployed, or general feature-readiness
+claim.
+
+The protected stabilization baseline is the annotated tag
+`local-stabilized-v1` at
+`cb39748deecf8ebe28c6ce3cded734754becbeb1`. Main may advance through
+controlled work while that tag remains fixed. Do not reopen a validated
+recovery path without a new reproducible defect or a new claim boundary that
+requires matching validation.
 
 This file contains durable repository rules. Step-specific scope, allowed files, and validation commands come from the current user prompt.
 
-## Current Recovery Goal
+## Current Product-Development Goal
 
-Prioritize stabilizing the runtime foundation and proving one clean MVP flow:
+Proceed through controlled product development:
 
-Inbound WhatsApp/Baileys message -> FastAPI backend -> validation/storage -> processing -> outbound response generated or selected -> adapter send-back -> dashboard reads conversation safely.
+Preserve the stabilized foundation
+-> define one MVP business journey
+-> define contracts
+-> implement one complete vertical capability
+-> validate internally
+-> prepare limited-user validation.
 
-Stability comes before feature expansion.
+The current next phase is Step 23B: first MVP business journey definition.
+Documentation alignment does not perform Step 23B.
 
 ## Working Principles
 
 - Truth before polish.
 - Small verified steps before large changes.
 - Preserve existing working behavior when possible.
-- Prefer minimal, reversible fixes during recovery.
+- Prefer minimal, reversible changes.
 - Make the narrowest change that satisfies the current task.
+- Deliver one measurable business capability at a time.
+- Establish the business outcome before implementation.
+- Prefer complete vertical slices over disconnected partial modules.
+- Preserve the validated stabilization guarantees.
+- Keep AI optional and subordinate to authoritative business rules.
+- Keep external capabilities default-off unless explicitly authorized.
+- Optimize only in response to measured or strongly evidenced constraints.
+- Allow main to advance while keeping the stabilization tag fixed.
+
+## Controlled Development Workflow
+
+Use one safe Codex run when the task is simple. Separate product definition,
+investigation, implementation, and external validation when risk or uncertainty
+justifies it.
+
+Evidence must match the claim being made. Product definition is not
+implementation evidence, local validation is not public-deployment evidence,
+and enabling any external side effect requires explicit authorization.
 
 ## Scope Control Rules
 
@@ -64,7 +98,12 @@ Do not add Co-authored-by, Generated-by, Assisted-by or similar AI attribution.
 - Respect existing module boundaries.
 - Avoid direct imports between major modules when the surrounding architecture expects explicit APIs, service layers, events, or Celery tasks.
 - Preserve adapter boundaries for messaging, AI, CRM, payment, and other external integrations when touching those areas.
-- Do not introduce broad redesigns or new architectural patterns during recovery unless the user explicitly requests them.
+- Do not introduce a broad redesign without an approved product reason or measured operational evidence.
+- Preserve the modular monolith unless evidence justifies extraction.
+- Keep PostgreSQL authoritative for durable business data.
+- Keep Redis temporary: cache, broker, queue, or coordination data must not silently become the authoritative business record.
+- Use Celery selectively for work that benefits from asynchronous execution; do not move work to Celery by default.
+- Keep Baileys as a messaging channel adapter, not the business core.
 
 ## DRC And Product Constraints
 
@@ -103,11 +142,17 @@ For inspection or review tasks, final responses should include:
 - Clear separation of facts, assumptions, risks, and recommendations.
 - No claims of fixes unless changes were explicitly requested and made.
 
-## What Not To Do During Recovery
+## Post-Stabilization Boundaries
 
-- Do not claim production, pilot, or feature readiness without proof.
+- Do not claim production, pilot, public-deployment, or general feature readiness without matching proof.
+- Do not reopen validated paths without a new reproducible defect or a new claim boundary.
 - Do not add feature scope because it appears in old documentation or assistant files.
+- Do not add speculative infrastructure or premature microservices.
+- Do not allow external side effects without explicit authorization and applicable safety gates.
+- Do not weaken safety gates, uniqueness, idempotency, escaping, authentication, or send-ledger guarantees.
+- Do not move, delete, recreate, or replace `local-stabilized-v1`.
 - Do not copy old production-ready, fixed-target, or broad build instructions into current work.
 - Do not enforce GSD workflow commands or "never edit outside GSD" rules unless the user explicitly asks to use GSD.
 - Do not apply CommonJS-only, `.cjs`-only, or Node-test-only rules from the GSD package to this repository as a whole.
 - Do not remove Claude, GSD, Copilot, worktree, or old assistant files unless the user explicitly requests that cleanup.
+- Do not add an AI identity as an author, committer, co-author, sign-off, contributor trailer, or generated-by identity.

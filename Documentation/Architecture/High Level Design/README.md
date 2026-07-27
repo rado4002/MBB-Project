@@ -4,11 +4,28 @@ This folder contains the **system-wide target architectural vision** for **MBB y
 
 ## Current Implementation Overlay
 
-The current application remains provider-neutral and disconnected from external AI APIs. Baileys is the validated local WhatsApp transport for the controlled inbound-to-fallback-send scope; it is unofficial and has no permanent production approval. The isolated local production-like runtime validated PostgreSQL, Redis, FastAPI, Celery worker, dashboard, and Nginx, including authentication, routing, healthchecks, restart recovery, and database persistence.
+Local/codebase stabilization is complete for the protected
+`local-stabilized-v1` baseline at
+`cb39748deecf8ebe28c6ce3cded734754becbeb1`. This does not establish public
+deployment, pilot readiness, production readiness, or target-scale
+performance. The current application remains provider-neutral and
+disconnected from external AI APIs. Baileys is the validated local WhatsApp
+transport for the controlled inbound-to-fallback-send scope; it is unofficial
+and has no permanent production approval. The isolated local production-like
+runtime validated PostgreSQL, Redis, FastAPI, Celery worker, dashboard, and
+Nginx, including authentication, routing, healthchecks, restart recovery, and
+database persistence.
 
 The default production scope excludes monitoring, backup, Celery Beat, and Baileys. It keeps external AI, WhatsApp sending, CRM, payments, relance, scheduled tasks, and MAPS fanout disabled. PostgreSQL is not host-published. Dashboard access requires Basic Auth plus an explicitly provisioned API token; the dashboard does not auto-mint an administrator JWT.
 
 No public deployment exists. Domain ownership, a public host, DNS, public ports 80 and 443, permanent production secrets, CA-issued TLS, certificate renewal, Nginx certificate reload, and public deployment validation are deferred. Treat provider-specific diagrams and VPS/TLS descriptions in the architecture documents as target design, not current runtime evidence.
+
+The architecture documents are guidance, not automatic implementation
+authority. Preserve the modular monolith and adapter boundaries unless an
+approved product need or a measured or strongly evidenced operational
+bottleneck justifies change. PostgreSQL remains authoritative, Redis remains
+temporary, Celery remains selective, and Baileys remains a channel adapter.
+Simplify operations, not the architecture.
 
 ---
 
@@ -246,5 +263,5 @@ For more details, see the [main project README](../../README.md).
 
 ---
 
-**Last Updated:** April 15, 2026  
-**Status:** ✅ Phase 1 Ready | 🔄 Phase 2 Planned
+**Last Updated:** July 27, 2026
+**Status:** Local/codebase stabilization complete | Controlled product development | Not production or pilot ready

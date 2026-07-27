@@ -1,7 +1,7 @@
 # MBB ya Kin: Multi-Language Lead Nurturer Bot for DRC
 **"A Helpful Congolese Friend on WhatsApp"**
 
-![Status](https://img.shields.io/badge/Status-Recovery%20Mode-yellow)
+![Status](https://img.shields.io/badge/Status-Post--Stabilization-blue)
 ![Python](https://img.shields.io/badge/Python-3.12-green)
 ![License](https://img.shields.io/badge/License-Internal-red)
 
@@ -9,21 +9,36 @@
 
 ## 🎯 What is MBB ya Kin?
 
-**MBB ya Kin** is a self-hosted WhatsApp-first chatbot project designed specifically for the **Democratic Republic of Congo (DRC)** market. It remains in **recovery and stabilization mode**, focused on proving and protecting one clean MVP flow before feature expansion.
+**MBB ya Kin** is a self-hosted WhatsApp-first chatbot project designed specifically for the **Democratic Republic of Congo (DRC)** market. It is now in controlled post-stabilization product development.
 
-Recovery and local stabilization are nearly complete. The project is **not publicly deployed**, **not production-ready**, and **not pilot-ready**.
+Recovery and local/codebase stabilization are complete for the validated scope. This is **not** a claim that the project is publicly deployed, production-ready, pilot-ready, or generally feature-ready.
 
-## Current Recovery Status
+## MBB-Project Post-Stabilization Source-of-Truth Note
 
-Current validated recovery evidence at baseline `f45a45d49f79d4c05d1d1be1253c8ba7ab11bedc`:
+Step 23A is complete. The protected stabilization baseline is the annotated tag `local-stabilized-v1` at `cb39748deecf8ebe28c6ce3cded734754becbeb1`. The retained PostgreSQL backup exists and remains protected. Recovery is closed, and `main` may advance normally without moving the stabilization tag.
 
-- **Baileys is the validated local WhatsApp transport.** Controlled live inbound, session restoration, international phone handling, persistence, and exactly-one outbound fallback delivery passed. Baileys recovery is closed for that controlled inbound-to-fallback-send scope.
+- **Baileys is the validated local WhatsApp transport.** Controlled live inbound, session restoration, international phone handling, persistence, and exactly-one outbound fallback delivery passed for the protected local scope.
 - Baileys uses an unofficial WhatsApp transport. The local result is not permanent production approval and does not establish public-service suitability.
 - **PostgreSQL, Redis, FastAPI, the Celery worker, the Streamlit dashboard, and Nginx** passed isolated local production-like startup. Authentication, routing, healthchecks, restart recovery, and database persistence passed.
 - The worker consumes `default`, `relance`, `maps`, `escalation`, and `conversion`. PostgreSQL is not published to the host by the production configuration.
 - Dashboard access requires Nginx Basic Auth and an explicitly provisioned dashboard API token. The dashboard does not hold the JWT signing secret and does not auto-mint an administrator JWT.
 - The application is provider-neutral and currently disconnected from external AI APIs. `AI_ADAPTER=disabled` selects the local fallback path; Claude, OpenAI, Gemini, and other external AI providers are not connected.
 - Monitoring, backup, Celery Beat, and Baileys are outside the default production scope. External AI, WhatsApp sending, CRM writes, payments, relance, scheduled tasks, and MAPS fanout remain disabled by default.
+
+The validated foundation to preserve includes the inbound-to-fallback-send path, validation and persistence boundaries, dashboard read safety, adapter boundaries, default-off external effects, authentication, uniqueness and idempotency controls, escaping, and the outbound send ledger. PostgreSQL remains authoritative, Redis remains temporary, Celery remains selective, and Baileys remains a channel adapter rather than the business core.
+
+The controlled sequence is **Step 23B → Step 23C → Step 23D → Step 23E → Step 23F → later deployment and external validation**. The current step is Step 23B, first MVP business journey definition; this documentation alignment records that transition but does not perform Step 23B.
+
+Active source-of-truth order:
+
+1. The current user-approved task scope and acceptance criteria.
+2. [`AGENTS.md`](AGENTS.md) for durable repository rules.
+3. This post-stabilization source-of-truth note for current project status and claim boundaries.
+4. The current roadmap status overlay for sequence and planned work.
+5. Current validation evidence for the exact claim it proves.
+6. Target architecture and requirements documents as non-authoritative design inputs.
+
+Historical recovery notes and reports remain historical evidence. They are not rewritten to appear current and do not override the active sources above.
 
 Public deployment remains deferred. It requires domain ownership, a public deployment host, DNS, public ports 80 and 443, permanent production secrets, CA-issued TLS, certificate renewal, Nginx certificate reload, and public deployment validation.
 
@@ -121,7 +136,7 @@ The `.env` file controls adapter selection and service addresses. Key settings f
 ```ini
 APP_ENV=development
 WHATSAPP_MODE=baileys          # Validated local transport for the controlled MVP scope
-AI_ADAPTER=disabled            # recovery mode; no external AI provider connected
+AI_ADAPTER=disabled            # default-off; no external AI provider connected
 WHATSAPP_SEND_ENABLED=false    # default safety gate; controlled outbound validation already passed
 CRM_ADAPTER=airtable           # airtable | mbb_hub
 TZ=Africa/Kinshasa
@@ -133,7 +148,7 @@ TZ=Africa/Kinshasa
 
 ```bash
 # Build and start the development stack.
-# During recovery validation, keep celery_beat stopped/exited unless a task explicitly authorizes it.
+# Keep celery_beat stopped/exited unless a task explicitly authorizes scheduled side effects.
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 ```
 
@@ -147,7 +162,7 @@ First run takes 3–5 minutes (pulling images + building). Subsequent starts tak
 | **redis** | `localhost:6379` | Cache + task broker (AOF persistence) |
 | **api** | Internal `:8000` | FastAPI backend (behind nginx) |
 | **celery_worker** | — | 4 async workers, 5 task queues |
-| **celery_beat** | — | RedBeat periodic scheduler; keep stopped/exited during recovery validation |
+| **celery_beat** | — | RedBeat periodic scheduler; keep stopped/exited unless explicitly authorized |
 | **baileys** | `localhost:3000` | Validated local WhatsApp bridge; unofficial transport, not production-approved |
 | **dashboard** | Internal `:8501` | Streamlit analytics (behind nginx) |
 | **nginx** | `localhost:80` | Reverse proxy (routes to api + dashboard) |
@@ -468,7 +483,7 @@ The default production scope starts PostgreSQL, Redis, API, Celery worker, dashb
 
 ## 🤖 Product and Implementation Areas
 
-This section describes product intent and implemented surfaces. It is not evidence that every area is enabled, externally connected, or ready for pilot use. The default recovery configuration keeps external AI, sending, CRM, payments, relance, schedules, and MAPS fanout off.
+This section describes product intent and implemented surfaces. It is not evidence that every area is enabled, externally connected, or ready for pilot use. The stabilized default configuration keeps external AI, sending, CRM, payments, relance, schedules, and MAPS fanout off.
 
 ### 1. **Multi-Language Conversation Engine**
 Detects user language from first message:
@@ -535,15 +550,15 @@ The bot's "Brain" accesses provider-specific services through adapter interfaces
 
 ### Example: Switching AI Models
 ```bash
-# Current recovery mode
+# Stabilized default mode
 AI_ADAPTER=disabled
 
-# External providers are not connected in the validated recovery state.
+# External providers are not connected in the validated state.
 # Re-enable only in a separate validated step.
 ```
 
 **Why This Matters:**
-1. **Recovery Safety**: keep external AI disabled while the core flow is being stabilized.
+1. **Authoritative Rules First**: keep external AI optional and subordinate to validated business rules.
 2. **Controlled Reconnection**: re-enable provider adapters only in separate validated steps.
 3. **Boundary Clarity**: keep AI, CRM, payment, and messaging integrations behind adapter boundaries.
 
@@ -794,11 +809,11 @@ Internal MBB Project. Not for external distribution.
 
 ## Current Status & Next Steps
 
-### Recovery Mode
+### Controlled Product Development
 
-Recovery and local stabilization are nearly complete. The controlled Baileys inbound-to-fallback-send scope and the isolated local production-like runtime are validated as summarized in [Current Recovery Status](#current-recovery-status).
+Recovery and local/codebase stabilization are complete for the validated scope summarized in the [Post-Stabilization Source-of-Truth Note](#mbb-project-post-stabilization-source-of-truth-note).
 
-The next step is a final stabilization audit. Public deployment work remains a separate deferred phase, and no current evidence establishes production or pilot readiness. Older roadmap completion markers and the historical pilot runbook are planning/history, not readiness proof.
+The next phase is Step 23B, first MVP business journey definition. No Step 23B product definition is contained in this documentation alignment. Public deployment and limited-user external validation remain later, separately authorized phases; no current evidence establishes production or pilot readiness. Older roadmap completion markers and the historical pilot runbook are planning/history, not readiness proof.
 
 ---
 

@@ -3,8 +3,8 @@
 **MBB ya Kin — Multi-Language Lead Nurturer Bot**
 
 Date: May 2026
-Version: 1.4 recovery-status overlay
-Status: Recovery and local stabilization nearly complete — not publicly deployed, production-ready, or pilot-ready
+Version: 1.5 post-stabilization status overlay
+Status: Local/codebase stabilization complete — controlled product development; not publicly deployed, production-ready, or pilot-ready
 
 ---
 
@@ -14,19 +14,32 @@ This document defines the implementation roadmap for MBB ya Kin, broken into **3
 
 The roadmap follows the principle: **infrastructure first → core conversation loop → business logic → intelligence → optimization**.
 
-### Current Recovery Overlay
+### Current Post-Stabilization Overlay
 
 The sprint completion markers below are historical implementation records. They do not prove current feature, pilot, production, or public-deployment readiness.
 
-Current validated recovery state at baseline `f45a45d49f79d4c05d1d1be1253c8ba7ab11bedc`:
+Step 23A is complete. Recovery and local/codebase stabilization are closed for
+the validated scope. The protected baseline is `local-stabilized-v1` at
+`cb39748deecf8ebe28c6ce3cded734754becbeb1`; `main` may advance while that
+annotated tag remains fixed. The retained PostgreSQL backup remains protected.
 
-- Baileys is the validated local WhatsApp transport. Controlled live inbound, session restoration, international phone handling, persistence, and exactly-one outbound fallback delivery passed. Recovery is closed for that controlled inbound-to-fallback-send scope; no permanent production approval is claimed for the unofficial transport.
+- Baileys is the validated local WhatsApp transport. Controlled live inbound, session restoration, international phone handling, persistence, and exactly-one outbound fallback delivery passed for the protected local scope; no permanent production approval is claimed for the unofficial transport.
 - PostgreSQL, Redis, FastAPI, Celery worker, dashboard, and Nginx passed isolated local production-like startup. Authentication, routing, healthchecks, restart recovery, and database persistence passed.
 - The worker consumes `default`, `relance`, `maps`, `escalation`, and `conversion`. Production PostgreSQL is not host-published.
 - Dashboard access requires Basic Auth and an explicitly provisioned API token. It does not auto-mint an administrator JWT.
 - The application is provider-neutral and currently disconnected from external AI APIs.
 - Monitoring, backup, Celery Beat, and Baileys are excluded from the default production scope. External AI, WhatsApp sending, CRM, payments, relance, scheduled tasks, and MAPS fanout remain disabled by default.
 - `scripts/init_db.sql` currently assumes the database identifier `mbb`; database naming is not freely configurable.
+
+The controlled sequence is **Step 23B → Step 23C → Step 23D → Step 23E →
+Step 23F → later deployment and external validation**. The current phase is
+Step 23B, first MVP business journey definition. This status overlay records
+the sequence but does not define that journey or perform Step 23B.
+
+Each product increment must begin with a measurable business outcome and
+proceed as one complete vertical capability. External side effects remain
+default-off unless explicitly authorized. Evidence must match the claim being
+made, and target plans below are not implementation authority.
 
 Public deployment is a deferred phase requiring domain ownership, a public deployment host, DNS, public ports 80 and 443, permanent production secrets, CA-issued TLS, certificate renewal, Nginx certificate reload, and public deployment validation.
 
@@ -313,7 +326,7 @@ Phase 1 is divided into **5 strategic stages**, each with a clear milestone and 
 
 **Modules:** All M1–M9
 
-**Historical milestone record:** Integration-test assets, a security checklist, a Locust script, relance templates, a pilot runbook, and a production Compose overlay were delivered. This record is not proof that the system is pilot-ready; the current recovery overlay above governs readiness claims.
+**Historical milestone record:** Integration-test assets, a security checklist, a Locust script, relance templates, a pilot runbook, and a production Compose overlay were delivered. This record is not proof that the system is pilot-ready; the current post-stabilization overlay above governs readiness claims.
 
 **Deliverables Completed (2026-05-08):**
 - ✅ **15 integration scenarios** covering M1–M9 end-to-end (`backend/tests/integration/test_full_flow.py`)
@@ -816,7 +829,7 @@ Each sprint follows this exact workflow:
 
 | Environment | Purpose | WhatsApp Mode | URL |
 |-------------|---------|---------------|-----|
-| **Local** | Validated controlled recovery and production-like testing | `baileys` for the controlled live scope | Localhost routes |
+| **Local** | Validated stabilization scope and controlled product development | `baileys` for explicitly authorized local validation | Localhost routes |
 | **Staging** | Future integration testing | To be selected and validated | Not deployed |
 | **Production** | Future live customers | To be approved and validated | Not deployed |
 

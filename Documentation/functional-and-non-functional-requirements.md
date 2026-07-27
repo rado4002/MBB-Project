@@ -264,4 +264,4 @@ When deployed, the MBB Assistant will deliver:
 * Customers consistently feeling “I’m talking to a real person”
 * Continuous, actionable MAPS intelligence for the Lab
 
-This document remains a target requirements input. Current implementation and readiness status are governed by the repository README, recovery roadmap overlay, and current validation evidence.
+This document remains a target requirements input. Current implementation and readiness status are governed by the post-stabilization source-of-truth note in the repository README, `AGENTS.md`, the current roadmap status overlay, and validation evidence matching the claim.
