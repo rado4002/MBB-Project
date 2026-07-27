@@ -133,28 +133,52 @@ try:
     assert conf.worker_prefetch_multiplier == 1
     assert conf.result_expires == 86400
 
-    # Verify queues
+    # Verify current task routing
     routes = conf.task_routes
-    assert "m1.*" in routes,                      "m1.* route missing"
-    assert "app.tasks.m1.*" in routes,             "app.tasks.m1.* route missing"
-    assert "app.tasks.relance.*" in routes
-    assert "app.tasks.maps.*" in routes
-    assert "app.tasks.escalation.*" in routes
-    assert "app.tasks.conversion.*" in routes
+    expected_routes = {
+        "m1.*": "default",
+        "m5.*": "default",
+        "app.tasks.qualification.*": "default",
+        "app.tasks.relance.*": "relance",
+        "app.tasks.maps.*": "maps",
+        "app.tasks.escalation.*": "escalation",
+        "app.tasks.conversion.*": "conversion",
+        "m7.*": "conversion",
+    }
+    assert set(routes) == set(expected_routes), "Celery task routes do not match current task names"
+    for task_pattern, queue in expected_routes.items():
+        assert routes[task_pattern]["queue"] == queue, f"{task_pattern} must route to {queue}"
 
-    # Verify Beat schedule
+    # Verify the disabled runtime gate and the current canonical enabled schedule.
+    from app.tasks.celery_app import beat_schedule_for, settings
     beat = conf.beat_schedule
-    assert "m1-drain-blackout" in beat,            "m1-drain-blackout beat task missing"
-    assert "relance-process-due" in beat
-    assert "conversion-drain-blackout" in beat
-    assert "maps-aggregate-daily" in beat
-    assert "escalation-check-stale" in beat
+    expected_beat = {
+        "relance-scan-eligible": (
+            "app.tasks.relance.scan_eligible_leads",
+            "relance",
+        ),
+        "m1-drain-blackout": ("m1.drain_blackout_queue", "default"),
+        "maps-aggregate-daily": ("app.tasks.maps.aggregate_daily", "maps"),
+        "escalation-check-stale": (
+            "app.tasks.escalation.check_stale",
+            "escalation",
+        ),
+    }
+    assert beat_schedule_for(False) == {}, "disabled Beat schedule must be empty"
+    enabled_beat = beat_schedule_for(True)
+    assert set(enabled_beat) == set(expected_beat), "canonical Beat schedule entries changed"
+    for schedule_name, (task_name, queue) in expected_beat.items():
+        entry = enabled_beat[schedule_name]
+        assert entry["task"] == task_name, f"{schedule_name} task name is stale"
+        assert entry["options"]["queue"] == queue, f"{schedule_name} queue is stale"
+    assert beat == beat_schedule_for(settings.scheduled_tasks_enabled)
 
     # Verify m1 task module is in include list
     assert "app.tasks.m1" in celery_app.conf.include, "app.tasks.m1 not in Celery include list"
 
     print(f"    Queues: {list(routes.keys())}")
-    print(f"    Beat tasks: {list(beat.keys())}")
+    print(f"    Beat tasks enabled: {settings.scheduled_tasks_enabled}")
+    print(f"    Configured Beat tasks: {list(beat.keys())}")
     print("    All Celery config assertions passed")
 except Exception as e:
     errors.append(f"Celery: {e}")

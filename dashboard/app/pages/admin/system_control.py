@@ -44,7 +44,7 @@ def render():
 
     # Test message
     st.subheader("Send Test Message (Dev Only)")
-    phone = st.text_input("Phone (+243...)")
+    phone = st.text_input("Phone (international E.164, for example +243...)")
     if st.button("Send") and phone:
         result = api_post(f"/admin/test-message?phone_number={phone}")
         if result:

@@ -56,7 +56,7 @@ def _customer_response_payload(
     dependencies=[Depends(get_current_role)],
 )
 async def get_customer(phone_number: str, db: DBSession):
-    """Retrieve customer profile by DRC phone number."""
+    """Retrieve a customer profile by canonical international E.164 number."""
     log.info("customer.get", phone=phone_number)
     
     customer = await db.get(Customer, phone_number)

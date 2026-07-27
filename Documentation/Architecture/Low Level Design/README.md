@@ -4,6 +4,11 @@
 
 This folder contains the detailed technical design for the **MBB ya Kin** WhatsApp chatbot system. Each document focuses on one implementation domain, making the design easier to review, maintain, and implement.
 
+> **Current-status boundary:** These documents preserve April 2026 target-state
+> specifications and historical implementation guidance. They are not current
+> runtime or readiness evidence. In particular, legacy `+243`-only phone rules
+> are superseded by the application's canonical international E.164 validation.
+
 The LLD builds on the High-Level Design and provides implementation-ready specifications for backend services, data structures, API contracts, security controls, and operational behavior.
 
 ## Files In This Folder

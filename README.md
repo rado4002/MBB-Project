@@ -58,7 +58,7 @@ Known non-blocking constraint: `scripts/init_db.sql` currently assumes the datab
 | **Database** | PostgreSQL | Leads, orders, sessions |
 | **Cache/Queues** | Redis | Sessions, message queues |
 | **Adapters** | Python ABC | Pluggable integrations |
-| **Analytics** | Streamlit | Funnel & performance dashboard |
+| **Analytics** | Streamlit | Implemented funnel, relance, and language views |
 | **Container** | Docker & Docker Compose | Deployment |
 
 ---
@@ -518,12 +518,14 @@ Captures & analyzes:
 - Conversion triggers
 
 ### 8. **Analytics Dashboard**
-Streamlit dashboard showing:
+Implemented Streamlit views:
 - Funnel (Leads → Qualified → Converted)
 - Relance performance
-- Response times & coverage
 - Language breakdown
-- CSV/Google Sheets export
+- CSV downloads
+
+The response-time page is a placeholder pending metrics integration. Google
+Sheets export is not implemented.
 
 ---
 

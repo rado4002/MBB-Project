@@ -1,5 +1,9 @@
 # Sprint 1.6 Summary — M6 Relance Engine
 
+> **Historical record:** Completion and production-deployment language in this
+> sprint summary records the April 2026 plan and test state. It is not current
+> feature, pilot, production, or public-deployment readiness evidence.
+
 **Phase:** 1.B Lead Pipeline  
 **Sprint:** 1.6 (M6 Relance Engine)  
 **Duration:** Weeks 15-16  

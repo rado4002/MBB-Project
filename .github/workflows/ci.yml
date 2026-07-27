@@ -38,6 +38,7 @@ jobs:
       CLAUDE_API_KEY: test
       AIRTABLE_API_KEY: test
       PAYMENT_WEBHOOK_SECRET: test
+      SCHEDULED_TASKS_ENABLED: "false"
 
     steps:
       - uses: actions/checkout@v4

@@ -4,9 +4,11 @@ Conversation Mirror — WhatsApp-style chat viewer.
 Shows all conversations with full message history, like looking
 at the customer's WhatsApp screen in real time.
 """
-import streamlit as st
-import pandas as pd
+from html import escape
 from datetime import datetime
+
+import streamlit as st
+
 from utils.auth import api_get, api_post, api_put
 
 
@@ -17,6 +19,8 @@ def _render_message_bubble(msg: dict):
     content_type = msg.get("content_type", "text")
     ts = msg.get("timestamp", "")
     lang = msg.get("language", "")
+    safe_content = escape(str(content))
+    safe_lang = escape(str(lang))
 
     # Parse timestamp
     try:
@@ -38,9 +42,9 @@ def _render_message_bubble(msg: dict):
                 font-size: 14px;
                 color: #111;
             ">
-                {'🎙️ ' if content_type == 'voice_note' else '🖼️ ' if content_type == 'image' else ''}{content}
+                {'🎙️ ' if content_type == 'voice_note' else '🖼️ ' if content_type == 'image' else ''}{safe_content}
                 <div style="text-align: right; font-size: 11px; color: #666; margin-top: 2px;">
-                    {time_str} · {lang}
+                    {time_str} · {safe_lang}
                 </div>
             </div>""",
             unsafe_allow_html=True,
@@ -59,7 +63,7 @@ def _render_message_bubble(msg: dict):
                 color: #111;
                 border: 1px solid #e0e0e0;
             ">
-                🤖 {content}
+                🤖 {safe_content}
                 <div style="text-align: right; font-size: 11px; color: #666; margin-top: 2px;">
                     {time_str} · Bot
                 </div>

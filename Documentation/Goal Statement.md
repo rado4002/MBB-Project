@@ -1,5 +1,3 @@
-
-
 Multi-Language Lead Nurturer Bot Project
 
 MBB – Structure as a Service Initiative
@@ -7,6 +5,11 @@ MBB – Structure as a Service Initiative
 Date: April 2026
 
 Prepared for: MBB Leadership & Toronto Supervision Team
+
+> **Target-state record:** This April 2026 goal statement describes planned
+> outcomes and capabilities, including integrations and exports that are not
+> currently implemented or connected. It is not current feature, pilot,
+> production, or public-deployment readiness evidence.
 
 Vision
 

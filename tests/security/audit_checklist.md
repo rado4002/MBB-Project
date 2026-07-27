@@ -1,4 +1,9 @@
 # Phase 1.E — Security Audit Checklist
+
+> **Historical record:** This May 2026 checklist preserves point-in-time audit
+> evidence. Its legacy DRC-only phone assertion is superseded by the current
+> canonical international E.164 validation and tests.
+
 **MBB ya Kin — Sprint 1.9**
 **Auditor:** Claude Code (automated review)
 **Date:** 2026-05-08

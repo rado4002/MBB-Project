@@ -20,14 +20,17 @@ def render():
         if mode == "baileys":
             st.info("🔧 Development Mode (Baileys)", icon="🔧")
             st.caption("QR code pairing required")
+        elif mode == "official":
+            st.warning("Official API selected (not connected)", icon="⚠️")
+            st.caption("No validated Official WhatsApp API connection")
         else:
-            st.success("✅ Production Mode (Official API)", icon="✅")
-            st.caption("Meta Business verified")
+            st.warning(f"Unknown WhatsApp mode: {mode}", icon="⚠️")
+            st.caption("Use a supported, separately validated transport mode")
     
     with col3:
-        # Connection health check (placeholder - would require API endpoint)
-        st.metric("Status", "Active", delta_color="normal")
-        st.caption("Last message: 2 min ago")
+        # Connection health check is not implemented on this page.
+        st.metric("Status", "Not checked", delta_color="normal")
+        st.caption("Connection health unavailable")
 
     with st.expander("ℹ️ How to Switch Modes"):
         st.markdown("""
@@ -37,7 +40,7 @@ def render():
         1. Edit `docker-compose.yml` or `.env` file:
            ```bash
            WHATSAPP_MODE=baileys  # Development (Baileys)
-           WHATSAPP_MODE=official # Production (Official API)
+           WHATSAPP_MODE=official # Not connected or validated
            ```
         2. Restart API containers:
            ```bash
@@ -46,9 +49,9 @@ def render():
         
         **Mode Differences:**
         - **Baileys (Dev):** Free, QR pairing, session persistence, good for testing
-        - **Official API (Prod):** Paid, Meta verified, webhook webhooks, production-ready
-        
-        Both modes use the same M2-M9 modules (zero code changes).
+        - **Official API:** Configuration label only; the adapter is disconnected and unvalidated
+
+        Do not select Official API until its adapter is implemented and separately validated.
         """)
 
     st.markdown("---")
