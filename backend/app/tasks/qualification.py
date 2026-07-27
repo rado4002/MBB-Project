@@ -268,7 +268,6 @@ async def _rescore_lead(
             }
 
         old_score_value = lead.score_value
-        old_score = lead.score
 
         # Calculate new score
         new_score_value, new_score_label, intent = score_lead(

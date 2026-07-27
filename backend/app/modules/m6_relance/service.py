@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.conversation import Conversation
 from app.models.lead import Lead
 from app.models.relance import Relance
-from app.modules.m6_relance.eligibility import get_last_relance_for_lead
 from app.modules.m6_relance.hooks import generate_relance_hook
 from app.modules.m6_relance.scheduler import calculate_next_relance_time
 
@@ -175,7 +174,7 @@ async def mark_relance_delivered(
         session: AsyncSession for DB operations
         relance_id: Relance UUID
     """
-    from sqlalchemy import select, update
+    from sqlalchemy import update
 
     # Update delivered_at
     update_stmt = (
@@ -203,7 +202,7 @@ async def mark_relance_responded(
         relance_id: Relance UUID
         response_time_minutes: Minutes between delivery and response
     """
-    from sqlalchemy import select, update
+    from sqlalchemy import update
 
     update_stmt = (
         update(Relance)

@@ -43,7 +43,6 @@ router = APIRouter(
 async def system_health(db: DBSession, redis: RedisClient):
     """Check health of all system components (A1)."""
     import time
-    start = time.monotonic()
     components = {}
 
     # Check DB

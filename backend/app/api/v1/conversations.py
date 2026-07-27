@@ -10,13 +10,11 @@ import uuid
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import DBSession, IdempotencyKey, get_current_role, require_role
 from app.models.conversation import Conversation
-from app.models.customer import Customer
-from app.models.lead import Lead
 from app.models.message import Message
 from app.modules.m8_maps.escalation import create_ticket, handoff_conversation
 from app.schemas.admin import HandoffToggle, HandoffToggleResponse

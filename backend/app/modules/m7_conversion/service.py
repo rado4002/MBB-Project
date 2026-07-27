@@ -27,8 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import AsyncSessionLocal
 from app.models.order import Order
 from app.models.payment import Payment
-from app.schemas.common import OrderStatus, PaymentMethod
-from app.schemas.orders import OrderCreate
+from app.schemas.common import PaymentMethod
 
 log = structlog.get_logger(__name__)
 

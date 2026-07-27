@@ -15,11 +15,8 @@ import structlog
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import AsyncSessionLocal
 from app.models.maps_tag import MapsTag
-from app.models.message import Message
-from app.models.conversation import Conversation
-from app.modules.m8_maps.categories import CATEGORY_PATTERNS, VALID_CATEGORIES
+from app.modules.m8_maps.categories import VALID_CATEGORIES
 
 log = structlog.get_logger(__name__)
 

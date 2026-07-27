@@ -18,7 +18,6 @@ from app.models.conversation import Conversation
 from app.models.customer import Customer
 from app.models.lead import Lead
 from app.modules.m5_qualification.service import qualify_and_create_lead
-from app.modules.m5_qualification.stages import suggest_stage_from_score
 from app.schemas.leads import (
     CustomerInLead,
     LeadCreate,

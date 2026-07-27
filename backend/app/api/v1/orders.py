@@ -11,7 +11,6 @@ from sqlalchemy import select
 
 from app.api.deps import DBSession, IdempotencyKey, get_current_role
 from app.models.order import Order
-from app.models.payment import Payment
 from app.modules.m7_conversion.service import (
     create_order as svc_create_order,
     update_order_status as svc_update_order_status,

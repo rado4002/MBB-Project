@@ -9,7 +9,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 import structlog
-from sqlalchemy import func, select, case, text
+from sqlalchemy import func, select, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.conversation import Conversation

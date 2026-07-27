@@ -95,8 +95,6 @@ async def find_eligible_leads(
 
 async def _has_pending_relance(session: AsyncSession, lead_id: uuid.UUID) -> bool:
     """Check if lead has a pending (undelivered, not cancelled) relance."""
-    import uuid
-
     query = select(Relance).where(
         and_(
             Relance.lead_id == lead_id,
@@ -114,8 +112,6 @@ async def get_last_relance_for_lead(
     session: AsyncSession, lead_id: uuid.UUID
 ) -> Relance | None:
     """Get the most recent relance for a lead (by attempt_number)."""
-    import uuid
-
     query = (
         select(Relance)
         .where(Relance.lead_id == lead_id)
