@@ -50,6 +50,15 @@ Stability comes before feature expansion.
 - When touching backend code, prefer structured logging over print statements.
 - When touching customer-facing message logic, avoid English-only hardcoded user-facing strings unless the existing flow already requires them or the user asks for them.
 
+## Git Attribution Rules
+
+AI assistants may help inspect, design, edit, test, validate, stage or prepare
+commits, but they must never be recorded as Git authors, Git committers,
+co-authors, sign-offs, contributor trailers or generated-by identities.
+
+All commits must use the repository owner’s approved human Git identity.
+Do not add Co-authored-by, Generated-by, Assisted-by or similar AI attribution.
+
 ## Architecture And Module Boundaries
 
 - Respect existing module boundaries.
