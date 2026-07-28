@@ -101,6 +101,27 @@ async def test_rotation_replaces_token_and_increments_csrf_generation(store) -> 
 
 
 @pytest.mark.asyncio
+async def test_rotation_can_establish_recent_reauthentication(store) -> None:
+    now = int(time.time())
+    created = await store.create_session(
+        account_id=uuid.uuid4(),
+        auth_version=1,
+        recent_reauthenticated_at_epoch=now - 1000,
+        now_epoch=now,
+    )
+    rotated = await store.rotate_session(
+        created.token,
+        now_epoch=now + 1,
+        recent_reauthenticated_at_epoch=now + 1,
+    )
+    assert rotated is not None
+    replacement = await store.get_session(rotated.token, now_epoch=now + 1)
+    assert replacement is not None
+    assert replacement.recent_reauthenticated_at_epoch == now + 1
+    assert replacement.absolute_expires_at_epoch == created.record.absolute_expires_at_epoch
+
+
+@pytest.mark.asyncio
 async def test_activity_is_coalesced_and_idle_expiry_is_fail_closed(store) -> None:
     now = int(time.time())
     created = await store.create_session(
@@ -122,13 +143,15 @@ async def test_activity_is_coalesced_and_idle_expiry_is_fail_closed(store) -> No
 
 @pytest.mark.asyncio
 async def test_absolute_expiry_is_enforced(redis_client) -> None:
-    store = BrowserSessionStore(
-        redis_client=redis_client,
-        settings=_settings(browser_session_idle_seconds=40_000),
-    )
+    store = BrowserSessionStore(redis_client=redis_client, settings=_settings())
     now = int(time.time())
     created = await store.create_session(
         account_id=uuid.uuid4(), auth_version=1, now_epoch=now
+    )
+    await redis_client.hset(
+        f"{SESSION_KEY_PREFIX}{created.record.session_ref}",
+        "last_activity_at_epoch",
+        now + 28_799,
     )
     assert await store.get_session(created.token, now_epoch=now + 28799)
     assert await store.get_session(created.token, now_epoch=now + 28800) is None

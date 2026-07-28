@@ -5,11 +5,12 @@ Request middleware:
 - Maintenance mode check (reads Redis flag)
 """
 import time
-import uuid
 
 import structlog
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+
+from app.request_ids import normalize_or_generate_request_id
 
 log = structlog.get_logger()
 
@@ -18,7 +19,10 @@ class RequestTracingMiddleware(BaseHTTPMiddleware):
     """Injects X-Request-ID and X-Response-Time into every response."""
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        request_id = normalize_or_generate_request_id(
+            request.headers.get("X-Request-ID")
+        )
+        request.state.request_id = request_id
         start = time.perf_counter()
 
         # Bind request_id to structlog context for this coroutine

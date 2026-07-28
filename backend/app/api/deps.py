@@ -4,7 +4,6 @@ FastAPI dependency functions shared across all routers.
 Usage:
     from app.api.deps import get_current_role, require_role, DBSession, RedisClient
 """
-import uuid
 from typing import Annotated
 
 import structlog
@@ -14,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.redis_client import get_redis
+from app.request_ids import normalize_or_generate_request_id
 from app.security import decode_token
 
 log = structlog.get_logger()
@@ -61,7 +61,7 @@ def require_role(*allowed_roles: str):
 # ── Request Tracing ───────────────────────────────────────────────────────────
 async def get_request_id(x_request_id: Annotated[str | None, Header()] = None) -> str:
     """Return the incoming X-Request-ID or generate a new UUID."""
-    return x_request_id or str(uuid.uuid4())
+    return normalize_or_generate_request_id(x_request_id)
 
 
 RequestID = Annotated[str, Depends(get_request_id)]

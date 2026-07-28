@@ -50,8 +50,9 @@ class Settings(BaseSettings):
     redis_port: int = 6379
     redis_db: int = 0
 
-    # ── Browser authentication foundation (HTTP auth remains disabled) ──────
+    # ── Browser authentication (default-off until runtime validation) ───────
     browser_auth_enabled: bool = False
+    browser_allowed_origin: str = ""
     browser_session_redis_db: Literal[4] = 4
     browser_session_idle_seconds: int = Field(default=1800, ge=1, le=1800)
     browser_session_absolute_seconds: int = Field(default=28800, ge=1, le=28800)
@@ -59,9 +60,15 @@ class Settings(BaseSettings):
     browser_max_sessions_per_account: int = Field(default=2, ge=1, le=2)
     browser_session_activity_coalesce_seconds: int = Field(default=60, ge=0)
     browser_session_hmac_secret: str = _read_secret("browser_session_hmac_secret", "")
+    browser_csrf_hmac_secret: str = _read_secret("browser_csrf_hmac_secret", "")
     browser_idempotency_hmac_secret: str = _read_secret(
         "browser_idempotency_hmac_secret", ""
     )
+    browser_preauth_seconds: int = Field(default=600, ge=60, le=600)
+    browser_login_account_failure_limit: Literal[5] = 5
+    browser_login_source_failure_limit: Literal[20] = 20
+    browser_reauth_failure_limit: Literal[5] = 5
+    browser_auth_rate_window_seconds: Literal[900] = 900
     operator_audit_retention_days: int = Field(default=365, ge=365)
     operator_security_metadata_retention_days: int = Field(default=90, ge=1, le=90)
     temporary_password_lifetime_seconds: int = Field(default=86400, ge=1, le=86400)

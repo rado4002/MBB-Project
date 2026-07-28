@@ -211,6 +211,9 @@ local csrf_generation = tonumber(redis.call('HGET', KEYS[1], 'csrf_generation') 
 local values = redis.call('HGETALL', KEYS[1])
 redis.call('HSET', KEYS[2], unpack(values))
 redis.call('HSET', KEYS[2], 'session_ref', ARGV[5], 'csrf_generation', csrf_generation)
+if ARGV[6] ~= '' then
+    redis.call('HSET', KEYS[2], 'recent_reauthenticated_at_epoch', ARGV[6])
+end
 redis.call('EXPIREAT', KEYS[2], absolute_expiry)
 local account_index = ARGV[3] .. account_id
 local score = redis.call('ZSCORE', account_index, ARGV[4]) or redis.call('HGET', KEYS[1], 'created_at_epoch')
@@ -470,7 +473,11 @@ class BrowserSessionStore:
         return ActivityUpdateResult(active=result > 0, updated=result == 2)
 
     async def rotate_session(
-        self, raw_token: str, *, now_epoch: int | None = None
+        self,
+        raw_token: str,
+        *,
+        now_epoch: int | None = None,
+        recent_reauthenticated_at_epoch: int | None = None,
     ) -> RotatedBrowserSession | None:
         old_ref = self.session_ref(raw_token)
         new_token = self.generate_token()
@@ -484,6 +491,11 @@ class BrowserSessionStore:
                 ACCOUNT_INDEX_PREFIX,
                 old_ref,
                 new_ref,
+                (
+                    ""
+                    if recent_reauthenticated_at_epoch is None
+                    else int(recent_reauthenticated_at_epoch)
+                ),
             ],
         )
         if int(result) != 1:

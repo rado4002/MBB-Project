@@ -3,11 +3,17 @@ from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 from sqlalchemy import text
 
+from app.api.browser_auth_errors import (
+    BrowserAuthError,
+    browser_error_response,
+    browser_validation_error_response,
+)
 from app.config import get_settings
 
 settings = get_settings()
@@ -78,6 +84,18 @@ Instrumentator(
 
 
 # ── Global Exception Handler ──────────────────────────────────────────────────
+@app.exception_handler(BrowserAuthError)
+async def browser_auth_exception_handler(request: Request, exc: BrowserAuthError):
+    return browser_error_response(request, exc)
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(
+    request: Request, exc: RequestValidationError
+):
+    return await browser_validation_error_response(request, exc)
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     log.error("unhandled_exception", path=request.url.path, error=str(exc))
@@ -184,6 +202,7 @@ async def api_health(request: Request):
 from app.api.v1 import (  # noqa: E402  (after app creation intentional)
     admin,
     analytics,
+    auth,
     conversations,
     customers,
     leads,
@@ -206,6 +225,7 @@ app.include_router(maps.router, prefix=_V1_PREFIX)
 app.include_router(customers.router, prefix=_V1_PREFIX)
 app.include_router(analytics.router, prefix=_V1_PREFIX)
 app.include_router(admin.router, prefix=_V1_PREFIX)
+app.include_router(auth.router, prefix=_V1_PREFIX)
 
 
 # ── Middleware (added AFTER routers so order is correct) ──────────────────────
@@ -215,9 +235,13 @@ app.add_middleware(MaintenanceModeMiddleware)
 app.add_middleware(RequestTracingMiddleware)
 
 # CORS — internal VPS only (Streamlit dashboard on same host)
+_cors_origins = ["http://localhost:8501", "http://dashboard:8501"]
+if settings.browser_allowed_origin:
+    _cors_origins.append(settings.browser_allowed_origin)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8501", "http://dashboard:8501"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT"],
     allow_headers=["*"],

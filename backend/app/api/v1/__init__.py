@@ -2,6 +2,7 @@
 from . import (
     admin,
     analytics,
+    auth,
     conversations,
     customers,
     leads,
@@ -15,6 +16,7 @@ from . import (
 __all__ = [
     "admin",
     "analytics",
+    "auth",
     "conversations",
     "customers",
     "leads",
