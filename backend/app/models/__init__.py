@@ -10,6 +10,11 @@ from app.models.payment import Payment
 from app.models.escalation_ticket import EscalationTicket
 from app.models.admin_audit_log import AdminAuditLog
 from app.models.lead_stage_transition import LeadStageTransition
+from app.models.operator_account import OperatorAccount
+from app.models.operator_audit import (
+    OperatorAuditEvent,
+    OperatorAuditSecurityMetadata,
+)
 
 __all__ = [
     "Customer",
@@ -23,4 +28,7 @@ __all__ = [
     "EscalationTicket",
     "AdminAuditLog",
     "LeadStageTransition",
+    "OperatorAccount",
+    "OperatorAuditEvent",
+    "OperatorAuditSecurityMetadata",
 ]

@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -48,6 +49,22 @@ class Settings(BaseSettings):
     redis_host: str = "redis"
     redis_port: int = 6379
     redis_db: int = 0
+
+    # ── Browser authentication foundation (HTTP auth remains disabled) ──────
+    browser_auth_enabled: bool = False
+    browser_session_redis_db: Literal[4] = 4
+    browser_session_idle_seconds: int = Field(default=1800, ge=1, le=1800)
+    browser_session_absolute_seconds: int = Field(default=28800, ge=1, le=28800)
+    browser_recent_reauth_seconds: int = Field(default=600, ge=1, le=600)
+    browser_max_sessions_per_account: int = Field(default=2, ge=1, le=2)
+    browser_session_activity_coalesce_seconds: int = Field(default=60, ge=0)
+    browser_session_hmac_secret: str = _read_secret("browser_session_hmac_secret", "")
+    browser_idempotency_hmac_secret: str = _read_secret(
+        "browser_idempotency_hmac_secret", ""
+    )
+    operator_audit_retention_days: int = Field(default=365, ge=365)
+    operator_security_metadata_retention_days: int = Field(default=90, ge=1, le=90)
+    temporary_password_lifetime_seconds: int = Field(default=86400, ge=1, le=86400)
 
     # ── Celery ────────────────────────────────────────────────────────────────
     celery_broker_url: str = "redis://redis:6379/0"
@@ -108,6 +125,13 @@ class Settings(BaseSettings):
     @property
     def redis_url(self) -> str:
         return f"redis://{self.redis_host}:{self.redis_port}/{self.redis_db}"
+
+    @property
+    def browser_session_redis_url(self) -> str:
+        return (
+            f"redis://{self.redis_host}:{self.redis_port}/"
+            f"{self.browser_session_redis_db}"
+        )
 
     @property
     def baileys_url(self) -> str:

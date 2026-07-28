@@ -33,6 +33,7 @@ prometheus-client>=0.8.0       # Prometheus metrics SDK (Gauge, Counter, Histogr
 # ── Security ──────────────────────────────────────────────────────────────────
 python-jose[cryptography]==3.3.0   # JWT handling
 passlib[bcrypt]==1.7.4             # Password hashing
+argon2-cffi==23.1.0                # Operator password hashing (Argon2id)
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 pytz==2024.2                   # Timezone (Africa/Kinshasa)
