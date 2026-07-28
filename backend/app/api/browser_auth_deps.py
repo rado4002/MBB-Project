@@ -181,7 +181,7 @@ async def get_current_human(
                 OperatorAccount.account_id == session_context.record.account_id
             )
         )
-    except SQLAlchemyError as exc:
+    except (SQLAlchemyError, OSError) as exc:
         raise BrowserAuthError(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             code="authentication_unavailable",

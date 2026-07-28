@@ -541,20 +541,50 @@ async def test_redis_and_database_failures_are_typed_and_fail_closed(redis_clien
         assert response.json()["error"]["code"] == "authentication_unavailable"
         assert "private redis failure" not in response.text
 
-    database = FakeDatabase(account, scalar_error=SQLAlchemyError("private db failure"))
-    database_app = _app(_settings(), redis_client, database)
+    for database_error in (
+        SQLAlchemyError("private db failure"),
+        ConnectionRefusedError("private db failure"),
+    ):
+        database = FakeDatabase(account, scalar_error=database_error)
+        database_app = _app(_settings(), redis_client, database)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=database_app), base_url=ORIGIN
+        ) as client:
+            csrf_token, _ = await _csrf(client)
+            response = await client.post(
+                "/api/v1/auth/login",
+                headers=_headers(csrf_token),
+                json={"username": "operator.one", "password": PASSWORD},
+            )
+            assert response.status_code == 503
+            assert response.json()["error"]["code"] == "authentication_unavailable"
+            assert "private db failure" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_database_connection_refusal_during_session_validation_fails_closed(
+    redis_client,
+) -> None:
+    account = _account()
+    database = FakeDatabase(account)
+    app = _app(_settings(), redis_client, database)
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=database_app), base_url=ORIGIN
+        transport=httpx.ASGITransport(app=app), base_url=ORIGIN
     ) as client:
         csrf_token, _ = await _csrf(client)
-        response = await client.post(
+        login = await client.post(
             "/api/v1/auth/login",
             headers=_headers(csrf_token),
             json={"username": "operator.one", "password": PASSWORD},
         )
-        assert response.status_code == 503
-        assert response.json()["error"]["code"] == "authentication_unavailable"
-        assert "private db failure" not in response.text
+        assert login.status_code == 200
+
+        database.scalar_error = ConnectionRefusedError("private db failure")
+        response = await client.get("/api/v1/auth/session")
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "authentication_unavailable"
+    assert "private db failure" not in response.text
 
 
 @pytest.mark.asyncio

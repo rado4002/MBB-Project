@@ -208,7 +208,7 @@ async def csrf(
                         OperatorAccount.account_id == record.account_id
                     )
                 )
-            except SQLAlchemyError as exc:
+            except (SQLAlchemyError, OSError) as exc:
                 raise _raise_unavailable(exc) from exc
             now = datetime.now(timezone.utc)
             valid = (
@@ -347,7 +347,7 @@ async def login(
             if normalized_username
             else None
         )
-    except SQLAlchemyError as exc:
+    except (SQLAlchemyError, OSError) as exc:
         raise _raise_unavailable(exc) from exc
     password = body.password.get_secret_value()
     verified = verify_password(
@@ -409,7 +409,7 @@ async def login(
             metadata={"oldest_session_evicted": bool(created.removed_session_refs)},
         )
         await db.commit()
-    except SQLAlchemyError as exc:
+    except (SQLAlchemyError, OSError) as exc:
         await state.sessions.revoke_session(created.token)
         raise _raise_unavailable(exc) from exc
     principal = BrowserPrincipal(
@@ -486,7 +486,7 @@ async def logout(
                     OperatorAccount.account_id == record.account_id
                 )
             )
-        except SQLAlchemyError as exc:
+        except (SQLAlchemyError, OSError) as exc:
             raise _raise_unavailable(exc) from exc
         try:
             await state.sessions.revoke_session(raw_token)
@@ -608,7 +608,7 @@ async def reauthenticate(
             account=principal.account,
         )
         await db.commit()
-    except SQLAlchemyError as exc:
+    except (SQLAlchemyError, OSError) as exc:
         await state.sessions.revoke_session(rotated.token)
         raise _raise_unavailable(exc) from exc
     principal = BrowserPrincipal(
@@ -739,7 +739,7 @@ async def change_password(
         raise _raise_unavailable(exc) from exc
     try:
         await db.commit()
-    except SQLAlchemyError as exc:
+    except (SQLAlchemyError, OSError) as exc:
         await state.sessions.revoke_session(created.token)
         raise _raise_unavailable(exc) from exc
     principal = BrowserPrincipal(
