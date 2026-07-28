@@ -412,14 +412,19 @@ async def test_temporary_session_is_restricted_until_password_change(redis_clien
 
 
 @pytest.mark.asyncio
-async def test_password_change_rejects_weak_or_reused_password(redis_client) -> None:
+async def test_password_change_uses_central_policy_and_rejects_reuse(redis_client) -> None:
     account = _account(temporary=True)
     app = _app(_settings(), redis_client, FakeDatabase(account))
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url=ORIGIN
     ) as client:
         login = await _login(client)
-        for new_password in ("short", PASSWORD):
+        for new_password in (
+            "short",
+            PASSWORD,
+            "safe Operator_One suffix",
+            "Correct Horse Battery Staple",
+        ):
             rejected = await client.post(
                 "/api/v1/auth/password/change",
                 headers=_headers(login.json()["csrf_token"]),

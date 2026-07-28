@@ -39,7 +39,11 @@ from app.operator_identity.browser_sessions import (
     InvalidSessionToken,
     SessionStoreUnavailable,
 )
-from app.operator_identity.passwords import hash_password, verify_password
+from app.operator_identity.passwords import (
+    hash_password,
+    validate_user_chosen_password,
+    verify_password,
+)
 from app.schemas.auth import (
     BrowserSessionResponse,
     CsrfResponse,
@@ -174,21 +178,6 @@ def _temporary_credential_valid(account: OperatorAccount, now: datetime) -> bool
         account.temporary_password_expires_at is not None
         and account.temporary_password_expires_at > now
     )
-
-
-def _validate_new_password(password: str, username: str) -> None:
-    if not 12 <= len(password) <= 128:
-        raise ValueError
-    if any(unicodedata.category(character) == "Cc" for character in password):
-        raise ValueError
-    classes = (
-        any(character.islower() for character in password),
-        any(character.isupper() for character in password),
-        any(character.isdigit() for character in password),
-        any(not character.isalnum() for character in password),
-    )
-    if sum(classes) < 3 or username in password.lower():
-        raise ValueError
 
 
 @router.get("/csrf", response_model=CsrfResponse)
@@ -704,9 +693,12 @@ async def change_password(
             message="The current password is invalid.",
         )
     try:
-        _validate_new_password(new_password, principal.account.username_normalized)
-        if verify_password(principal.account.password_hash, new_password):
-            raise ValueError
+        validate_user_chosen_password(
+            new_password,
+            username=principal.account.username_normalized,
+            display_name=principal.account.display_name,
+            current_password_hash=principal.account.password_hash,
+        )
     except ValueError as exc:
         raise BrowserAuthError(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
