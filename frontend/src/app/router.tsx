@@ -7,7 +7,7 @@ import { PageLoadingState } from '../components/PageLoadingState'
 import { AccountPage } from '../features/account/AccountPage'
 import { LoginPage } from '../features/auth/LoginPage'
 import { PasswordChangePage } from '../features/auth/PasswordChangePage'
-import { InboxFoundationPage } from '../features/inbox/InboxFoundationPage'
+import { ConversationQueuePage } from '../features/inbox/ConversationQueuePage'
 import { NotFoundPage } from '../features/NotFoundPage'
 import { SessionPage } from '../features/session/SessionPage'
 
@@ -49,7 +49,7 @@ export function AppRouter() {
           </ProtectedRoute>
         }
       >
-        <Route path="/inbox" element={<InboxFoundationPage />} />
+        <Route path="/inbox" element={<ConversationQueuePage />} />
         <Route path="/account" element={<AccountPage />} />
         <Route path="/session" element={<SessionPage />} />
       </Route>

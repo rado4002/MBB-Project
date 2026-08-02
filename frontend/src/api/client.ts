@@ -10,12 +10,56 @@ import { ApiError, normalizeApiError } from './errors'
 
 const AUTH_BASE = '/api/v1/auth'
 
-interface RequestOptions {
+export interface RequestOptions {
   method?: 'GET' | 'POST'
   body?: object
   csrfToken?: string
   signal?: AbortSignal
   notifySessionExpiration?: boolean
+}
+
+export async function requestJson<T>(
+  path: string,
+  options: RequestOptions = {},
+  onSessionExpired: () => void = () => undefined,
+): Promise<T> {
+  if (!path.startsWith('/')) throw new Error('API paths must be relative')
+  const method = options.method ?? 'GET'
+  const headers = new Headers()
+  if (options.body !== undefined) {
+    headers.set('Content-Type', 'application/json')
+  }
+  if (options.csrfToken) headers.set('X-CSRF-Token', options.csrfToken)
+
+  const response = await fetch(path, {
+    method,
+    credentials: 'same-origin',
+    cache: 'no-store',
+    headers,
+    ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
+  })
+
+  if (!response.ok) {
+    const error = await normalizeApiError(response)
+    if (
+      options.notifySessionExpiration !== false &&
+      error.category === 'session_expired'
+    ) {
+      onSessionExpired()
+    }
+    throw error
+  }
+
+  try {
+    return (await response.json()) as T
+  } catch {
+    throw new ApiError({
+      status: response.status,
+      code: 'malformed_success_response',
+      category: 'unavailable',
+    })
+  }
 }
 
 export interface AuthApiClient {
@@ -38,45 +82,8 @@ export interface AuthApiClient {
 export function createAuthApiClient(
   onSessionExpired: () => void = () => undefined,
 ): AuthApiClient {
-  async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-    if (!path.startsWith('/')) throw new Error('API paths must be relative')
-    const method = options.method ?? 'GET'
-    const headers = new Headers()
-    if (options.body !== undefined) {
-      headers.set('Content-Type', 'application/json')
-    }
-    if (options.csrfToken) headers.set('X-CSRF-Token', options.csrfToken)
-
-    const response = await fetch(path, {
-      method,
-      credentials: 'same-origin',
-      cache: 'no-store',
-      headers,
-      ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
-      ...(options.signal ? { signal: options.signal } : {}),
-    })
-
-    if (!response.ok) {
-      const error = await normalizeApiError(response)
-      if (
-        options.notifySessionExpiration !== false &&
-        error.category === 'session_expired'
-      ) {
-        onSessionExpired()
-      }
-      throw error
-    }
-
-    try {
-      return (await response.json()) as T
-    } catch {
-      throw new ApiError({
-        status: response.status,
-        code: 'malformed_success_response',
-        category: 'unavailable',
-      })
-    }
-  }
+  const request = <T,>(path: string, options: RequestOptions = {}) =>
+    requestJson<T>(path, options, onSessionExpired)
 
   return {
     getCsrf: (signal) =>

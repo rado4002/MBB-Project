@@ -20,6 +20,7 @@ interface AuthContextValue extends AuthState {
   reauthenticate(password: string): Promise<BrowserSession>
   logout(): Promise<void>
   retryLogout(): Promise<void>
+  handleSessionExpired(): void
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -169,8 +170,18 @@ export function AuthProvider({
       reauthenticate,
       logout,
       retryLogout,
+      handleSessionExpired: expireSession,
     }),
-    [state, initialize, login, changePassword, reauthenticate, logout, retryLogout],
+    [
+      state,
+      initialize,
+      login,
+      changePassword,
+      reauthenticate,
+      logout,
+      retryLogout,
+      expireSession,
+    ],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

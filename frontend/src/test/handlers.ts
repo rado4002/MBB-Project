@@ -13,4 +13,7 @@ export const handlers = [
       { status: 401 },
     ),
   ),
+  http.get('/api/v1/operator/conversations', () =>
+    HttpResponse.json({ items: [], next_cursor: null }),
+  ),
 ]

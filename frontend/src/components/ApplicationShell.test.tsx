@@ -21,6 +21,7 @@ describe('account menu', () => {
     server.use(...authenticatedHandlers())
     const user = userEvent.setup()
     renderApp('/inbox')
+    await screen.findByRole('heading', { name: 'No conversations are available' })
     const trigger = await screen.findByRole('button', { name: /Omar Operator/ })
     trigger.focus()
     await user.keyboard('{Enter}')
