@@ -75,4 +75,37 @@ describe('E1 conversation queue client', () => {
       retryAfterSeconds: 12,
     })
   })
+
+  it('requests conversation detail through the relative E1 route', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ conversation_id: 'conversation-id' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await createConversationApiClient().getConversation('conversation/id')
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/v1/operator/conversations/conversation%2Fid')
+    expect(init).toMatchObject({ method: 'GET', credentials: 'same-origin', cache: 'no-store' })
+    expect(new Headers(init?.headers).has('X-CSRF-Token')).toBe(false)
+  })
+
+  it('keeps the stable older-message cursor in the API request only', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ items: [], next_older_cursor: null }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await createConversationApiClient().getMessages('conversation-id', 'older+/cursor=')
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/api/v1/operator/conversations/conversation-id/messages?before=older%2B%2Fcursor%3D',
+    )
+  })
 })

@@ -312,7 +312,7 @@ describe('read-only conversation queue', () => {
     await waitFor(() => expect(screen.getByLabelText('Language')).toHaveValue('french'))
   })
 
-  it('is keyboard accessible, non-interactive per row, and contains no unsupported controls or fake data', async () => {
+  it('offers accessible row navigation and contains no unsupported controls or fake data', async () => {
     server.use(
       authenticated(),
       http.get('/api/v1/operator/conversations', () =>
@@ -324,8 +324,11 @@ describe('read-only conversation queue', () => {
     await screen.findByText('Marie Client')
     await user.tab()
     expect(document.activeElement).toBeTruthy()
-    expect(screen.getByRole('article')).not.toHaveAttribute('tabindex')
-    expect(screen.getByRole('article').closest('a, button')).toBeNull()
+    const conversationLink = screen.getByRole('link', { name: 'Conversation with Marie Client' })
+    expect(conversationLink).toHaveAttribute(
+      'href',
+      '/inbox/11111111-1111-4111-8111-111111111111',
+    )
     expect(screen.queryByRole('searchbox')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /reply|assign|take over|resolve|escalate|compose|AI/i })).not.toBeInTheDocument()
     expect(screen.queryByText(/Jane Doe|Lorem ipsum|Priority|Unread/i)).not.toBeInTheDocument()

@@ -1,5 +1,9 @@
 import type { BrowserSession, HumanRole } from '../api/contracts/auth'
-import type { OperatorConversationQueueItem } from '../api/contracts/conversations'
+import type {
+  OperatorConversationDetail,
+  OperatorConversationQueueItem,
+  OperatorMessageItem,
+} from '../api/contracts/conversations'
 
 export function sessionFixture(
   role: HumanRole = 'operator',
@@ -40,5 +44,45 @@ export function conversationFixture(
     },
     awaiting_response_since: '2026-08-02T12:30:00Z',
     open_escalation: { exists: false },
+  }
+}
+
+export function conversationDetailFixture(
+  id = '11111111-1111-4111-8111-111111111111',
+): OperatorConversationDetail {
+  return {
+    conversation_id: id,
+    status: 'active',
+    language: 'french',
+    message_count: 4,
+    updated_at: '2026-08-02T12:30:00Z',
+    customer: {
+      display_name: 'Marie Client',
+      phone_masked: '***5678',
+    },
+    lead: {
+      score: 'warm',
+      stage: 'qualifying',
+      intent: 'product_information',
+      product_interests: ['Solar starter kit'],
+    },
+    open_escalation: { exists: false },
+  }
+}
+
+export function messageFixture(
+  id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+  overrides: Partial<OperatorMessageItem> = {},
+): OperatorMessageItem {
+  return {
+    message_id: id,
+    occurred_at: '2026-08-02T12:30:00Z',
+    direction: 'inbound',
+    sender_type: 'customer',
+    content_type: 'text',
+    text: 'Bonjour, je souhaite des informations.',
+    media: null,
+    language: 'french',
+    ...overrides,
   }
 }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useLocation, useParams, useSearchParams } from 'react-router-dom'
 import { createConversationApiClient } from '../../api/conversations'
 import {
   conversationLanguages,
@@ -11,6 +11,7 @@ import {
 import { errorMessage, type ApiError } from '../../api/errors'
 import { useAuth } from '../../auth/AuthProvider'
 import { InlineAlert } from '../../components/InlineAlert'
+import { ConversationWorkspace } from './ConversationWorkspace'
 import { readConversationFilters, writeConversationFilters } from './filterState'
 import { useConversationQueue } from './useConversationQueue'
 
@@ -47,12 +48,25 @@ function previewFor(item: OperatorConversationQueueItem) {
   return item.latest_message.preview
 }
 
-function QueueRow({ item }: { item: OperatorConversationQueueItem }) {
+function QueueRow({
+  item,
+  selected,
+  search,
+}: {
+  item: OperatorConversationQueueItem
+  selected: boolean
+  search: string
+}) {
   const customerName = item.customer.display_name?.trim() || 'Customer'
   const latestTime = item.latest_message?.occurred_at
   return (
-    <li className="conversation-row">
-      <article aria-label={`Conversation with ${customerName}`}>
+    <li className={`conversation-row${selected ? ' conversation-row--selected' : ''}`}>
+      <Link
+        className="conversation-row__link"
+        to={{ pathname: `/inbox/${encodeURIComponent(item.conversation_id)}`, search }}
+        aria-current={selected ? 'page' : undefined}
+      >
+        <article aria-label={`Conversation with ${customerName}`}>
         <div className="conversation-row__heading">
           <div>
             <h2>{customerName}</h2>
@@ -83,7 +97,8 @@ function QueueRow({ item }: { item: OperatorConversationQueueItem }) {
             </time>
           </p>
         ) : null}
-      </article>
+        </article>
+      </Link>
     </li>
   )
 }
@@ -98,6 +113,8 @@ function queueErrorText(error: ApiError) {
 export function ConversationQueuePage() {
   const headingRef = useRef<HTMLHeadingElement>(null)
   const auth = useAuth()
+  const location = useLocation()
+  const { conversationId } = useParams<{ conversationId?: string }>()
   const [searchParams, setSearchParams] = useSearchParams()
   const filters = useMemo(
     () => readConversationFilters(searchParams),
@@ -114,7 +131,9 @@ export function ConversationQueuePage() {
   const queue = useConversationQueue(client, filters)
   const activeFilters = Object.entries(filters) as [keyof ConversationFilters, string][]
 
-  useEffect(() => headingRef.current?.focus(), [])
+  useEffect(() => {
+    if (!conversationId) headingRef.current?.focus()
+  }, [conversationId])
   useEffect(() => {
     if (searchParams.toString() !== normalizedSearch) {
       setSearchParams(normalizedSearch, { replace: true })
@@ -131,7 +150,7 @@ export function ConversationQueuePage() {
   const clearFilters = () => setSearchParams(new URLSearchParams())
 
   return (
-    <>
+    <div className={`inbox-page${conversationId ? ' inbox-page--selected' : ''}`}>
       <header className="page-header inbox-header">
         <div>
           <h1 tabIndex={-1} ref={headingRef}>Inbox</h1>
@@ -183,7 +202,7 @@ export function ConversationQueuePage() {
         ) : null}
       </section>
 
-      <div className="inbox-layout">
+      <div className={`inbox-layout${conversationId ? ' inbox-layout--selected' : ''}`}>
         <section className="queue-panel" aria-labelledby="queue-heading" aria-busy={queue.loading || queue.refreshing}>
           <h2 id="queue-heading" className="visually-hidden">Conversation queue</h2>
           {queue.refreshing ? <p className="queue-status" role="status">Refreshing conversations…</p> : null}
@@ -206,7 +225,14 @@ export function ConversationQueuePage() {
           ) : queue.items.length > 0 ? (
             <>
               <ul className="conversation-list">
-                {queue.items.map((item) => <QueueRow key={item.conversation_id} item={item} />)}
+                {queue.items.map((item) => (
+                  <QueueRow
+                    key={item.conversation_id}
+                    item={item}
+                    selected={item.conversation_id === conversationId}
+                    search={location.search}
+                  />
+                ))}
               </ul>
               {queue.nextCursor ? (
                 <div className="load-more">
@@ -218,13 +244,22 @@ export function ConversationQueuePage() {
             </>
           ) : null}
         </section>
-        <aside className="queue-workspace" aria-label="Conversation workspace">
-          <div>
-            <h2>No conversation selected</h2>
-            <p>Selecting and reading a conversation will be added in a later phase.</p>
-          </div>
-        </aside>
+        {conversationId ? (
+          <ConversationWorkspace
+            key={conversationId}
+            client={client}
+            conversationId={conversationId}
+            backTo={`/inbox${location.search}`}
+          />
+        ) : (
+          <aside className="queue-workspace" aria-label="Conversation workspace">
+            <div>
+              <h2>No conversation selected</h2>
+              <p>Choose a conversation from the queue to read its history and limited context.</p>
+            </div>
+          </aside>
+        )}
       </div>
-    </>
+    </div>
   )
 }

@@ -47,3 +47,47 @@ export interface OperatorConversationQueueResponse {
   items: OperatorConversationQueueItem[]
   next_cursor: string | null
 }
+
+export interface OperatorLeadSummary {
+  score: string | null
+  stage: string | null
+  intent: string | null
+  product_interests: string[]
+}
+
+export interface OperatorConversationDetail {
+  conversation_id: string
+  status: ConversationStatus
+  language: ConversationLanguage
+  message_count: number
+  updated_at: string
+  customer: {
+    display_name: string | null
+    phone_masked: string
+  }
+  lead: OperatorLeadSummary | null
+  open_escalation: {
+    exists: boolean
+  }
+}
+
+export type MessageSenderType = 'customer' | 'operator' | 'system' | 'unknown'
+
+export interface OperatorMessageItem {
+  message_id: string
+  occurred_at: string
+  direction: MessageDirection
+  sender_type: MessageSenderType
+  content_type: MessageContentType
+  text: string | null
+  media: {
+    kind: 'voice_note' | 'image'
+    available: false
+  } | null
+  language: ConversationLanguage
+}
+
+export interface OperatorMessageHistoryResponse {
+  items: OperatorMessageItem[]
+  next_older_cursor: string | null
+}

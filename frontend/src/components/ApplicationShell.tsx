@@ -13,7 +13,9 @@ export function ApplicationShell() {
   const auth = useAuth()
   const location = useLocation()
   const navigate = useNavigate()
-  const pageName = pageNames[location.pathname] ?? 'MBB'
+  const pageName = location.pathname.startsWith('/inbox/')
+    ? 'Inbox'
+    : (pageNames[location.pathname] ?? 'MBB')
 
   useEffect(() => {
     document.title = `${pageName} · MBB`

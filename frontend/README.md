@@ -4,13 +4,13 @@
 
 This application is the browser-session-based interface foundation for the first MBB read-only Inbox. It is separate from the Streamlit dashboard and communicates only with the same-origin browser-authentication API.
 
-## Current F3 scope
+## Current F4 scope
 
-F3 retains browser session initialization, sign-in, mandatory password change, protected routing, the authenticated shell, and read-only account/session information. It connects `/inbox` to `GET /api/v1/operator/conversations` for a read-only conversation queue with the E1-supported status, escalation-state, and language filters, background refresh, and memory-only cursor pagination.
+F4 retains browser session initialization, sign-in, mandatory password change, protected routing, the authenticated shell, read-only account/session information, and the F3 queue. It adds deep-linked conversation selection through `/inbox/:conversationId`, read-only E1 conversation detail, independently loaded message history, memory-only older-message pagination, and limited lead context.
 
 ## Explicit exclusions
 
-Conversation selection, detail routing, message history, and limited customer or conversation context begin in F4. F3 includes no business writes, replies, assignment, escalation details or actions, search, user-selected sorting, AI behavior, direct service or database access, or runtime HTTPS proof. Real isolated HTTPS browser validation remains F6.
+F4 includes no business writes, replies, assignment, ownership, escalation details or actions, search, user-selected sorting, delivery status, media viewing, AI inference, direct service or database access, or runtime HTTPS proof. Responsive workflow refinement remains F5, and real isolated HTTPS browser validation remains F6.
 
 ## Security rules
 
@@ -23,6 +23,7 @@ Conversation selection, detail routing, message history, and limited customer or
 - Response-header `X-Request-ID` takes precedence over a body request ID; only the safe normalized reference is presented.
 - Only valid supported filters are serialized into the URL. Opaque cursors, phone values, previews, and other conversation data remain outside URLs and browser persistence.
 - The queue renders the backend-masked phone as received, treats customer text as plain text, and replaces non-text previews with safe local media labels.
+- Conversation details and history remain in React memory only. Message content is rendered as plain text, provider media locations are never exposed, and older-page cursors never enter the browser URL.
 
 ## Development commands
 
@@ -41,11 +42,11 @@ npm run build
 
 ## Architecture
 
-- `src/app/` defines the browser router and the five supported routes: `/login`, `/password-change`, `/inbox`, `/account`, and `/session`.
+- `src/app/` defines the browser router and supported routes: `/login`, `/password-change`, `/inbox`, `/inbox/:conversationId`, `/account`, and `/session`.
 - `src/auth/` owns an explicit context-and-reducer state machine. Startup always reconstructs identity through `GET /api/v1/auth/session`; protected navigation is not rendered while that request is unresolved.
-- `src/api/` is the single typed `fetch` boundary for browser authentication and the minimized E1 queue. It applies request security defaults, normalizes E1 and lowercase authentication errors, supports cancellation and throttling metadata, and centrally removes protected state on session expiration.
-- `src/components/` and `src/features/` contain the shared shell, authentication screens, and read-only queue. Administrator and Operator share the same shell and the only primary navigation item is Inbox.
-- `src/features/inbox/` normalizes supported URL filters, aborts or ignores stale list requests, preserves rows during manual refresh, keeps cursors in memory, and deduplicates appended pages by `conversation_id`.
+- `src/api/` is the single typed `fetch` boundary for browser authentication and minimized E1 conversation contracts. It applies request security defaults, normalizes E1 and lowercase authentication errors, supports cancellation and throttling metadata, and centrally removes protected state on session expiration.
+- `src/components/` and `src/features/` contain the shared shell, authentication screens, queue, and read-only workspace. Administrator and Operator share the same shell and the only primary navigation item is Inbox.
+- `src/features/inbox/` normalizes supported URL filters, aborts or ignores stale list and selection requests, preserves rows during manual refresh, keeps cursors in memory, and deduplicates queue pages by `conversation_id` and message pages by `message_id`. Detail and history failures remain scoped to their own regions.
 - `src/styles/` defines light-mode design tokens and responsive component styling with visible focus and reduced-motion support. It uses system fonts and local inline SVG only.
 - Tests use Vitest, jsdom, Testing Library, `user-event`, MSW contract handlers, keyboard-oriented assertions, and axe-core automated accessibility checks. They do not start backend or infrastructure services.
 

@@ -50,6 +50,7 @@ export function AppRouter() {
         }
       >
         <Route path="/inbox" element={<ConversationQueuePage />} />
+        <Route path="/inbox/:conversationId" element={<ConversationQueuePage />} />
         <Route path="/account" element={<AccountPage />} />
         <Route path="/session" element={<SessionPage />} />
       </Route>

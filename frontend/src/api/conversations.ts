@@ -1,7 +1,9 @@
 import { requestJson } from './client'
 import type {
   ConversationFilters,
+  OperatorConversationDetail,
   OperatorConversationQueueResponse,
+  OperatorMessageHistoryResponse,
 } from './contracts/conversations'
 
 export interface ConversationQueueRequest {
@@ -12,11 +14,20 @@ export interface ConversationQueueRequest {
 
 export interface ConversationApiClient {
   listConversations(request: ConversationQueueRequest): Promise<OperatorConversationQueueResponse>
+  getConversation(conversationId: string, signal?: AbortSignal): Promise<OperatorConversationDetail>
+  getMessages(
+    conversationId: string,
+    before?: string,
+    signal?: AbortSignal,
+  ): Promise<OperatorMessageHistoryResponse>
 }
 
 export function createConversationApiClient(
   onSessionExpired: () => void = () => undefined,
 ): ConversationApiClient {
+  const conversationPath = (conversationId: string) =>
+    `/api/v1/operator/conversations/${encodeURIComponent(conversationId)}`
+
   return {
     listConversations: ({ filters, cursor, signal }) => {
       const query = new URLSearchParams()
@@ -29,6 +40,22 @@ export function createConversationApiClient(
       const suffix = query.size ? `?${query.toString()}` : ''
       return requestJson<OperatorConversationQueueResponse>(
         `/api/v1/operator/conversations${suffix}`,
+        { signal },
+        onSessionExpired,
+      )
+    },
+    getConversation: (conversationId, signal) =>
+      requestJson<OperatorConversationDetail>(
+        conversationPath(conversationId),
+        { signal },
+        onSessionExpired,
+      ),
+    getMessages: (conversationId, before, signal) => {
+      const query = new URLSearchParams()
+      if (before) query.set('before', before)
+      const suffix = query.size ? `?${query.toString()}` : ''
+      return requestJson<OperatorMessageHistoryResponse>(
+        `${conversationPath(conversationId)}/messages${suffix}`,
         { signal },
         onSessionExpired,
       )
