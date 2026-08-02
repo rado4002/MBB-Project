@@ -16,6 +16,9 @@ export function ApplicationShell() {
   const pageName = location.pathname.startsWith('/inbox/')
     ? 'Inbox'
     : (pageNames[location.pathname] ?? 'MBB')
+  const inboxDestination = location.pathname.startsWith('/inbox')
+    ? { pathname: '/inbox', search: location.search }
+    : '/inbox'
 
   useEffect(() => {
     document.title = `${pageName} · MBB`
@@ -39,7 +42,7 @@ export function ApplicationShell() {
           MBB
         </a>
         <nav aria-label="Primary navigation">
-          <NavLink to="/inbox" className={({ isActive }) => (isActive ? 'active' : undefined)}>
+          <NavLink to={inboxDestination} className={({ isActive }) => (isActive ? 'active' : undefined)}>
             Inbox
           </NavLink>
         </nav>

@@ -4,13 +4,13 @@
 
 This application is the browser-session-based interface foundation for the first MBB read-only Inbox. It is separate from the Streamlit dashboard and communicates only with the same-origin browser-authentication API.
 
-## Current F4 scope
+## Current F5 scope
 
-F4 retains browser session initialization, sign-in, mandatory password change, protected routing, the authenticated shell, read-only account/session information, and the F3 queue. It adds deep-linked conversation selection through `/inbox/:conversationId`, read-only E1 conversation detail, independently loaded message history, memory-only older-message pagination, and limited lead context.
+F5 retains the F2 browser authentication foundation, F3 queue, and F4 read-only conversation workspace. It refines that existing workflow into a controlled three-region desktop layout, a two-region tablet layout with accessible contextual presentation, and a progressive mobile Inbox → Conversation → Details flow. It also preserves queue position and filters, makes history scrolling predictable, and adds focused loading, error, keyboard, and reduced-motion behavior.
 
 ## Explicit exclusions
 
-F4 includes no business writes, replies, assignment, ownership, escalation details or actions, search, user-selected sorting, delivery status, media viewing, AI inference, direct service or database access, or runtime HTTPS proof. Responsive workflow refinement remains F5, and real isolated HTTPS browser validation remains F6.
+F5 includes no new API contracts, business writes, replies, assignment, ownership, escalation details or actions, search, user-selected sorting, delivery status, media viewing, AI inference, direct service or database access, or runtime HTTPS proof. Real isolated HTTPS browser validation remains F6.
 
 ## Security rules
 
@@ -24,6 +24,7 @@ F4 includes no business writes, replies, assignment, ownership, escalation detai
 - Only valid supported filters are serialized into the URL. Opaque cursors, phone values, previews, and other conversation data remain outside URLs and browser persistence.
 - The queue renders the backend-masked phone as received, treats customer text as plain text, and replaces non-text previews with safe local media labels.
 - Conversation details and history remain in React memory only. Message content is rendered as plain text, provider media locations are never exposed, and older-page cursors never enter the browser URL.
+- Responsive context is a read-only modal drawer below the desktop breakpoint. It makes the application inert while open, traps keyboard focus, closes with Escape, and returns focus to its Details trigger.
 
 ## Development commands
 
@@ -46,8 +47,8 @@ npm run build
 - `src/auth/` owns an explicit context-and-reducer state machine. Startup always reconstructs identity through `GET /api/v1/auth/session`; protected navigation is not rendered while that request is unresolved.
 - `src/api/` is the single typed `fetch` boundary for browser authentication and minimized E1 conversation contracts. It applies request security defaults, normalizes E1 and lowercase authentication errors, supports cancellation and throttling metadata, and centrally removes protected state on session expiration.
 - `src/components/` and `src/features/` contain the shared shell, authentication screens, queue, and read-only workspace. Administrator and Operator share the same shell and the only primary navigation item is Inbox.
-- `src/features/inbox/` normalizes supported URL filters, aborts or ignores stale list and selection requests, preserves rows during manual refresh, keeps cursors in memory, and deduplicates queue pages by `conversation_id` and message pages by `message_id`. Detail and history failures remain scoped to their own regions.
-- `src/styles/` defines light-mode design tokens and responsive component styling with visible focus and reduced-motion support. It uses system fonts and local inline SVG only.
+- `src/features/inbox/` normalizes supported URL filters, aborts or ignores stale list and selection requests, preserves queue scroll and row focus when returning from a conversation, keeps cursors in memory, and deduplicates queue pages by `conversation_id` and message pages by `message_id`. Detail and history failures remain scoped to their own regions.
+- `src/styles/` defines light-mode design tokens and explicit mobile, tablet, and desktop layout boundaries. Queue, timeline, and desktop context use controlled scrolling; long Unicode content wraps safely; skeletons are static; focus and selected-row treatments remain distinct; and reduced-motion preferences disable animation.
 - Tests use Vitest, jsdom, Testing Library, `user-event`, MSW contract handlers, keyboard-oriented assertions, and axe-core automated accessibility checks. They do not start backend or infrastructure services.
 
 ## Dependency audit boundary

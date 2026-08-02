@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState, type Ref } from 'react'
 import { Link, useLocation, useParams, useSearchParams } from 'react-router-dom'
 import { createConversationApiClient } from '../../api/conversations'
 import {
@@ -51,52 +51,62 @@ function previewFor(item: OperatorConversationQueueItem) {
 function QueueRow({
   item,
   selected,
+  recentlyViewed,
   search,
+  linkRef,
+  onSelect,
 }: {
   item: OperatorConversationQueueItem
   selected: boolean
+  recentlyViewed: boolean
   search: string
+  linkRef: Ref<HTMLAnchorElement>
+  onSelect: (conversationId: string) => void
 }) {
   const customerName = item.customer.display_name?.trim() || 'Customer'
   const latestTime = item.latest_message?.occurred_at
   return (
-    <li className={`conversation-row${selected ? ' conversation-row--selected' : ''}`}>
+    <li
+      className={`conversation-row${selected ? ' conversation-row--selected' : ''}${recentlyViewed ? ' conversation-row--recent' : ''}`}
+    >
       <Link
         className="conversation-row__link"
         to={{ pathname: `/inbox/${encodeURIComponent(item.conversation_id)}`, search }}
         aria-current={selected ? 'page' : undefined}
+        ref={linkRef}
+        onClick={() => onSelect(item.conversation_id)}
       >
         <article aria-label={`Conversation with ${customerName}`}>
-        <div className="conversation-row__heading">
-          <div>
-            <h2>{customerName}</h2>
-            <p className="masked-phone">{item.customer.phone_masked}</p>
+          <div className="conversation-row__heading">
+            <div>
+              <h2>{customerName}</h2>
+              <p className="masked-phone">{item.customer.phone_masked}</p>
+            </div>
+            {latestTime ? (
+              <time dateTime={latestTime} aria-label={`Latest message ${formatTimestamp(latestTime)}`}>
+                {formatTimestamp(latestTime)}
+              </time>
+            ) : null}
           </div>
-          {latestTime ? (
-            <time dateTime={latestTime} aria-label={`Latest message ${formatTimestamp(latestTime)}`}>
-              {formatTimestamp(latestTime)}
-            </time>
+          <p className="conversation-preview">{previewFor(item)}</p>
+          {item.latest_message ? (
+            <p className="conversation-direction">
+              {item.latest_message.direction === 'inbound' ? 'Received' : 'Sent'}
+            </p>
           ) : null}
-        </div>
-        <p className="conversation-preview">{previewFor(item)}</p>
-        {item.latest_message ? (
-          <p className="conversation-direction">
-            {item.latest_message.direction === 'inbound' ? 'Received' : 'Sent'}
-          </p>
-        ) : null}
-        <div className="conversation-labels" aria-label="Conversation labels">
-          <span>{statusLabels[item.status]}</span>
-          <span>{languageLabels[item.language]}</span>
-          {item.open_escalation.exists ? <span>Open escalation</span> : null}
-        </div>
-        {item.awaiting_response_since ? (
-          <p className="awaiting-response">
-            Awaiting response since{' '}
-            <time dateTime={item.awaiting_response_since}>
-              {formatTimestamp(item.awaiting_response_since)}
-            </time>
-          </p>
-        ) : null}
+          <div className="conversation-labels" aria-label="Conversation labels">
+            <span>{statusLabels[item.status]}</span>
+            <span>{languageLabels[item.language]}</span>
+            {item.open_escalation.exists ? <span>Open escalation</span> : null}
+          </div>
+          {item.awaiting_response_since ? (
+            <p className="awaiting-response">
+              Awaiting response since{' '}
+              <time dateTime={item.awaiting_response_since}>
+                {formatTimestamp(item.awaiting_response_since)}
+              </time>
+            </p>
+          ) : null}
         </article>
       </Link>
     </li>
@@ -112,9 +122,12 @@ function queueErrorText(error: ApiError) {
 
 export function ConversationQueuePage() {
   const headingRef = useRef<HTMLHeadingElement>(null)
+  const queueErrorRef = useRef<HTMLDivElement>(null)
+  const rowLinksRef = useRef(new Map<string, HTMLAnchorElement>())
   const auth = useAuth()
   const location = useLocation()
   const { conversationId } = useParams<{ conversationId?: string }>()
+  const [lastConversationId, setLastConversationId] = useState<string | undefined>(conversationId)
   const [searchParams, setSearchParams] = useSearchParams()
   const filters = useMemo(
     () => readConversationFilters(searchParams),
@@ -132,8 +145,16 @@ export function ConversationQueuePage() {
   const activeFilters = Object.entries(filters) as [keyof ConversationFilters, string][]
 
   useEffect(() => {
-    if (!conversationId) headingRef.current?.focus()
-  }, [conversationId])
+    if (conversationId) return
+    const lastConversationLink = lastConversationId
+      ? rowLinksRef.current.get(lastConversationId)
+      : undefined
+    if (lastConversationLink) lastConversationLink.focus()
+    else headingRef.current?.focus()
+  }, [conversationId, lastConversationId])
+  useEffect(() => {
+    if (queue.error) queueErrorRef.current?.focus()
+  }, [queue.error])
   useEffect(() => {
     if (searchParams.toString() !== normalizedSearch) {
       setSearchParams(normalizedSearch, { replace: true })
@@ -207,7 +228,7 @@ export function ConversationQueuePage() {
           <h2 id="queue-heading" className="visually-hidden">Conversation queue</h2>
           {queue.refreshing ? <p className="queue-status" role="status">Refreshing conversations…</p> : null}
           {queue.error ? (
-            <InlineAlert requestId={queue.error.requestId}>
+            <InlineAlert ref={queueErrorRef} requestId={queue.error.requestId}>
               {queueErrorText(queue.error)}
               <button className="button button--secondary alert__action" type="button" onClick={() => void queue.retry()}>
                 Try again
@@ -215,7 +236,14 @@ export function ConversationQueuePage() {
             </InlineAlert>
           ) : null}
           {queue.loading ? (
-            <p className="queue-state" role="status">Loading conversations…</p>
+            <div className="queue-loading" role="status">
+              <span className="visually-hidden">Loading conversations…</span>
+              <div className="skeleton-list" aria-hidden="true">
+                <span className="skeleton-row" />
+                <span className="skeleton-row" />
+                <span className="skeleton-row" />
+              </div>
+            </div>
           ) : queue.items.length === 0 && !queue.error ? (
             <div className="queue-state">
               <h3>{activeFilters.length ? 'No conversations match these filters' : 'No conversations are available'}</h3>
@@ -230,7 +258,13 @@ export function ConversationQueuePage() {
                     key={item.conversation_id}
                     item={item}
                     selected={item.conversation_id === conversationId}
+                    recentlyViewed={!conversationId && item.conversation_id === lastConversationId}
                     search={location.search}
+                    linkRef={(node) => {
+                      if (node) rowLinksRef.current.set(item.conversation_id, node)
+                      else rowLinksRef.current.delete(item.conversation_id)
+                    }}
+                    onSelect={setLastConversationId}
                   />
                 ))}
               </ul>

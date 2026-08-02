@@ -57,7 +57,7 @@ describe('read-only conversation workspace', () => {
     expect(window.location.search).toBe('?status=active&language=french')
     expect(link).toHaveAttribute('aria-current', 'page')
     expect(await screen.findByRole('heading', { name: 'Messages' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Selected conversation' })).toHaveFocus()
+    expect(screen.getByRole('heading', { name: 'Conversation' })).toHaveFocus()
   })
 
   it('supports direct deep links, Back, Forward, and the progressive Back to Inbox action', async () => {
@@ -449,7 +449,7 @@ describe('read-only conversation workspace', () => {
     const { container } = renderApp(`/inbox/${firstId}`)
     await screen.findByRole('region', { name: 'Message history' })
 
-    expect(screen.queryByRole('button', { name: /reply|send|assign|take over|resolve|escalate|compose|AI/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /reply|send|assign|take over|resolve|escalate|compose|\bAI\b/i })).not.toBeInTheDocument()
     expect(screen.queryByText(/owner|channel|delivery status|unread|priority/i)).not.toBeInTheDocument()
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
     await expectAccessible(container)

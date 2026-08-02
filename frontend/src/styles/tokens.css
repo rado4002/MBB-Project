@@ -3,6 +3,9 @@
   --color-page: #f6f7f9;
   --color-surface: #ffffff;
   --color-surface-subtle: #f9fafb;
+  --color-selected-surface: #eff6ff;
+  --color-skeleton: #e7ebf1;
+  --color-overlay: rgb(15 23 42 / 48%);
   --color-text: #172033;
   --color-text-muted: #5d6678;
   --color-border: #d9dee8;
@@ -28,7 +31,7 @@
   --space-6: 1.5rem;
   --space-8: 2rem;
   --space-10: 2.5rem;
-  --content-width: 72rem;
+  --content-width: 92rem;
   --auth-width: 27rem;
   --font-system: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }

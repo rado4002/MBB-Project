@@ -1,4 +1,13 @@
-import { useEffect, useLayoutEffect, useRef } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type RefObject,
+} from 'react'
+import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
 import type { ConversationApiClient } from '../../api/conversations'
 import type {
@@ -60,6 +69,32 @@ function workspaceError(error: ApiError) {
   return errorMessage(error)
 }
 
+function DetailLoadingState() {
+  return (
+    <div className="workspace-loading" role="status">
+      <span className="visually-hidden">Loading conversation details…</span>
+      <div className="skeleton-stack" aria-hidden="true">
+        <span className="skeleton-block skeleton-block--title" />
+        <span className="skeleton-block skeleton-block--short" />
+        <span className="skeleton-block" />
+      </div>
+    </div>
+  )
+}
+
+function HistoryLoadingState() {
+  return (
+    <div className="history-loading" role="status">
+      <span className="visually-hidden">Loading messages…</span>
+      <div className="skeleton-stack" aria-hidden="true">
+        <span className="skeleton-message" />
+        <span className="skeleton-message skeleton-message--outbound" />
+        <span className="skeleton-message" />
+      </div>
+    </div>
+  )
+}
+
 function messageContent(message: OperatorMessageItem) {
   if (message.content_type === 'text') {
     return <p className="message-text">{message.text ?? ''}</p>
@@ -83,10 +118,16 @@ function ConversationHeader({
   error: ApiError | null
   onRetry: () => Promise<void>
 }) {
-  if (loading) return <p className="workspace-state" role="status">Loading conversation details…</p>
+  const errorRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (error) errorRef.current?.focus()
+  }, [error])
+
+  if (loading) return <DetailLoadingState />
   if (error) {
     return (
-      <InlineAlert requestId={error.requestId}>
+      <InlineAlert ref={errorRef} requestId={error.requestId}>
         {workspaceError(error)}
         <button className="button button--secondary alert__action" type="button" onClick={() => void onRetry()}>
           Retry details
@@ -98,8 +139,9 @@ function ConversationHeader({
   const customerName = detail.customer.display_name?.trim() || 'Customer'
   return (
     <div className="workspace-summary">
+      <p className="visually-hidden" role="status">Conversation details loaded.</p>
       <div>
-        <h2>{customerName}</h2>
+        <h3>{customerName}</h3>
         <p className="masked-phone">{detail.customer.phone_masked}</p>
       </div>
       <div className="conversation-labels" aria-label="Conversation attributes">
@@ -115,6 +157,51 @@ function ConversationHeader({
   )
 }
 
+function ContextBody({
+  detail,
+  loading,
+  error,
+  productHeadingLevel = 'h4',
+}: {
+  detail: OperatorConversationDetail | null
+  loading: boolean
+  error: ApiError | null
+  productHeadingLevel?: 'h3' | 'h4'
+}) {
+  if (loading) {
+    return (
+      <div className="context-loading" role="status">
+        <span className="visually-hidden">Loading context…</span>
+        <div className="skeleton-stack" aria-hidden="true">
+          <span className="skeleton-block" />
+          <span className="skeleton-block skeleton-block--short" />
+          <span className="skeleton-block" />
+        </div>
+      </div>
+    )
+  }
+  if (error) return <p>Context is unavailable.</p>
+  if (!detail?.lead) return <p>No lead context is available.</p>
+  const ProductHeading = productHeadingLevel
+  return (
+    <>
+      <dl className="context-details">
+        <div><dt>Lead score</dt><dd>{label(detail.lead.score)}</dd></div>
+        <div><dt>Lead stage</dt><dd>{label(detail.lead.stage)}</dd></div>
+        <div><dt>Lead intent</dt><dd>{label(detail.lead.intent)}</dd></div>
+      </dl>
+      <ProductHeading>Product interests</ProductHeading>
+      {detail.lead.product_interests.length ? (
+        <ul className="interest-list">
+          {detail.lead.product_interests.slice(0, 5).map((interest, index) => (
+            <li key={`${index}-${interest}`}>{safeInterest(interest)}</li>
+          ))}
+        </ul>
+      ) : <p>No product interests available.</p>}
+    </>
+  )
+}
+
 function ContextPanel({
   detail,
   loading,
@@ -125,30 +212,120 @@ function ContextPanel({
   error: ApiError | null
 }) {
   return (
-    <aside className="context-panel" aria-labelledby="context-heading">
+    <aside className="context-panel context-panel--desktop" aria-labelledby="context-heading">
       <h3 id="context-heading">Context</h3>
-      {loading ? <p role="status">Loading context…</p> : error ? (
-        <p>Context is unavailable.</p>
-      ) : detail?.lead ? (
-        <>
-          <dl className="context-details">
-            <div><dt>Lead score</dt><dd>{label(detail.lead.score)}</dd></div>
-            <div><dt>Lead stage</dt><dd>{label(detail.lead.stage)}</dd></div>
-            <div><dt>Lead intent</dt><dd>{label(detail.lead.intent)}</dd></div>
-          </dl>
-          <h4>Product interests</h4>
-          {detail.lead.product_interests.length ? (
-            <ul className="interest-list">
-              {detail.lead.product_interests.slice(0, 5).map((interest, index) => (
-                <li key={`${index}-${interest}`}>{safeInterest(interest)}</li>
-              ))}
-            </ul>
-          ) : <p>No product interests available.</p>}
-        </>
-      ) : (
-        <p>No lead context is available.</p>
-      )}
+      <ContextBody detail={detail} loading={loading} error={error} />
     </aside>
+  )
+}
+
+function ContextDrawer({
+  open,
+  onClose,
+  returnFocusRef,
+  detail,
+  loading,
+  error,
+}: {
+  open: boolean
+  onClose: () => void
+  returnFocusRef: RefObject<HTMLButtonElement | null>
+  detail: OperatorConversationDetail | null
+  loading: boolean
+  error: ApiError | null
+}) {
+  const titleId = useId()
+  const panelRef = useRef<HTMLElement>(null)
+  const closeRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const appFrame = document.querySelector<HTMLElement>('.app-frame')
+    const previousAriaHidden = appFrame?.getAttribute('aria-hidden')
+    const previousOverflow = document.body.style.overflow
+    appFrame?.setAttribute('inert', '')
+    appFrame?.setAttribute('aria-hidden', 'true')
+    document.body.style.overflow = 'hidden'
+    closeRef.current?.focus()
+    const returnTarget = returnFocusRef.current
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        onClose()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const panel = panelRef.current
+      if (!panel) return
+      const focusable = Array.from(
+        panel.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      )
+      if (!focusable.length) {
+        event.preventDefault()
+        panel.focus()
+        return
+      }
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+
+    const keepFocusInside = (event: FocusEvent) => {
+      if (!panelRef.current?.contains(event.target as Node)) closeRef.current?.focus()
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    document.addEventListener('focusin', keepFocusInside)
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown)
+      document.removeEventListener('focusin', keepFocusInside)
+      appFrame?.removeAttribute('inert')
+      if (previousAriaHidden == null) appFrame?.removeAttribute('aria-hidden')
+      else appFrame?.setAttribute('aria-hidden', previousAriaHidden)
+      document.body.style.overflow = previousOverflow
+      queueMicrotask(() => {
+        if (returnTarget?.isConnected) returnTarget.focus()
+      })
+    }
+  }, [onClose, open, returnFocusRef])
+
+  if (!open) return null
+  return createPortal(
+    <div className="context-drawer" role="presentation">
+      <section
+        className="context-drawer__panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        ref={panelRef}
+        tabIndex={-1}
+      >
+        <header className="context-drawer__header">
+          <h2 id={titleId}>Conversation details</h2>
+          <button className="button button--secondary" type="button" onClick={onClose} ref={closeRef}>
+            Close
+          </button>
+        </header>
+        <div className="context-drawer__content">
+          <ContextBody
+            detail={detail}
+            loading={loading}
+            error={error}
+            productHeadingLevel="h3"
+          />
+        </div>
+      </section>
+    </div>,
+    document.body,
   )
 }
 
@@ -161,7 +338,17 @@ function MessageTimeline({
 }) {
   const history = useMessageHistory(client, conversationId)
   const timelineRef = useRef<HTMLDivElement>(null)
+  const initialPositioned = useRef(false)
   const scrollAnchor = useRef<{ height: number; top: number } | null>(null)
+  const errorRef = useRef<HTMLDivElement>(null)
+  const olderErrorRef = useRef<HTMLDivElement>(null)
+
+  useLayoutEffect(() => {
+    const timeline = timelineRef.current
+    if (!timeline || initialPositioned.current || history.loading || !history.items.length) return
+    timeline.scrollTop = timeline.scrollHeight
+    initialPositioned.current = true
+  }, [history.items.length, history.loading])
 
   useLayoutEffect(() => {
     const timeline = timelineRef.current
@@ -170,6 +357,14 @@ function MessageTimeline({
     timeline.scrollTop = anchor.top + (timeline.scrollHeight - anchor.height)
     scrollAnchor.current = null
   }, [history.items.length, history.loadingOlder])
+
+  useEffect(() => {
+    if (history.error) errorRef.current?.focus()
+  }, [history.error])
+
+  useEffect(() => {
+    if (history.olderError) olderErrorRef.current?.focus()
+  }, [history.olderError])
 
   const loadEarlier = () => {
     const timeline = timelineRef.current
@@ -183,12 +378,16 @@ function MessageTimeline({
   }
 
   return (
-    <section className="timeline-panel" aria-labelledby="messages-heading">
+    <section
+      className="timeline-panel"
+      aria-labelledby="messages-heading"
+      aria-busy={history.loading || history.loadingOlder}
+    >
       <h3 id="messages-heading">Messages</h3>
       {history.loading ? (
-        <p className="workspace-state" role="status">Loading messages…</p>
+        <HistoryLoadingState />
       ) : history.error ? (
-        <InlineAlert requestId={history.error.requestId}>
+        <InlineAlert ref={errorRef} requestId={history.error.requestId}>
           {workspaceError(history.error)}
           <button className="button button--secondary alert__action" type="button" onClick={() => void history.retry()}>
             Retry messages
@@ -198,13 +397,16 @@ function MessageTimeline({
         <p className="workspace-state">No messages are available.</p>
       ) : (
         <div className="message-history" ref={timelineRef} role="region" aria-label="Message history">
+          <p className="visually-hidden" role="status">{history.items.length} messages loaded.</p>
           {history.nextOlderCursor ? (
-            <button className="button button--secondary load-earlier" type="button" disabled={history.loadingOlder} onClick={loadEarlier}>
-              {history.loadingOlder ? 'Loading earlier…' : 'Load Earlier'}
-            </button>
+            <div className="load-earlier" aria-live="polite">
+              <button className="button button--secondary" type="button" disabled={history.loadingOlder} onClick={loadEarlier}>
+                {history.loadingOlder ? 'Loading earlier…' : 'Load Earlier'}
+              </button>
+            </div>
           ) : null}
           {history.olderError ? (
-            <InlineAlert requestId={history.olderError.requestId}>
+            <InlineAlert ref={olderErrorRef} requestId={history.olderError.requestId}>
               Earlier messages could not be loaded. {errorMessage(history.olderError)}
               <button className="button button--secondary alert__action" type="button" onClick={loadEarlier}>
                 Retry earlier messages
@@ -244,29 +446,53 @@ export function ConversationWorkspace({
 }) {
   const detail = useConversationDetail(client, conversationId)
   const workspaceHeadingRef = useRef<HTMLHeadingElement>(null)
+  const detailsButtonRef = useRef<HTMLButtonElement>(null)
+  const [contextOpen, setContextOpen] = useState(false)
+  const closeContext = useCallback(() => setContextOpen(false), [])
 
   useEffect(() => workspaceHeadingRef.current?.focus(), [conversationId])
 
   return (
     <section className="conversation-workspace" aria-labelledby="workspace-heading">
-      <div className="workspace-toolbar">
-        <Link className="button button--secondary" to={backTo}>Back to Inbox</Link>
-        <h2 id="workspace-heading" className="visually-hidden" tabIndex={-1} ref={workspaceHeadingRef}>
-          Selected conversation
-        </h2>
-      </div>
-      <div className="workspace-detail-region" aria-label="Conversation details" aria-busy={detail.loading}>
-        <ConversationHeader
-          detail={detail.detail}
-          loading={detail.loading}
-          error={detail.error}
-          onRetry={detail.retry}
-        />
+      <div className="workspace-header">
+        <div className="workspace-toolbar">
+          <Link className="button button--secondary" to={backTo} aria-label="Back to Inbox">
+            <span className="back-label back-label--long" aria-hidden="true">Back to Inbox</span>
+            <span className="back-label back-label--short" aria-hidden="true">Back</span>
+          </Link>
+          <h2 id="workspace-heading" tabIndex={-1} ref={workspaceHeadingRef}>Conversation</h2>
+          <button
+            className="button button--secondary context-trigger"
+            type="button"
+            aria-haspopup="dialog"
+            aria-expanded={contextOpen}
+            onClick={() => setContextOpen(true)}
+            ref={detailsButtonRef}
+          >
+            Details
+          </button>
+        </div>
+        <div className="workspace-detail-region" aria-label="Conversation details" aria-busy={detail.loading}>
+          <ConversationHeader
+            detail={detail.detail}
+            loading={detail.loading}
+            error={detail.error}
+            onRetry={detail.retry}
+          />
+        </div>
       </div>
       <div className="workspace-columns">
         <MessageTimeline client={client} conversationId={conversationId} />
         <ContextPanel detail={detail.detail} loading={detail.loading} error={detail.error} />
       </div>
+      <ContextDrawer
+        open={contextOpen}
+        onClose={closeContext}
+        returnFocusRef={detailsButtonRef}
+        detail={detail.detail}
+        loading={detail.loading}
+        error={detail.error}
+      />
     </section>
   )
 }
