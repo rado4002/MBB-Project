@@ -212,7 +212,11 @@ function ContextPanel({
   error: ApiError | null
 }) {
   return (
-    <aside className="context-panel context-panel--desktop" aria-labelledby="context-heading">
+    <aside
+      className="context-panel context-panel--desktop"
+      aria-labelledby="context-heading"
+      tabIndex={0}
+    >
       <h3 id="context-heading">Context</h3>
       <ContextBody detail={detail} loading={loading} error={error} />
     </aside>

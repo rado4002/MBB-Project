@@ -43,7 +43,11 @@ describe('responsive Inbox workflow refinement', () => {
     expect(screen.getByRole('region', { name: 'Conversation queue' })).toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'Conversation' })).toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'Messages' })).toBeInTheDocument()
-    expect(screen.getByRole('complementary', { name: 'Context' })).toBeInTheDocument()
+    const context = screen.getByRole('complementary', { name: 'Context' })
+    expect(context).toBeInTheDocument()
+    expect(context).toHaveAttribute('tabindex', '0')
+    context.focus()
+    expect(context).toHaveFocus()
     expect(screen.queryByText(/future action|coming soon/i)).not.toBeInTheDocument()
   })
 
@@ -104,6 +108,9 @@ describe('responsive Inbox workflow refinement', () => {
     const rowLink = await screen.findByRole('link', {
       name: 'Conversation with Marie Client',
     })
+    const rowFocus = vi.spyOn(rowLink, 'focus')
+    const scrollY = vi.spyOn(window, 'scrollY', 'get').mockReturnValue(120)
+    const windowScroll = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)
     queue.scrollTop = 173
     await user.click(rowLink)
 
@@ -119,8 +126,12 @@ describe('responsive Inbox workflow refinement', () => {
     expect(window.location.search).toBe('?status=active&language=french')
     expect(queue.scrollTop).toBe(173)
     await waitFor(() => expect(rowLink).toHaveFocus())
+    expect(rowFocus).toHaveBeenCalledWith({ preventScroll: true })
+    expect(windowScroll).toHaveBeenCalledWith({ top: 120, left: 0, behavior: 'auto' })
     expect(rowLink).not.toHaveAttribute('aria-current')
     expect(rowLink.closest('li')).toHaveClass('conversation-row--recent')
+    scrollY.mockRestore()
+    windowScroll.mockRestore()
   })
 
   it('uses restrained structural skeletons for startup and region loading', async () => {

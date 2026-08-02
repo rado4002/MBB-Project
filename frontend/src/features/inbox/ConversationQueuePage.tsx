@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type Ref } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type Ref } from 'react'
 import { Link, useLocation, useParams, useSearchParams } from 'react-router-dom'
 import { createConversationApiClient } from '../../api/conversations'
 import {
@@ -124,6 +124,7 @@ export function ConversationQueuePage() {
   const headingRef = useRef<HTMLHeadingElement>(null)
   const queueErrorRef = useRef<HTMLDivElement>(null)
   const rowLinksRef = useRef(new Map<string, HTMLAnchorElement>())
+  const queueScrollPositionRef = useRef<number | null>(null)
   const auth = useAuth()
   const location = useLocation()
   const { conversationId } = useParams<{ conversationId?: string }>()
@@ -144,12 +145,19 @@ export function ConversationQueuePage() {
   const queue = useConversationQueue(client, filters)
   const activeFilters = Object.entries(filters) as [keyof ConversationFilters, string][]
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (conversationId) return
+    if (queueScrollPositionRef.current !== null) {
+      window.scrollTo({
+        top: queueScrollPositionRef.current,
+        left: 0,
+        behavior: 'auto',
+      })
+    }
     const lastConversationLink = lastConversationId
       ? rowLinksRef.current.get(lastConversationId)
       : undefined
-    if (lastConversationLink) lastConversationLink.focus()
+    if (lastConversationLink) lastConversationLink.focus({ preventScroll: true })
     else headingRef.current?.focus()
   }, [conversationId, lastConversationId])
   useEffect(() => {
@@ -264,7 +272,10 @@ export function ConversationQueuePage() {
                       if (node) rowLinksRef.current.set(item.conversation_id, node)
                       else rowLinksRef.current.delete(item.conversation_id)
                     }}
-                    onSelect={setLastConversationId}
+                    onSelect={(selectedConversationId) => {
+                      queueScrollPositionRef.current = window.scrollY
+                      setLastConversationId(selectedConversationId)
+                    }}
                   />
                 ))}
               </ul>
