@@ -18,12 +18,14 @@ class BrowserAuthError(Exception):
         code: str,
         message: str,
         retry_after_seconds: int | None = None,
+        operator_code: str | None = None,
     ) -> None:
         super().__init__(code)
         self.status_code = status_code
         self.code = code
         self.message = message
         self.retry_after_seconds = retry_after_seconds
+        self.operator_code = operator_code
 
 
 def browser_error_response(request: Request, exc: BrowserAuthError) -> JSONResponse:
@@ -31,8 +33,19 @@ def browser_error_response(request: Request, exc: BrowserAuthError) -> JSONRespo
     request_id = normalize_or_generate_request_id(
         request_id or request.headers.get("X-Request-ID")
     )
+    is_operator_route = request.url.path.startswith("/api/v1/operator/")
+    operator_code_map = {
+        "browser_auth_disabled": "SERVICE_UNAVAILABLE",
+        "authentication_unavailable": "SERVICE_UNAVAILABLE",
+        "capability_required": "FORBIDDEN",
+        "session_required": "AUTH_SESSION_EXPIRED",
+        "session_invalid": "AUTH_SESSION_EXPIRED",
+    }
+    code = exc.code
+    if is_operator_route:
+        code = exc.operator_code or operator_code_map.get(exc.code, exc.code)
     detail: dict[str, str | int] = {
-        "code": exc.code,
+        "code": code,
         "message": exc.message,
         "request_id": request_id,
     }
@@ -50,6 +63,15 @@ def browser_error_response(request: Request, exc: BrowserAuthError) -> JSONRespo
 async def browser_validation_error_response(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
+    if request.url.path.startswith("/api/v1/operator/"):
+        return browser_error_response(
+            request,
+            BrowserAuthError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="The request parameters are invalid.",
+            ),
+        )
     if not request.url.path.startswith("/api/v1/auth/"):
         return await request_validation_exception_handler(request, exc)
     return browser_error_response(

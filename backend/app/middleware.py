@@ -53,6 +53,20 @@ class MaintenanceModeMiddleware(BaseHTTPMiddleware):
             try:
                 maintenance = await redis.get("system:maintenance")
                 if maintenance in (b"1", "1"):
+                    if path.startswith("/api/v1/operator/"):
+                        from app.api.browser_auth_errors import (
+                            BrowserAuthError,
+                            browser_error_response,
+                        )
+
+                        return browser_error_response(
+                            request,
+                            BrowserAuthError(
+                                status_code=503,
+                                code="MAINTENANCE_MODE",
+                                message="The service is temporarily in maintenance mode.",
+                            ),
+                        )
                     from fastapi.responses import JSONResponse
                     return JSONResponse(
                         status_code=503,

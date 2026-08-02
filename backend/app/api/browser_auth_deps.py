@@ -35,8 +35,8 @@ TEMPORARY_CAPABILITIES = frozenset(
 )
 BASE_CAPABILITIES = TEMPORARY_CAPABILITIES | {"auth.reauthenticate"}
 ROLE_CAPABILITIES = {
-    "administrator": BASE_CAPABILITIES,
-    "operator": BASE_CAPABILITIES,
+    "administrator": BASE_CAPABILITIES | {"conversation.read", "message.read"},
+    "operator": BASE_CAPABILITIES | {"conversation.read", "message.read"},
     "analyst": BASE_CAPABILITIES,
 }
 
@@ -150,6 +150,7 @@ async def get_browser_session(
             status_code=status.HTTP_401_UNAUTHORIZED,
             code="session_required",
             message="An active browser session is required.",
+            operator_code="AUTH_SESSION_EXPIRED",
         )
     try:
         record = await state.sessions.get_session(raw_token)
@@ -166,6 +167,7 @@ async def get_browser_session(
             status_code=status.HTTP_401_UNAUTHORIZED,
             code="session_invalid",
             message="The browser session is invalid or expired.",
+            operator_code="AUTH_SESSION_EXPIRED",
         )
     return BrowserSessionContext(raw_token=raw_token, record=record, state=state)
 
@@ -188,9 +190,21 @@ async def get_current_human(
             message="Browser authentication is unavailable.",
         ) from exc
     now = datetime.now(timezone.utc)
+    if account is not None and account.status != "active":
+        try:
+            await session_context.state.sessions.revoke_session(
+                session_context.raw_token
+            )
+        except (InvalidSessionToken, SessionStoreUnavailable):
+            pass
+        raise BrowserAuthError(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            code="session_invalid",
+            message="The browser session is invalid or expired.",
+            operator_code="AUTH_ACCOUNT_DISABLED",
+        )
     invalid = (
         account is None
-        or account.status != "active"
         or account.auth_version != session_context.record.auth_version
         or (
             account.must_change_password
@@ -224,6 +238,7 @@ async def get_current_human(
             status_code=status.HTTP_401_UNAUTHORIZED,
             code="session_invalid",
             message="The browser session is invalid or expired.",
+            operator_code="AUTH_SESSION_EXPIRED",
         )
     try:
         activity = await session_context.state.sessions.update_activity(
@@ -240,6 +255,7 @@ async def get_current_human(
             status_code=status.HTTP_401_UNAUTHORIZED,
             code="session_invalid",
             message="The browser session is invalid or expired.",
+            operator_code="AUTH_SESSION_EXPIRED",
         )
     record = session_context.record
     if activity.updated:

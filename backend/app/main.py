@@ -98,6 +98,16 @@ async def request_validation_exception_handler(
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
+    if request.url.path.startswith("/api/v1/operator/"):
+        log.error("operator_api.unhandled_exception", path=request.url.path)
+        return browser_error_response(
+            request,
+            BrowserAuthError(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                code="INTERNAL_ERROR",
+                message="An internal error occurred.",
+            ),
+        )
     log.error("unhandled_exception", path=request.url.path, error=str(exc))
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -208,6 +218,7 @@ from app.api.v1 import (  # noqa: E402  (after app creation intentional)
     leads,
     maps,
     messages,
+    operator_conversations,
     orders,
     payments,
     relances,
@@ -226,6 +237,7 @@ app.include_router(customers.router, prefix=_V1_PREFIX)
 app.include_router(analytics.router, prefix=_V1_PREFIX)
 app.include_router(admin.router, prefix=_V1_PREFIX)
 app.include_router(auth.router, prefix=_V1_PREFIX)
+app.include_router(operator_conversations.router, prefix=_V1_PREFIX)
 
 
 # ── Middleware (added AFTER routers so order is correct) ──────────────────────
