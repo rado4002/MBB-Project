@@ -35,8 +35,10 @@ TEMPORARY_CAPABILITIES = frozenset(
 )
 BASE_CAPABILITIES = TEMPORARY_CAPABILITIES | {"auth.reauthenticate"}
 ROLE_CAPABILITIES = {
-    "administrator": BASE_CAPABILITIES | {"conversation.read", "message.read"},
-    "operator": BASE_CAPABILITIES | {"conversation.read", "message.read"},
+    "administrator": BASE_CAPABILITIES
+    | {"conversation.read", "message.read", "escalation.create"},
+    "operator": BASE_CAPABILITIES
+    | {"conversation.read", "message.read", "escalation.create"},
     "analyst": BASE_CAPABILITIES,
 }
 

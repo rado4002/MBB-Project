@@ -11,19 +11,37 @@ from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, Depends, Header, Query, Request, Response, status
+from pydantic import UUID4
 from sqlalchemy import exists, func, literal, select, true, tuple_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.browser_auth_deps import BrowserPrincipal, require_capability
+from app.api.browser_auth_deps import (
+    BrowserPrincipal,
+    get_browser_settings,
+    require_capability,
+    require_csrf,
+    validate_state_changing_request,
+)
 from app.api.browser_auth_errors import BrowserAuthError
+from app.config import Settings
 from app.database import get_db
 from app.models.conversation import Conversation
 from app.models.customer import Customer
 from app.models.escalation_ticket import EscalationTicket
 from app.models.lead import Lead
 from app.models.message import Message
+from app.modules.m8_maps.operator_escalation import (
+    ConversationNotFound,
+    EscalationAlreadyOpen,
+    IdempotencyConflict,
+    IdempotencyInProgress,
+    OperatorEscalationResult,
+    OperatorEscalationUnavailable,
+    create_operator_escalation,
+)
+from app.request_ids import normalize_or_generate_request_id
 from app.schemas.common import ConversationStatus, Language
 from app.schemas.operator_conversations import (
     OperatorConversationDetail,
@@ -36,6 +54,11 @@ from app.schemas.operator_conversations import (
     OperatorMessageItem,
     OperatorMessageMedia,
     OperatorOpenEscalation,
+)
+from app.schemas.operator_escalations import (
+    OperatorEscalationActor,
+    OperatorEscalationCreate,
+    OperatorEscalationResponse,
 )
 
 router = APIRouter(
@@ -206,6 +229,48 @@ def _display_interests(value: list[str] | None) -> list[str]:
     ]
 
 
+def _operator_error(
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+) -> BrowserAuthError:
+    return BrowserAuthError(
+        status_code=status_code,
+        code=code,
+        message=message,
+    )
+
+
+def _escalation_response(
+    result: OperatorEscalationResult,
+) -> OperatorEscalationResponse:
+    ticket = result.ticket
+    if (
+        ticket.operator_reason is None
+        or ticket.escalation_type is None
+        or ticket.created_by_account_id is None
+        or ticket.source != "operator_browser"
+    ):
+        raise OperatorEscalationUnavailable(
+            "operator escalation result is incomplete"
+        )
+    return OperatorEscalationResponse(
+        escalation_id=ticket.ticket_id,
+        conversation_id=ticket.conversation_id,
+        status="open",
+        reason=ticket.operator_reason,
+        type=ticket.escalation_type,
+        priority=ticket.priority,
+        source=ticket.source,
+        created_at=ticket.created_at,
+        created_by=OperatorEscalationActor(
+            account_id=ticket.created_by_account_id,
+            display_name=result.actor_display_name,
+        ),
+    )
+
+
 @router.get("", response_model=OperatorConversationQueueResponse)
 async def list_operator_conversations(
     response: Response,
@@ -330,6 +395,93 @@ async def list_operator_conversations(
         )
     response.headers["Cache-Control"] = "no-store"
     return OperatorConversationQueueResponse(items=items, next_cursor=next_cursor)
+
+
+@router.post(
+    "/{conversation_id}/escalations",
+    response_model=OperatorEscalationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_operator_conversation_escalation(
+    conversation_id: UUID,
+    body: OperatorEscalationCreate,
+    request: Request,
+    response: Response,
+    principal: Annotated[BrowserPrincipal, Depends(require_csrf)],
+    _escalation_principal: Annotated[
+        BrowserPrincipal, Depends(require_capability("escalation.create"))
+    ],
+    settings: Annotated[Settings, Depends(get_browser_settings)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[
+        UUID4, Header(alias="Idempotency-Key", include_in_schema=True)
+    ],
+) -> OperatorEscalationResponse:
+    validate_state_changing_request(request, settings)
+    request_id = normalize_or_generate_request_id(
+        getattr(request.state, "request_id", None)
+        or request.headers.get("X-Request-ID")
+    )
+    try:
+        result = await create_operator_escalation(
+            db,
+            conversation_id=conversation_id,
+            reason=body.reason,
+            escalation_type=body.type,
+            priority=body.priority,
+            actor_account_id=principal.account.account_id,
+            actor_display_name=principal.account.display_name,
+            actor_role=principal.account.role,
+            idempotency_key=idempotency_key,
+            idempotency_secret=settings.browser_idempotency_hmac_secret,
+            request_id=request_id,
+            source_network_fingerprint=(
+                principal.session.record.ip_prefix_fingerprint
+            ),
+            user_agent_fingerprint=(
+                principal.session.record.user_agent_fingerprint
+            ),
+        )
+        payload = _escalation_response(result)
+    except ConversationNotFound as exc:
+        raise _operator_error(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="CONVERSATION_NOT_FOUND",
+            message="The conversation was not found.",
+        ) from exc
+    except IdempotencyConflict as exc:
+        raise _operator_error(
+            status_code=status.HTTP_409_CONFLICT,
+            code="IDEMPOTENCY_CONFLICT",
+            message="The idempotency key was already used for another request.",
+        ) from exc
+    except IdempotencyInProgress as exc:
+        raise _operator_error(
+            status_code=status.HTTP_409_CONFLICT,
+            code="IDEMPOTENCY_IN_PROGRESS",
+            message="The original request is still in progress.",
+        ) from exc
+    except EscalationAlreadyOpen as exc:
+        raise _operator_error(
+            status_code=status.HTTP_409_CONFLICT,
+            code="ESCALATION_ALREADY_OPEN",
+            message="This conversation already has an active escalation.",
+        ) from exc
+    except OperatorEscalationUnavailable as exc:
+        raise _operator_error(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            code="SERVICE_UNAVAILABLE",
+            message="The escalation service is temporarily unavailable.",
+        ) from exc
+
+    response.status_code = (
+        status.HTTP_200_OK if result.replayed else status.HTTP_201_CREATED
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Idempotent-Replayed"] = (
+        "true" if result.replayed else "false"
+    )
+    return payload
 
 
 @router.get("/{conversation_id}", response_model=OperatorConversationDetail)

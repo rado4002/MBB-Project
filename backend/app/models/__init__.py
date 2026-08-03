@@ -15,6 +15,9 @@ from app.models.operator_audit import (
     OperatorAuditEvent,
     OperatorAuditSecurityMetadata,
 )
+from app.models.operator_escalation_idempotency import (
+    OperatorEscalationIdempotency,
+)
 
 __all__ = [
     "Customer",
@@ -31,4 +34,5 @@ __all__ = [
     "OperatorAccount",
     "OperatorAuditEvent",
     "OperatorAuditSecurityMetadata",
+    "OperatorEscalationIdempotency",
 ]

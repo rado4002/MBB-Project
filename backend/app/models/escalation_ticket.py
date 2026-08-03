@@ -23,6 +23,26 @@ class EscalationTicket(Base):
             "status IN ('open', 'in_progress', 'resolved', 'closed')",
             name="chk_esc_status",
         ),
+        CheckConstraint(
+            "source IN ('legacy', 'operator_browser')",
+            name="chk_esc_source",
+        ),
+        CheckConstraint(
+            "escalation_type IS NULL OR escalation_type IN "
+            "('voice_note', 'complex_issue', 'high_value_lead', 'payment_issue')",
+            name="chk_esc_escalation_type",
+        ),
+        CheckConstraint(
+            "operator_reason IS NULL OR "
+            "char_length(btrim(operator_reason)) BETWEEN 10 AND 500",
+            name="chk_esc_operator_reason",
+        ),
+        CheckConstraint(
+            "source <> 'operator_browser' OR "
+            "(escalation_type IS NOT NULL AND operator_reason IS NOT NULL "
+            "AND created_by_account_id IS NOT NULL)",
+            name="chk_esc_operator_browser_fields",
+        ),
         Index("idx_esc_conversation", "conversation_id"),
         Index("idx_esc_customer", "customer_id"),
         Index(
@@ -31,6 +51,18 @@ class EscalationTicket(Base):
             postgresql_where=text("status IN ('open', 'in_progress')"),
         ),
         Index("idx_esc_priority", "priority", "created_at"),
+        Index(
+            "idx_esc_created_by_account",
+            "created_by_account_id",
+            "created_at",
+            postgresql_where=text("created_by_account_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_escalation_tickets_one_active_conversation",
+            "conversation_id",
+            unique=True,
+            postgresql_where=text("status IN ('open', 'in_progress')"),
+        ),
         {"schema": "mbb"},
     )
 
@@ -58,6 +90,20 @@ class EscalationTicket(Base):
         String(10), nullable=False, server_default="medium"
     )
     reason: Mapped[str] = mapped_column(String(50), nullable=False)
+    source: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default="legacy"
+    )
+    escalation_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    operator_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "mbb.operator_accounts.account_id",
+            name="fk_escalation_tickets_created_by_account_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
     assigned_to: Mapped[str | None] = mapped_column(String(100), nullable=True)
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default="open"
