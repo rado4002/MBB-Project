@@ -139,10 +139,18 @@ describe('Human and AI conversation ownership control', () => {
 
   it('returns human ownership to AI only after confirmation and preserves it after remount', async () => {
     let state: 'human' | 'ai' = 'human'
+    const detailWithHistoricalEscalation = () => ({
+      ...(state === 'human' ? humanDetail() : conversationDetailFixture()),
+      open_escalation: { exists: true },
+    })
+    const queueWithHistoricalEscalation = () => ({
+      ...(state === 'human' ? humanQueue() : conversationFixture()),
+      open_escalation: { exists: true },
+    })
     server.use(
       ...handlers(
-        () => state === 'human' ? humanDetail() : conversationDetailFixture(),
-        () => state === 'human' ? humanQueue() : conversationFixture(),
+        detailWithHistoricalEscalation,
+        queueWithHistoricalEscalation,
       ),
       http.post('/api/v1/operator/conversations/:conversationId/ownership', async ({ request }) => {
         expect(await request.json()).toEqual({
@@ -159,16 +167,19 @@ describe('Human and AI conversation ownership control', () => {
     const user = userEvent.setup()
     const first = renderApp('/inbox/' + conversationId)
     expect(await screen.findByRole('button', { name: 'Return to AI' })).toBeInTheDocument()
+    expect(screen.getAllByText('Open escalation').length).toBeGreaterThan(0)
     expect(screen.queryByRole('button', { name: 'Escalate to Human' })).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Return to AI' }))
     const dialog = screen.getByRole('dialog', { name: 'Return to AI' })
     await user.click(within(dialog).getByRole('button', { name: 'Return to AI' }))
     expect(await screen.findByRole('button', { name: 'Escalate to Human' })).toBeInTheDocument()
+    expect(screen.getAllByText('Open escalation').length).toBeGreaterThan(0)
     first.unmount()
 
     renderApp('/inbox/' + conversationId)
     expect(await screen.findByRole('button', { name: 'Escalate to Human' })).toBeInTheDocument()
     expect(screen.getAllByText('Controlled by MBB AI Assistant').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Open escalation').length).toBeGreaterThan(0)
   })
 
   it('keeps human control and announces authoritative AI-disabled errors', async () => {

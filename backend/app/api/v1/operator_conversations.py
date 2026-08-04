@@ -40,7 +40,6 @@ from app.modules.m4_conversation.ownership import (
     OwnershipConflict,
     OwnershipSnapshot,
     OwnershipTransitionUnavailable,
-    ReturnToAIBlocked,
     ReturnToAIDisabled,
     ReturnToAIUnavailable,
     transition_ownership,
@@ -640,15 +639,6 @@ async def change_operator_conversation_ownership(
             message=(
                 "The MBB AI Assistant is currently unavailable. "
                 "This conversation remains under human control."
-            ),
-        ) from exc
-    except ReturnToAIBlocked as exc:
-        raise _operator_error(
-            status_code=status.HTTP_409_CONFLICT,
-            code="AI_RETURN_BLOCKED",
-            message=(
-                "An unresolved condition prevents returning this conversation "
-                "to the MBB AI Assistant."
             ),
         ) from exc
     except OwnershipTransitionUnavailable as exc:

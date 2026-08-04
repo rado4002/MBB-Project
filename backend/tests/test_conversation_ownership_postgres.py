@@ -20,8 +20,8 @@ from app.models.message import Message
 from app.models.operator_account import OperatorAccount
 from app.models.operator_audit import OperatorAuditEvent
 from app.modules.m4_conversation.ownership import (
+    IdempotencyInProgress,
     OwnershipConflict,
-    ReturnToAIBlocked,
     ReturnToAIDisabled,
     ReturnToAIUnavailable,
     transition_ownership,
@@ -311,7 +311,105 @@ async def test_stale_and_disabled_returns_fail_closed_before_eligible_return(
 
 
 @pytest.mark.asyncio
-async def test_unresolved_advanced_ticket_blocks_return_without_changing_owner(
+@pytest.mark.parametrize("ticket_status", ["open", "in_progress", "resolved"])
+async def test_parked_historical_ticket_does_not_block_or_change_on_return(
+    engine: AsyncEngine,
+    ticket_status: str,
+) -> None:
+    accounts, conversation, _message = await _seed(engine)
+    await _transition(
+        engine,
+        account=accounts[0],
+        conversation_id=conversation.conversation_id,
+        target="human",
+        expected_version=1,
+        key=uuid.uuid4(),
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    ticket_id = uuid.uuid4()
+    ticket_created_at = datetime(2025, 5, 6, 7, 8, tzinfo=timezone.utc)
+    async with factory() as session:
+        session.add(
+            EscalationTicket(
+                ticket_id=ticket_id,
+                conversation_id=conversation.conversation_id,
+                customer_id=conversation.customer_id,
+                priority="high",
+                reason="complex_complaint",
+                assigned_to="Historical Operator",
+                status=ticket_status,
+                resolution_notes=(
+                    "Historical resolution" if ticket_status == "resolved" else None
+                ),
+                transcript_snapshot=[{"historical": True}],
+                maps_tags_snapshot={"source": "parked"},
+                created_at=ticket_created_at,
+                resolved_at=(
+                    ticket_created_at if ticket_status == "resolved" else None
+                ),
+            )
+        )
+        await session.commit()
+
+    key = uuid.uuid4()
+    returned = await _transition(
+        engine,
+        account=accounts[0],
+        conversation_id=conversation.conversation_id,
+        target="ai",
+        expected_version=2,
+        key=key,
+    )
+    replay = await _transition(
+        engine,
+        account=accounts[0],
+        conversation_id=conversation.conversation_id,
+        target="ai",
+        expected_version=2,
+        key=key,
+    )
+
+    assert returned.replayed is False
+    assert replay.replayed is True
+    assert returned.ownership.owner_type == "ai"
+    assert returned.ownership.human_owner_account_id is None
+    assert returned.ownership.ai_execution_state == "eligible"
+    assert returned.ownership.version == 3
+    async with factory() as session:
+        persisted = await session.get(Conversation, conversation.conversation_id)
+        ticket = await session.get(EscalationTicket, ticket_id)
+        assert persisted is not None
+        assert persisted.owner_type == "ai"
+        assert persisted.human_owner_account_id is None
+        assert persisted.ai_execution_state == "eligible"
+        assert persisted.ownership_version == 3
+        assert ticket is not None
+        assert ticket.ticket_id == ticket_id
+        assert ticket.status == ticket_status
+        assert ticket.reason == "complex_complaint"
+        assert ticket.priority == "high"
+        assert ticket.created_at == ticket_created_at
+        assert ticket.assigned_to == "Historical Operator"
+        assert ticket.transcript_snapshot == [{"historical": True}]
+        assert ticket.maps_tags_snapshot == {"source": "parked"}
+        audits = (
+            await session.scalars(
+                select(OperatorAuditEvent).order_by(OperatorAuditEvent.occurred_at)
+            )
+        ).all()
+        assert [audit.action for audit in audits] == [
+            "conversation_taken_over",
+            "conversation_returned_to_ai",
+        ]
+        assert audits[0].event_metadata["ownership_version"] == 2
+        assert audits[1].event_metadata["ownership_version"] == 3
+        assert await session.scalar(
+            select(func.count()).select_from(ConversationOwnershipIdempotency)
+        ) == 2
+
+
+@pytest.mark.asyncio
+async def test_concurrent_return_with_parked_ticket_is_one_logical_transition(
     engine: AsyncEngine,
 ) -> None:
     accounts, conversation, _message = await _seed(engine)
@@ -324,31 +422,65 @@ async def test_unresolved_advanced_ticket_blocks_return_without_changing_owner(
         key=uuid.uuid4(),
     )
     factory = async_sessionmaker(engine, expire_on_commit=False)
+    ticket_id = uuid.uuid4()
     async with factory() as session:
         session.add(
             EscalationTicket(
+                ticket_id=ticket_id,
                 conversation_id=conversation.conversation_id,
                 customer_id=conversation.customer_id,
                 priority="medium",
                 reason="complex_complaint",
-                status="open",
+                status="in_progress",
                 transcript_snapshot=[],
             )
         )
         await session.commit()
 
-    with pytest.raises(ReturnToAIBlocked):
-        await _transition(
-            engine,
-            account=accounts[0],
-            conversation_id=conversation.conversation_id,
-            target="ai",
-            expected_version=2,
-            key=uuid.uuid4(),
-        )
+    key = uuid.uuid4()
+
+    async def attempt() -> str:
+        try:
+            result = await _transition(
+                engine,
+                account=accounts[0],
+                conversation_id=conversation.conversation_id,
+                target="ai",
+                expected_version=2,
+                key=key,
+            )
+            return "replayed" if result.replayed else "applied"
+        except IdempotencyInProgress:
+            return "in_progress"
+
+    results = await asyncio.gather(attempt(), attempt())
+    assert results.count("applied") == 1
+    assert set(results) <= {"applied", "replayed", "in_progress"}
+    settled = await _transition(
+        engine,
+        account=accounts[0],
+        conversation_id=conversation.conversation_id,
+        target="ai",
+        expected_version=2,
+        key=key,
+    )
+    assert settled.replayed is True
+
     async with factory() as session:
         persisted = await session.get(Conversation, conversation.conversation_id)
+        ticket = await session.get(EscalationTicket, ticket_id)
         assert persisted is not None
-        assert persisted.owner_type == "human"
-        assert persisted.human_owner_account_id == accounts[0].account_id
-        assert persisted.ai_execution_state == "paused"
+        assert persisted.owner_type == "ai"
+        assert persisted.human_owner_account_id is None
+        assert persisted.ai_execution_state == "eligible"
+        assert persisted.ownership_version == 3
+        assert ticket is not None
+        assert ticket.status == "in_progress"
+        assert await session.scalar(
+            select(func.count())
+            .select_from(OperatorAuditEvent)
+            .where(OperatorAuditEvent.action == "conversation_returned_to_ai")
+        ) == 1
+        assert await session.scalar(
+            select(func.count()).select_from(ConversationOwnershipIdempotency)
+        ) == 2

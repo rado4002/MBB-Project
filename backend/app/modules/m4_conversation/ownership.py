@@ -18,11 +18,9 @@ from app.models.conversation import Conversation
 from app.models.conversation_ownership_idempotency import (
     ConversationOwnershipIdempotency,
 )
-from app.models.escalation_ticket import EscalationTicket
 from app.models.operator_account import OperatorAccount
 from app.operator_identity.audit import append_operator_audit_event
 
-_ACTIVE_ESCALATION_STATUSES = ("open", "in_progress")
 _RESERVATION_LIFETIME = timedelta(minutes=5)
 
 
@@ -51,10 +49,6 @@ class ReturnToAIDisabled(OwnershipTransitionError):
 
 
 class ReturnToAIUnavailable(OwnershipTransitionError):
-    pass
-
-
-class ReturnToAIBlocked(OwnershipTransitionError):
     pass
 
 
@@ -362,15 +356,6 @@ async def transition_ownership(
             if ai_adapter != "claude":
                 await _discard(session, reservation)
                 raise ReturnToAIUnavailable
-            blocking_ticket = await session.scalar(
-                select(EscalationTicket.ticket_id).where(
-                    EscalationTicket.conversation_id == conversation_id,
-                    EscalationTicket.status.in_(_ACTIVE_ESCALATION_STATUSES),
-                )
-            )
-            if blocking_ticket is not None:
-                await _discard(session, reservation)
-                raise ReturnToAIBlocked
             next_human_owner = None
             next_ai_state = "eligible"
             action = "conversation_returned_to_ai"
@@ -454,7 +439,6 @@ async def transition_ownership(
         OwnershipConflict,
         ReturnToAIDisabled,
         ReturnToAIUnavailable,
-        ReturnToAIBlocked,
     ):
         raise
     except OwnershipTransitionUnavailable:

@@ -40,8 +40,6 @@ function errorCopy(error: ApiError): string {
       return 'The MBB AI Assistant is currently disabled. This conversation remains under human control.'
     case 'AI_UNAVAILABLE':
       return 'The MBB AI Assistant is currently unavailable. This conversation remains under human control.'
-    case 'AI_RETURN_BLOCKED':
-      return 'An unresolved condition prevents returning this conversation to the MBB AI Assistant.'
     default:
       break
   }
