@@ -262,13 +262,14 @@ describe('responsive Inbox workflow refinement', () => {
     expect(document.body.style.overflow).toBe('')
   })
 
-  it('keeps the refined workflow read-only and free of unsupported controls', async () => {
+  it('keeps the refined workflow free of unsupported write controls', async () => {
     server.use(authenticated(), ...workspaceHandlers())
     const { container } = renderApp(`/inbox/${conversationId}`)
     await screen.findByRole('region', { name: 'Message history' })
 
+    expect(screen.getByRole('button', { name: 'Escalate' })).toBeInTheDocument()
     expect(screen.queryByRole('button', {
-      name: /reply|send|assign|take over|resolve|escalate|compose|\bAI\b/i,
+      name: /reply|send|assign|take over|resolve|compose|\bAI\b/i,
     })).not.toBeInTheDocument()
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
     expect(screen.queryByText(/owner|channel|delivery status|unread|priority/i)).not.toBeInTheDocument()

@@ -15,8 +15,11 @@ import type {
   OperatorConversationDetail,
   OperatorMessageItem,
 } from '../../api/contracts/conversations'
+import type { OperatorEscalationResponse } from '../../api/contracts/escalations'
 import { errorMessage, type ApiError } from '../../api/errors'
+import { useAuth } from '../../auth/AuthProvider'
 import { InlineAlert } from '../../components/InlineAlert'
+import { EscalationDialog } from './EscalationDialog'
 import {
   useConversationDetail,
   useMessageHistory,
@@ -154,6 +157,40 @@ function ConversationHeader({
         Last updated <time dateTime={detail.updated_at}>{formatTimestamp(detail.updated_at)}</time>
       </p>
     </div>
+  )
+}
+
+function EscalationResultCard({
+  result,
+  headingRef,
+}: {
+  result: OperatorEscalationResponse
+  headingRef: RefObject<HTMLHeadingElement | null>
+}) {
+  return (
+    <section className="escalation-result" aria-labelledby="escalation-result-heading">
+      <div className="escalation-result__heading">
+        <div>
+          <p className="eyebrow">Authoritative escalation</p>
+          <h3 id="escalation-result-heading" ref={headingRef} tabIndex={-1}>Escalation created</h3>
+        </div>
+        <span className="status-pill">{label(result.status)}</span>
+      </div>
+      <dl className="escalation-result__details">
+        <div><dt>Type</dt><dd>{label(result.type)}</dd></div>
+        <div><dt>Priority</dt><dd>{label(result.priority)}</dd></div>
+        <div><dt>Created by</dt><dd>{result.created_by.display_name}</dd></div>
+        <div>
+          <dt>Created</dt>
+          <dd><time dateTime={result.created_at}>{formatTimestamp(result.created_at)}</time></dd>
+        </div>
+        <div className="escalation-result__reason"><dt>Reason</dt><dd>{result.reason}</dd></div>
+        <div className="escalation-result__reference"><dt>Reference</dt><dd><code>{result.escalation_id}</code></dd></div>
+      </dl>
+      <p className="escalation-result__note">
+        Conversation state and routing were not changed.
+      </p>
+    </section>
   )
 }
 
@@ -448,13 +485,53 @@ export function ConversationWorkspace({
   conversationId: string
   backTo: string
 }) {
+  const auth = useAuth()
   const detail = useConversationDetail(client, conversationId)
   const workspaceHeadingRef = useRef<HTMLHeadingElement>(null)
+  const escalationResultHeadingRef = useRef<HTMLHeadingElement>(null)
   const detailsButtonRef = useRef<HTMLButtonElement>(null)
+  const escalationButtonRef = useRef<HTMLButtonElement>(null)
   const [contextOpen, setContextOpen] = useState(false)
+  const [escalationOpen, setEscalationOpen] = useState(false)
+  const [createdEscalation, setCreatedEscalation] =
+    useState<OperatorEscalationResponse | null>(null)
+  const [alreadyOpenConversationId, setAlreadyOpenConversationId] =
+    useState<string | null>(null)
   const closeContext = useCallback(() => setContextOpen(false), [])
+  const closeEscalation = useCallback(() => setEscalationOpen(false), [])
+
+  const currentCreatedEscalation =
+    createdEscalation?.conversation_id === conversationId
+      ? createdEscalation
+      : null
+  const alreadyOpen = alreadyOpenConversationId === conversationId
+  const canEscalate = Boolean(
+    detail.detail &&
+      !detail.loading &&
+      !detail.error &&
+      !detail.detail.open_escalation.exists &&
+      !currentCreatedEscalation &&
+      !alreadyOpen &&
+      auth.session?.capabilities.includes('escalation.create'),
+  )
+
+  const handleCreated = async (result: OperatorEscalationResponse) => {
+    setCreatedEscalation(result)
+    setAlreadyOpenConversationId(null)
+    await detail.refresh()
+  }
+
+  const handleAlreadyOpen = async () => {
+    setAlreadyOpenConversationId(conversationId)
+    await detail.refresh()
+  }
 
   useEffect(() => workspaceHeadingRef.current?.focus(), [conversationId])
+  useEffect(() => {
+    if (currentCreatedEscalation && !escalationOpen) {
+      escalationResultHeadingRef.current?.focus()
+    }
+  }, [currentCreatedEscalation, escalationOpen])
 
   return (
     <section className="conversation-workspace" aria-labelledby="workspace-heading">
@@ -465,16 +542,30 @@ export function ConversationWorkspace({
             <span className="back-label back-label--short" aria-hidden="true">Back</span>
           </Link>
           <h2 id="workspace-heading" tabIndex={-1} ref={workspaceHeadingRef}>Conversation</h2>
-          <button
-            className="button button--secondary context-trigger"
-            type="button"
-            aria-haspopup="dialog"
-            aria-expanded={contextOpen}
-            onClick={() => setContextOpen(true)}
-            ref={detailsButtonRef}
-          >
-            Details
-          </button>
+          <div className="workspace-toolbar__actions">
+            {canEscalate ? (
+              <button
+                className="button button--primary"
+                type="button"
+                aria-haspopup="dialog"
+                aria-expanded={escalationOpen}
+                onClick={() => setEscalationOpen(true)}
+                ref={escalationButtonRef}
+              >
+                Escalate
+              </button>
+            ) : null}
+            <button
+              className="button button--secondary context-trigger"
+              type="button"
+              aria-haspopup="dialog"
+              aria-expanded={contextOpen}
+              onClick={() => setContextOpen(true)}
+              ref={detailsButtonRef}
+            >
+              Details
+            </button>
+          </div>
         </div>
         <div className="workspace-detail-region" aria-label="Conversation details" aria-busy={detail.loading}>
           <ConversationHeader
@@ -483,6 +574,17 @@ export function ConversationWorkspace({
             error={detail.error}
             onRetry={detail.retry}
           />
+          {alreadyOpen ? (
+            <InlineAlert tone="warning">
+              This conversation already has an active escalation. Conversation details were refreshed.
+            </InlineAlert>
+          ) : null}
+          {currentCreatedEscalation ? (
+            <EscalationResultCard
+              result={currentCreatedEscalation}
+              headingRef={escalationResultHeadingRef}
+            />
+          ) : null}
         </div>
       </div>
       <div className="workspace-columns">
@@ -496,6 +598,16 @@ export function ConversationWorkspace({
         detail={detail.detail}
         loading={detail.loading}
         error={detail.error}
+      />
+      <EscalationDialog
+        key={conversationId}
+        open={escalationOpen}
+        conversationId={conversationId}
+        client={client}
+        returnFocusRef={escalationButtonRef}
+        onClose={closeEscalation}
+        onCreated={handleCreated}
+        onAlreadyOpen={handleAlreadyOpen}
       />
     </section>
   )

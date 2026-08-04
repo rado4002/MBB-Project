@@ -20,6 +20,7 @@ interface AuthContextValue extends AuthState {
   reauthenticate(password: string): Promise<BrowserSession>
   logout(): Promise<void>
   retryLogout(): Promise<void>
+  getCsrfForMutation(): Promise<string>
   handleSessionExpired(): void
 }
 
@@ -170,6 +171,7 @@ export function AuthProvider({
       reauthenticate,
       logout,
       retryLogout,
+      getCsrfForMutation: csrfForMutation,
       handleSessionExpired: expireSession,
     }),
     [
@@ -180,6 +182,7 @@ export function AuthProvider({
       reauthenticate,
       logout,
       retryLogout,
+      csrfForMutation,
       expireSession,
     ],
   )

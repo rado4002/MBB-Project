@@ -438,7 +438,7 @@ describe('read-only conversation workspace', () => {
     expect(screen.queryByRole('navigation')).not.toBeInTheDocument()
   })
 
-  it('is axe-clean and exposes no write controls or unsupported fields', async () => {
+  it('is axe-clean and exposes only the supported escalation write action', async () => {
     server.use(
       authenticated(),
       http.get('/api/v1/operator/conversations', () =>
@@ -449,7 +449,8 @@ describe('read-only conversation workspace', () => {
     const { container } = renderApp(`/inbox/${firstId}`)
     await screen.findByRole('region', { name: 'Message history' })
 
-    expect(screen.queryByRole('button', { name: /reply|send|assign|take over|resolve|escalate|compose|\bAI\b/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Escalate' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /reply|send|assign|take over|resolve|compose|\bAI\b/i })).not.toBeInTheDocument()
     expect(screen.queryByText(/owner|channel|delivery status|unread|priority/i)).not.toBeInTheDocument()
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
     await expectAccessible(container)

@@ -14,6 +14,7 @@ export interface RequestOptions {
   method?: 'GET' | 'POST'
   body?: object
   csrfToken?: string
+  idempotencyKey?: string
   signal?: AbortSignal
   notifySessionExpiration?: boolean
 }
@@ -30,6 +31,9 @@ export async function requestJson<T>(
     headers.set('Content-Type', 'application/json')
   }
   if (options.csrfToken) headers.set('X-CSRF-Token', options.csrfToken)
+  if (options.idempotencyKey) {
+    headers.set('Idempotency-Key', options.idempotencyKey)
+  }
 
   const response = await fetch(path, {
     method,

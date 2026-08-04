@@ -5,6 +5,10 @@ import type {
   OperatorConversationQueueResponse,
   OperatorMessageHistoryResponse,
 } from './contracts/conversations'
+import type {
+  OperatorEscalationCreate,
+  OperatorEscalationResponse,
+} from './contracts/escalations'
 
 export interface ConversationQueueRequest {
   filters: ConversationFilters
@@ -20,6 +24,13 @@ export interface ConversationApiClient {
     before?: string,
     signal?: AbortSignal,
   ): Promise<OperatorMessageHistoryResponse>
+  createEscalation(
+    conversationId: string,
+    body: OperatorEscalationCreate,
+    idempotencyKey: string,
+    csrfToken: string,
+    signal?: AbortSignal,
+  ): Promise<OperatorEscalationResponse>
 }
 
 export function createConversationApiClient(
@@ -60,5 +71,23 @@ export function createConversationApiClient(
         onSessionExpired,
       )
     },
+    createEscalation: (
+      conversationId,
+      body,
+      idempotencyKey,
+      csrfToken,
+      signal,
+    ) =>
+      requestJson<OperatorEscalationResponse>(
+        `${conversationPath(conversationId)}/escalations`,
+        {
+          method: 'POST',
+          body,
+          csrfToken,
+          idempotencyKey,
+          signal,
+        },
+        onSessionExpired,
+      ),
   }
 }

@@ -16,7 +16,12 @@ export function sessionFixture(
       display_name: role === 'administrator' ? 'Ada Admin' : role === 'operator' ? 'Omar Operator' : 'Ana Analyst',
       role,
     },
-    capabilities: ['auth.reauthenticate'],
+    capabilities: [
+      'auth.reauthenticate',
+      'conversation.read',
+      'message.read',
+      ...(role === 'analyst' ? [] : ['escalation.create']),
+    ],
     must_change_password: mustChangePassword,
     idle_expires_at_epoch: 1_900_000_000,
     absolute_expires_at_epoch: 1_900_003_600,

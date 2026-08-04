@@ -59,7 +59,11 @@ export function useConversationDetail(
     return () => controller.current?.abort()
   }, [loadDetail])
 
-  return { ...state, retry: () => loadDetail(true) }
+  return {
+    ...state,
+    retry: () => loadDetail(true),
+    refresh: () => loadDetail(false),
+  }
 }
 
 interface HistoryState {
