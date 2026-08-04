@@ -437,7 +437,7 @@ function MessageTimeline({
       ) : history.items.length === 0 ? (
         <p className="workspace-state">No messages are available.</p>
       ) : (
-        <div className="message-history" ref={timelineRef} role="region" aria-label="Message history">
+        <div className="message-history" ref={timelineRef} role="region" aria-label="Message history" tabIndex={0}>
           <p className="visually-hidden" role="status">{history.items.length} messages loaded.</p>
           {history.nextOlderCursor ? (
             <div className="load-earlier" aria-live="polite">
