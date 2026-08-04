@@ -33,6 +33,12 @@ class _BaseTask(Task):
     default_retry_delay = 30
 
 
+async def _ai_may_reply(session, conversation_id: uuid.UUID, *, lock: bool = False) -> bool:
+    from app.modules.m4_conversation.ownership import ai_may_reply
+
+    return await ai_may_reply(session, conversation_id, lock=lock)
+
+
 def _integrity_constraint_name(exc: IntegrityError) -> str | None:
     """Extract a PostgreSQL constraint name without classifying other errors."""
     original = exc.orig
@@ -101,6 +107,14 @@ async def _persist_outbound(
 
     async with async_session_factory() as session:
         try:
+            if not await _ai_may_reply(session, conversation_id, lock=True):
+                await session.rollback()
+                log.info(
+                    "m1.persist_outbound.skipped",
+                    conversation_id=str(conversation_id),
+                    reason="ai_paused",
+                )
+                return None
             outbound_id = await persist_outbound(
                 session=session,
                 conversation_id=conversation_id,
@@ -233,6 +247,14 @@ async def _process(
 
         conv_id = str(inbound.conversation_id)
         language = inbound.language
+        if not await _ai_may_reply(session, inbound.conversation_id):
+            await session.rollback()
+            log.info("m1.autonomous_reply.skipped", conv_id=conv_id, reason="human_owner")
+            return {
+                "status": "human_controlled",
+                "conversation_id": conv_id,
+                "send_status": "skipped",
+            }
 
         # ── Opt-out ────────────────────────────────────────────────────────────
         if inbound.is_opted_out:
@@ -249,6 +271,7 @@ async def _process(
                 customer_phone,
                 response_text,
                 idempotency_key=str(outbound_id),
+                conversation_id=inbound.conversation_id,
             )
             return {
                 "status": "opt_out",
@@ -278,6 +301,7 @@ async def _process(
                 customer_phone,
                 response_text,
                 idempotency_key=str(outbound_id),
+                conversation_id=inbound.conversation_id,
             )
             return {
                 "status": "escalated_voice_note",
@@ -400,6 +424,7 @@ async def _process(
             customer_phone,
             ai_response,
             idempotency_key=str(out_msg_id),
+            conversation_id=inbound.conversation_id,
         )
 
         log.info(
@@ -427,21 +452,37 @@ async def _send_safe(
     text: str,
     *,
     idempotency_key: str,
+    conversation_id: uuid.UUID | None = None,
 ) -> dict[str, str]:
     """Send once through the adapter and report only confirmed outcomes."""
     from app.adapters import get_messaging_adapter
+    from app.database import async_session_factory
 
     if not settings.whatsapp_send_enabled:
         log.info("m1.send_message.skipped", reason="whatsapp_send_disabled")
         return {"status": "skipped"}
 
     try:
-        adapter = get_messaging_adapter()
-        provider_message_id = await adapter.send_message(
-            phone,
-            text,
-            idempotency_key=idempotency_key,
-        )
+        if conversation_id is None:
+            adapter = get_messaging_adapter()
+            provider_message_id = await adapter.send_message(
+                phone,
+                text,
+                idempotency_key=idempotency_key,
+            )
+        else:
+            async with async_session_factory() as session:
+                if not await _ai_may_reply(session, conversation_id, lock=True):
+                    await session.rollback()
+                    log.info("m1.send_message.skipped", reason="ai_paused")
+                    return {"status": "skipped"}
+                adapter = get_messaging_adapter()
+                provider_message_id = await adapter.send_message(
+                    phone,
+                    text,
+                    idempotency_key=idempotency_key,
+                )
+                await session.commit()
         if not isinstance(provider_message_id, str) or not provider_message_id.strip():
             log.error(
                 "m1.send_message.unknown_or_failed",

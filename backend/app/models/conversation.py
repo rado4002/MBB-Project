@@ -20,6 +20,25 @@ class Conversation(Base):
             "language_detected IN ('lingala', 'french', 'swahili')",
             name="chk_conv_language",
         ),
+        CheckConstraint(
+            "owner_type IN ('ai', 'human')",
+            name="chk_conv_owner_type",
+        ),
+        CheckConstraint(
+            "ai_execution_state IN ('eligible', 'paused')",
+            name="chk_conv_ai_execution_state",
+        ),
+        CheckConstraint(
+            "(owner_type = 'ai' AND human_owner_account_id IS NULL "
+            "AND ai_execution_state = 'eligible') OR "
+            "(owner_type = 'human' AND human_owner_account_id IS NOT NULL "
+            "AND ai_execution_state = 'paused')",
+            name="chk_conv_exclusive_owner",
+        ),
+        CheckConstraint(
+            "ownership_version > 0",
+            name="chk_conv_ownership_version_positive",
+        ),
         Index("idx_conv_customer", "customer_id"),
         Index("idx_conv_status", "status"),
         Index("idx_conv_last_msg", "last_message_time"),
@@ -52,6 +71,27 @@ class Conversation(Base):
     )
     message_count: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")
+    )
+    owner_type: Mapped[str] = mapped_column(
+        String(10), nullable=False, server_default="ai"
+    )
+    human_owner_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "mbb.operator_accounts.account_id",
+            name="fk_conversations_human_owner_account_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    ai_execution_state: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="eligible"
+    )
+    ownership_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    ownership_updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
     )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")

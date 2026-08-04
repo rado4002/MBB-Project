@@ -86,7 +86,8 @@ def _patch_normal_flow(
     events = []
     inbound_session = _Session(events)
     outbound_session = _Session(events, commit_error=outbound_commit_error)
-    sessions = iter((inbound_session, outbound_session))
+    send_session = _Session(events)
+    sessions = iter((inbound_session, outbound_session, send_session))
     conversation_id = uuid.uuid4()
     inbound = ProcessedInbound(
         customer_phone="+243812345678",
@@ -132,6 +133,10 @@ def _patch_normal_flow(
         lambda _content: False,
     )
     monkeypatch.setattr(m1, "_dispatch_maps_fanout", lambda **_kwargs: None)
+    async def _allow_ai(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(m1, "_ai_may_reply", _allow_ai)
     monkeypatch.setattr(
         m1,
         "settings",
@@ -173,6 +178,24 @@ def test_committed_outbound_uuid_reaches_send_safe_and_adapter(monkeypatch):
     assert result["send_status"] == "sent"
     assert result["provider_message_id"] == "provider-456"
     assert task.retry_calls == 0
+
+
+def test_human_ownership_stops_generation_persistence_and_send(monkeypatch):
+    events, messaging = _patch_normal_flow(
+        monkeypatch,
+        outbound_id=uuid.uuid4(),
+    )
+
+    async def _pause_ai(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(m1, "_ai_may_reply", _pause_ai)
+    result = _run(_process(_Task()))
+
+    assert result["status"] == "human_controlled"
+    assert result["send_status"] == "skipped"
+    assert events == ["inbound", "commit", "rollback"]
+    assert messaging.calls == []
 
 
 def test_outbound_commit_failure_is_fail_closed_without_fallback_uuid(monkeypatch):
@@ -259,6 +282,46 @@ def test_disabled_sending_is_honestly_skipped_without_adapter_lookup(monkeypatch
     )
 
     assert result == {"status": "skipped"}
+
+
+def test_last_moment_human_takeover_blocks_adapter_send(monkeypatch):
+    import app.adapters as adapters
+    import app.database as database
+
+    events = []
+    session = _Session(events)
+
+    async def _pause_ai(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(
+        m1,
+        "settings",
+        SimpleNamespace(whatsapp_send_enabled=True),
+    )
+    monkeypatch.setattr(m1, "_ai_may_reply", _pause_ai)
+    monkeypatch.setattr(
+        database,
+        "async_session_factory",
+        lambda: _SessionContext(session),
+    )
+    monkeypatch.setattr(
+        adapters,
+        "get_messaging_adapter",
+        lambda: pytest.fail("adapter lookup occurred"),
+    )
+
+    result = _run(
+        m1._send_safe(
+            "+243812345678",
+            "private-message",
+            idempotency_key=str(uuid.uuid4()),
+            conversation_id=uuid.uuid4(),
+        )
+    )
+
+    assert result == {"status": "skipped"}
+    assert events == ["rollback"]
 
 
 def test_empty_provider_id_is_unknown_or_failed(monkeypatch):

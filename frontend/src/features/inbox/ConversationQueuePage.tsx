@@ -97,6 +97,11 @@ function QueueRow({
           <div className="conversation-labels" aria-label="Conversation labels">
             <span>{statusLabels[item.status]}</span>
             <span>{languageLabels[item.language]}</span>
+            <span>
+              {item.ownership.owner_type === 'ai'
+                ? 'Controlled by MBB AI Assistant'
+                : `Controlled by ${item.ownership.human_owner?.display_name ?? 'Human Operator'}`}
+            </span>
             {item.open_escalation.exists ? <span>Open escalation</span> : null}
           </div>
           {item.awaiting_response_since ? (
@@ -295,6 +300,7 @@ export function ConversationQueuePage() {
             client={client}
             conversationId={conversationId}
             backTo={`/inbox${location.search}`}
+            onOwnershipChanged={() => queue.refresh()}
           />
         ) : (
           <aside className="queue-workspace" aria-label="Conversation workspace">

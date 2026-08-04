@@ -16,6 +16,7 @@ export interface NormalizedApiError {
   category: ApiErrorCategory
   requestId?: string
   retryAfterSeconds?: number
+  operatorMessage?: string
 }
 
 export class ApiError extends Error implements NormalizedApiError {
@@ -24,6 +25,7 @@ export class ApiError extends Error implements NormalizedApiError {
   readonly category: ApiErrorCategory
   readonly requestId?: string
   readonly retryAfterSeconds?: number
+  readonly operatorMessage?: string
 
   constructor(error: NormalizedApiError) {
     super(error.category)
@@ -33,6 +35,7 @@ export class ApiError extends Error implements NormalizedApiError {
     this.category = error.category
     this.requestId = error.requestId
     this.retryAfterSeconds = error.retryAfterSeconds
+    this.operatorMessage = error.operatorMessage
   }
 }
 
@@ -123,6 +126,7 @@ export async function normalizeApiError(response: Response): Promise<ApiError> {
     retryAfterFromHeader(response.headers.get('Retry-After')) ??
     safeSeconds(detail.retry_after_seconds) ??
     safeSeconds(detail.retryAfterSeconds)
+  const operatorMessage = safeString(detail.message)
 
   return new ApiError({
     status: response.status,
@@ -130,6 +134,7 @@ export async function normalizeApiError(response: Response): Promise<ApiError> {
     category: categoryFor(response.status, code),
     ...(requestId ? { requestId } : {}),
     ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
+    ...(operatorMessage ? { operatorMessage } : {}),
   })
 }
 

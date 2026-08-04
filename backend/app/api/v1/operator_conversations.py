@@ -32,6 +32,19 @@ from app.models.customer import Customer
 from app.models.escalation_ticket import EscalationTicket
 from app.models.lead import Lead
 from app.models.message import Message
+from app.models.operator_account import OperatorAccount
+from app.modules.m4_conversation.ownership import (
+    ConversationNotFound as OwnershipConversationNotFound,
+    IdempotencyConflict as OwnershipIdempotencyConflict,
+    IdempotencyInProgress as OwnershipIdempotencyInProgress,
+    OwnershipConflict,
+    OwnershipSnapshot,
+    OwnershipTransitionUnavailable,
+    ReturnToAIBlocked,
+    ReturnToAIDisabled,
+    ReturnToAIUnavailable,
+    transition_ownership,
+)
 from app.modules.m8_maps.operator_escalation import (
     ConversationNotFound,
     EscalationAlreadyOpen,
@@ -45,15 +58,19 @@ from app.request_ids import normalize_or_generate_request_id
 from app.schemas.common import ConversationStatus, Language
 from app.schemas.operator_conversations import (
     OperatorConversationDetail,
+    OperatorConversationOwnership,
     OperatorConversationQueueItem,
     OperatorConversationQueueResponse,
     OperatorCustomerSummary,
     OperatorLatestMessage,
     OperatorLeadSummary,
+    OperatorHumanOwner,
     OperatorMessageHistoryResponse,
     OperatorMessageItem,
     OperatorMessageMedia,
     OperatorOpenEscalation,
+    OperatorOwnershipTransitionRequest,
+    OperatorOwnershipTransitionResponse,
 )
 from app.schemas.operator_escalations import (
     OperatorEscalationActor,
@@ -271,6 +288,41 @@ def _escalation_response(
     )
 
 
+def _ownership_response(
+    ownership: OwnershipSnapshot,
+) -> OperatorConversationOwnership:
+    human_owner = None
+    if (
+        ownership.human_owner_account_id is not None
+        and ownership.human_owner_display_name is not None
+    ):
+        human_owner = OperatorHumanOwner(
+            account_id=ownership.human_owner_account_id,
+            display_name=ownership.human_owner_display_name,
+        )
+    return OperatorConversationOwnership(
+        owner_type=ownership.owner_type,
+        human_owner=human_owner,
+        ai_execution_state=ownership.ai_execution_state,
+        version=ownership.version,
+        updated_at=ownership.updated_at,
+    )
+
+
+def _ownership_from_row(row: Any) -> OperatorConversationOwnership:
+    return _ownership_response(
+        OwnershipSnapshot(
+            conversation_id=row["conversation_id"],
+            owner_type=row["owner_type"],
+            human_owner_account_id=row["human_owner_account_id"],
+            human_owner_display_name=row["human_owner_display_name"],
+            ai_execution_state=row["ai_execution_state"],
+            version=row["ownership_version"],
+            updated_at=row["ownership_updated_at"],
+        )
+    )
+
+
 @router.get("", response_model=OperatorConversationQueueResponse)
 async def list_operator_conversations(
     response: Response,
@@ -308,6 +360,11 @@ async def list_operator_conversations(
             Conversation.language_detected,
             Conversation.status,
             Conversation.message_count,
+            Conversation.owner_type,
+            Conversation.human_owner_account_id,
+            Conversation.ai_execution_state,
+            Conversation.ownership_version,
+            Conversation.ownership_updated_at,
             Customer.name.label("customer_display_name"),
             _masked_phone_expression().label("customer_phone_masked"),
             latest_message.c.latest_content,
@@ -315,8 +372,13 @@ async def list_operator_conversations(
             latest_message.c.latest_direction,
             latest_message.c.latest_occurred_at,
             open_escalation.label("has_open_escalation"),
+            OperatorAccount.display_name.label("human_owner_display_name"),
         )
         .join(Customer, Customer.phone_number == Conversation.customer_id)
+        .outerjoin(
+            OperatorAccount,
+            OperatorAccount.account_id == Conversation.human_owner_account_id,
+        )
         .outerjoin(latest_message, true())
         .where(_operator_access_predicate(principal))
         .order_by(
@@ -381,6 +443,7 @@ async def list_operator_conversations(
                 open_escalation=OperatorOpenEscalation(
                     exists=row["has_open_escalation"]
                 ),
+                ownership=_ownership_from_row(row),
             )
         )
 
@@ -484,6 +547,127 @@ async def create_operator_conversation_escalation(
     return payload
 
 
+@router.post(
+    "/{conversation_id}/ownership",
+    response_model=OperatorOwnershipTransitionResponse,
+)
+async def change_operator_conversation_ownership(
+    conversation_id: UUID,
+    body: OperatorOwnershipTransitionRequest,
+    request: Request,
+    response: Response,
+    principal: Annotated[BrowserPrincipal, Depends(require_csrf)],
+    _read_principal: Annotated[
+        BrowserPrincipal, Depends(require_capability("conversation.read"))
+    ],
+    _ownership_principal: Annotated[
+        BrowserPrincipal,
+        Depends(require_capability("conversation.ownership.change")),
+    ],
+    settings: Annotated[Settings, Depends(get_browser_settings)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[
+        UUID4, Header(alias="Idempotency-Key", include_in_schema=True)
+    ],
+) -> OperatorOwnershipTransitionResponse:
+    validate_state_changing_request(request, settings)
+    request_id = normalize_or_generate_request_id(
+        getattr(request.state, "request_id", None)
+        or request.headers.get("X-Request-ID")
+    )
+    try:
+        result = await transition_ownership(
+            db,
+            conversation_id=conversation_id,
+            target_owner_type=body.target_owner_type,
+            expected_version=body.expected_version,
+            actor_account_id=principal.account.account_id,
+            actor_display_name=principal.account.display_name,
+            actor_role=principal.account.role,
+            idempotency_key=idempotency_key,
+            idempotency_secret=settings.browser_idempotency_hmac_secret,
+            request_id=request_id,
+            ai_adapter=settings.ai_adapter,
+            source_network_fingerprint=(
+                principal.session.record.ip_prefix_fingerprint
+            ),
+            user_agent_fingerprint=(
+                principal.session.record.user_agent_fingerprint
+            ),
+        )
+    except OwnershipConversationNotFound as exc:
+        raise _operator_error(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="CONVERSATION_NOT_FOUND",
+            message="The conversation was not found.",
+        ) from exc
+    except OwnershipIdempotencyConflict as exc:
+        raise _operator_error(
+            status_code=status.HTTP_409_CONFLICT,
+            code="IDEMPOTENCY_CONFLICT",
+            message="The idempotency key was already used for another request.",
+        ) from exc
+    except OwnershipIdempotencyInProgress as exc:
+        raise _operator_error(
+            status_code=status.HTTP_409_CONFLICT,
+            code="IDEMPOTENCY_IN_PROGRESS",
+            message="The unchanged ownership request is still in progress.",
+        ) from exc
+    except OwnershipConflict as exc:
+        owner = (
+            exc.current.human_owner_display_name
+            if exc.current.owner_type == "human"
+            else "MBB AI Assistant"
+        ) or "another Human Operator"
+        raise _operator_error(
+            status_code=status.HTTP_409_CONFLICT,
+            code="OWNERSHIP_CONFLICT",
+            message=f"This conversation is now controlled by {owner}.",
+        ) from exc
+    except ReturnToAIDisabled as exc:
+        raise _operator_error(
+            status_code=status.HTTP_409_CONFLICT,
+            code="AI_DISABLED",
+            message=(
+                "The MBB AI Assistant is currently disabled. "
+                "This conversation remains under human control."
+            ),
+        ) from exc
+    except ReturnToAIUnavailable as exc:
+        raise _operator_error(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            code="AI_UNAVAILABLE",
+            message=(
+                "The MBB AI Assistant is currently unavailable. "
+                "This conversation remains under human control."
+            ),
+        ) from exc
+    except ReturnToAIBlocked as exc:
+        raise _operator_error(
+            status_code=status.HTTP_409_CONFLICT,
+            code="AI_RETURN_BLOCKED",
+            message=(
+                "An unresolved condition prevents returning this conversation "
+                "to the MBB AI Assistant."
+            ),
+        ) from exc
+    except OwnershipTransitionUnavailable as exc:
+        raise _operator_error(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            code="SERVICE_UNAVAILABLE",
+            message="The ownership service is temporarily unavailable.",
+        ) from exc
+
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Idempotent-Replayed"] = (
+        "true" if result.replayed else "false"
+    )
+    return OperatorOwnershipTransitionResponse(
+        conversation_id=conversation_id,
+        ownership=_ownership_response(result.ownership),
+    )
+
+
 @router.get("/{conversation_id}", response_model=OperatorConversationDetail)
 async def get_operator_conversation(
     conversation_id: UUID,
@@ -501,6 +685,11 @@ async def get_operator_conversation(
             Conversation.language_detected,
             Conversation.message_count,
             Conversation.updated_at,
+            Conversation.owner_type,
+            Conversation.human_owner_account_id,
+            Conversation.ai_execution_state,
+            Conversation.ownership_version,
+            Conversation.ownership_updated_at,
             Customer.name.label("customer_display_name"),
             _masked_phone_expression().label("customer_phone_masked"),
             Lead.score.label("lead_score"),
@@ -510,8 +699,13 @@ async def get_operator_conversation(
                 "lead_product_interests"
             ),
             open_escalation.label("has_open_escalation"),
+            OperatorAccount.display_name.label("human_owner_display_name"),
         )
         .join(Customer, Customer.phone_number == Conversation.customer_id)
+        .outerjoin(
+            OperatorAccount,
+            OperatorAccount.account_id == Conversation.human_owner_account_id,
+        )
         .outerjoin(Lead, Lead.conversation_id == Conversation.conversation_id)
         .where(
             Conversation.conversation_id == conversation_id,
@@ -552,6 +746,7 @@ async def get_operator_conversation(
         open_escalation=OperatorOpenEscalation(
             exists=row["has_open_escalation"]
         ),
+        ownership=_ownership_from_row(row),
     )
 
 

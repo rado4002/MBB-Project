@@ -206,7 +206,8 @@ describe('read-only conversation workspace', () => {
     expect(within(history).getByText('Voice note unavailable')).toBeInTheDocument()
     expect(container.querySelector('script')).toBeNull()
     expect(container.querySelector('a[href^="http"]')).toBeNull()
-    expect(screen.queryByText(/delivery status|authored by human|\bAI\b/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/delivery status|authored by human/i)).not.toBeInTheDocument()
+    expect(screen.getAllByText('Controlled by MBB AI Assistant')).toHaveLength(2)
   })
 
   it('shows a truthful empty history without hiding loaded detail', async () => {
@@ -438,7 +439,7 @@ describe('read-only conversation workspace', () => {
     expect(screen.queryByRole('navigation')).not.toBeInTheDocument()
   })
 
-  it('is axe-clean and exposes only the supported escalation write action', async () => {
+  it('is axe-clean and exposes only the supported ownership write action', async () => {
     server.use(
       authenticated(),
       http.get('/api/v1/operator/conversations', () =>
@@ -449,9 +450,9 @@ describe('read-only conversation workspace', () => {
     const { container } = renderApp(`/inbox/${firstId}`)
     await screen.findByRole('region', { name: 'Message history' })
 
-    expect(screen.getByRole('button', { name: 'Escalate' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /reply|send|assign|take over|resolve|compose|\bAI\b/i })).not.toBeInTheDocument()
-    expect(screen.queryByText(/owner|channel|delivery status|unread|priority/i)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Escalate to Human' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /reply|send|assign|resolve|compose|return to ai/i })).not.toBeInTheDocument()
+    expect(screen.queryByText(/channel|delivery status|unread|priority/i)).not.toBeInTheDocument()
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
     await expectAccessible(container)
   })

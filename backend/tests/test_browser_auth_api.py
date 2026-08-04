@@ -220,6 +220,7 @@ async def test_preauth_csrf_cookie_and_valid_login_are_opaque(harness) -> None:
             "auth.password.change",
             "auth.reauthenticate",
             "auth.session.read",
+            "conversation.ownership.change",
             "conversation.read",
             "escalation.create",
             "message.read",

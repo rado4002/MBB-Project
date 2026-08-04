@@ -25,6 +25,19 @@ class OperatorOpenEscalation(BaseModel):
     exists: bool
 
 
+class OperatorHumanOwner(BaseModel):
+    account_id: UUID
+    display_name: str
+
+
+class OperatorConversationOwnership(BaseModel):
+    owner_type: Literal["ai", "human"]
+    human_owner: OperatorHumanOwner | None
+    ai_execution_state: Literal["eligible", "paused"]
+    version: int = Field(gt=0)
+    updated_at: datetime
+
+
 class OperatorConversationQueueItem(BaseModel):
     conversation_id: UUID
     customer: OperatorCustomerSummary
@@ -34,6 +47,7 @@ class OperatorConversationQueueItem(BaseModel):
     latest_message: OperatorLatestMessage | None
     awaiting_response_since: datetime | None
     open_escalation: OperatorOpenEscalation
+    ownership: OperatorConversationOwnership
 
 
 class OperatorConversationQueueResponse(BaseModel):
@@ -57,6 +71,17 @@ class OperatorConversationDetail(BaseModel):
     customer: OperatorCustomerSummary
     lead: OperatorLeadSummary | None
     open_escalation: OperatorOpenEscalation
+    ownership: OperatorConversationOwnership
+
+
+class OperatorOwnershipTransitionRequest(BaseModel):
+    target_owner_type: Literal["ai", "human"]
+    expected_version: int = Field(gt=0)
+
+
+class OperatorOwnershipTransitionResponse(BaseModel):
+    conversation_id: UUID
+    ownership: OperatorConversationOwnership
 
 
 class OperatorMessageMedia(BaseModel):

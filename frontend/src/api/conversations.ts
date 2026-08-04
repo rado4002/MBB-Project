@@ -4,11 +4,9 @@ import type {
   OperatorConversationDetail,
   OperatorConversationQueueResponse,
   OperatorMessageHistoryResponse,
+  OwnershipTransitionRequest,
+  OwnershipTransitionResponse,
 } from './contracts/conversations'
-import type {
-  OperatorEscalationCreate,
-  OperatorEscalationResponse,
-} from './contracts/escalations'
 
 export interface ConversationQueueRequest {
   filters: ConversationFilters
@@ -24,13 +22,13 @@ export interface ConversationApiClient {
     before?: string,
     signal?: AbortSignal,
   ): Promise<OperatorMessageHistoryResponse>
-  createEscalation(
+  changeOwnership(
     conversationId: string,
-    body: OperatorEscalationCreate,
+    body: OwnershipTransitionRequest,
     idempotencyKey: string,
     csrfToken: string,
     signal?: AbortSignal,
-  ): Promise<OperatorEscalationResponse>
+  ): Promise<OwnershipTransitionResponse>
 }
 
 export function createConversationApiClient(
@@ -71,15 +69,15 @@ export function createConversationApiClient(
         onSessionExpired,
       )
     },
-    createEscalation: (
+    changeOwnership: (
       conversationId,
       body,
       idempotencyKey,
       csrfToken,
       signal,
     ) =>
-      requestJson<OperatorEscalationResponse>(
-        `${conversationPath(conversationId)}/escalations`,
+      requestJson<OwnershipTransitionResponse>(
+        `${conversationPath(conversationId)}/ownership`,
         {
           method: 'POST',
           body,

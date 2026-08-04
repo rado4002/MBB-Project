@@ -20,7 +20,9 @@ export function sessionFixture(
       'auth.reauthenticate',
       'conversation.read',
       'message.read',
-      ...(role === 'analyst' ? [] : ['escalation.create']),
+      ...(role === 'analyst'
+        ? []
+        : ['escalation.create', 'conversation.ownership.change']),
     ],
     must_change_password: mustChangePassword,
     idle_expires_at_epoch: 1_900_000_000,
@@ -49,6 +51,13 @@ export function conversationFixture(
     },
     awaiting_response_since: '2026-08-02T12:30:00Z',
     open_escalation: { exists: false },
+    ownership: {
+      owner_type: 'ai',
+      human_owner: null,
+      ai_execution_state: 'eligible',
+      version: 1,
+      updated_at: '2026-08-02T12:30:00Z',
+    },
   }
 }
 
@@ -72,6 +81,13 @@ export function conversationDetailFixture(
       product_interests: ['Solar starter kit'],
     },
     open_escalation: { exists: false },
+    ownership: {
+      owner_type: 'ai',
+      human_owner: null,
+      ai_execution_state: 'eligible',
+      version: 1,
+      updated_at: '2026-08-02T12:30:00Z',
+    },
   }
 }
 

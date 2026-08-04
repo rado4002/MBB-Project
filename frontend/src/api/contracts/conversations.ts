@@ -41,6 +41,7 @@ export interface OperatorConversationQueueItem {
   open_escalation: {
     exists: boolean
   }
+  ownership: ConversationOwnership
 }
 
 export interface OperatorConversationQueueResponse {
@@ -69,6 +70,28 @@ export interface OperatorConversationDetail {
   open_escalation: {
     exists: boolean
   }
+  ownership: ConversationOwnership
+}
+
+export interface ConversationOwnership {
+  owner_type: 'ai' | 'human'
+  human_owner: {
+    account_id: string
+    display_name: string
+  } | null
+  ai_execution_state: 'eligible' | 'paused'
+  version: number
+  updated_at: string
+}
+
+export interface OwnershipTransitionRequest {
+  target_owner_type: 'ai' | 'human'
+  expected_version: number
+}
+
+export interface OwnershipTransitionResponse {
+  conversation_id: string
+  ownership: ConversationOwnership
 }
 
 export type MessageSenderType = 'customer' | 'operator' | 'system' | 'unknown'

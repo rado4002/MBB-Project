@@ -267,12 +267,12 @@ describe('responsive Inbox workflow refinement', () => {
     const { container } = renderApp(`/inbox/${conversationId}`)
     await screen.findByRole('region', { name: 'Message history' })
 
-    expect(screen.getByRole('button', { name: 'Escalate' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Escalate to Human' })).toBeInTheDocument()
     expect(screen.queryByRole('button', {
-      name: /reply|send|assign|take over|resolve|compose|\bAI\b/i,
+      name: /reply|send|assign|resolve|compose|return to ai/i,
     })).not.toBeInTheDocument()
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
-    expect(screen.queryByText(/owner|channel|delivery status|unread|priority/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/channel|delivery status|unread|priority/i)).not.toBeInTheDocument()
     await expectAccessible(container)
   })
 })

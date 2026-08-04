@@ -1,6 +1,9 @@
 # SQLAlchemy ORM models — imported here so Alembic autogenerate can discover them
 from app.models.customer import Customer
 from app.models.conversation import Conversation
+from app.models.conversation_ownership_idempotency import (
+    ConversationOwnershipIdempotency,
+)
 from app.models.message import Message
 from app.models.lead import Lead
 from app.models.relance import Relance
@@ -22,6 +25,7 @@ from app.models.operator_escalation_idempotency import (
 __all__ = [
     "Customer",
     "Conversation",
+    "ConversationOwnershipIdempotency",
     "Message",
     "Lead",
     "Relance",

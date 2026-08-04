@@ -224,6 +224,12 @@ def _queue_row(
         "language_detected": language,
         "status": "active",
         "message_count": 2,
+        "owner_type": "ai",
+        "human_owner_account_id": None,
+        "human_owner_display_name": None,
+        "ai_execution_state": "eligible",
+        "ownership_version": 1,
+        "ownership_updated_at": occurred_at,
         "customer_display_name": "<script>alert(1)</script>",
         "customer_phone_masked": "***5678",
         "latest_content": content,
@@ -241,6 +247,12 @@ def _detail_row(conversation_id: uuid.UUID, now: datetime) -> dict[str, Any]:
         "language_detected": "lingala",
         "message_count": 7,
         "updated_at": now,
+        "owner_type": "ai",
+        "human_owner_account_id": None,
+        "human_owner_display_name": None,
+        "ai_execution_state": "eligible",
+        "ownership_version": 1,
+        "ownership_updated_at": now,
         "customer_display_name": "Cliente",
         "customer_phone_masked": "***5678",
         "lead_score": "hot",
@@ -389,6 +401,13 @@ async def test_queue_is_minimized_masked_bounded_and_stably_cursor_paginated(
     assert len(body["items"][0]["latest_message"]["preview"]) == 120
     assert body["items"][0]["awaiting_response_since"] is not None
     assert body["items"][1]["awaiting_response_since"] is None
+    assert body["items"][0]["ownership"] == {
+        "owner_type": "ai",
+        "human_owner": None,
+        "ai_execution_state": "eligible",
+        "version": 1,
+        "updated_at": tied.isoformat().replace("+00:00", "Z"),
+    }
     assert body["items"][0]["customer"] == {
         "display_name": "<script>alert(1)</script>",
         "phone_masked": "***5678",
@@ -512,7 +531,10 @@ async def test_detail_is_minimized_and_missing_is_indistinguishable(
         "customer",
         "lead",
         "open_escalation",
+        "ownership",
     }
+    assert body["ownership"]["owner_type"] == "ai"
+    assert body["ownership"]["human_owner"] is None
     assert body["customer"]["phone_masked"] == "***5678"
     assert len(body["lead"]["product_interests"]) == 5
     assert len(body["lead"]["product_interests"][0]) == 80

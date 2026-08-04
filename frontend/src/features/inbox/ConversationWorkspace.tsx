@@ -11,15 +11,15 @@ import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
 import type { ConversationApiClient } from '../../api/conversations'
 import type {
+  ConversationOwnership,
   MessageSenderType,
   OperatorConversationDetail,
   OperatorMessageItem,
 } from '../../api/contracts/conversations'
-import type { OperatorEscalationResponse } from '../../api/contracts/escalations'
 import { errorMessage, type ApiError } from '../../api/errors'
 import { useAuth } from '../../auth/AuthProvider'
 import { InlineAlert } from '../../components/InlineAlert'
-import { EscalationDialog } from './EscalationDialog'
+import { OwnershipDialog } from './OwnershipDialog'
 import {
   useConversationDetail,
   useMessageHistory,
@@ -57,6 +57,12 @@ function actorLabel(senderType: MessageSenderType) {
     default:
       return 'Unknown sender'
   }
+}
+
+function ownershipLabel(ownership: ConversationOwnership) {
+  return ownership.owner_type === 'ai'
+    ? 'MBB AI Assistant'
+    : ownership.human_owner?.display_name ?? 'Human Operator'
 }
 
 function workspaceError(error: ApiError) {
@@ -115,11 +121,13 @@ function ConversationHeader({
   loading,
   error,
   onRetry,
+  ownershipRef,
 }: {
   detail: OperatorConversationDetail | null
   loading: boolean
   error: ApiError | null
   onRetry: () => Promise<void>
+  ownershipRef: RefObject<HTMLParagraphElement | null>
 }) {
   const errorRef = useRef<HTMLDivElement>(null)
 
@@ -153,44 +161,19 @@ function ConversationHeader({
         <span>{detail.message_count} messages</span>
         {detail.open_escalation.exists ? <span>Open escalation</span> : null}
       </div>
+      <p
+        className="ownership-summary"
+        ref={ownershipRef}
+        tabIndex={-1}
+        aria-live="polite"
+      >
+        <strong>Controlled by {ownershipLabel(detail.ownership)}</strong>
+        {detail.ownership.owner_type === 'human' ? <span>AI paused</span> : null}
+      </p>
       <p className="workspace-updated">
         Last updated <time dateTime={detail.updated_at}>{formatTimestamp(detail.updated_at)}</time>
       </p>
     </div>
-  )
-}
-
-function EscalationResultCard({
-  result,
-  headingRef,
-}: {
-  result: OperatorEscalationResponse
-  headingRef: RefObject<HTMLHeadingElement | null>
-}) {
-  return (
-    <section className="escalation-result" aria-labelledby="escalation-result-heading">
-      <div className="escalation-result__heading">
-        <div>
-          <p className="eyebrow">Authoritative escalation</p>
-          <h3 id="escalation-result-heading" ref={headingRef} tabIndex={-1}>Escalation created</h3>
-        </div>
-        <span className="status-pill">{label(result.status)}</span>
-      </div>
-      <dl className="escalation-result__details">
-        <div><dt>Type</dt><dd>{label(result.type)}</dd></div>
-        <div><dt>Priority</dt><dd>{label(result.priority)}</dd></div>
-        <div><dt>Created by</dt><dd>{result.created_by.display_name}</dd></div>
-        <div>
-          <dt>Created</dt>
-          <dd><time dateTime={result.created_at}>{formatTimestamp(result.created_at)}</time></dd>
-        </div>
-        <div className="escalation-result__reason"><dt>Reason</dt><dd>{result.reason}</dd></div>
-        <div className="escalation-result__reference"><dt>Reference</dt><dd><code>{result.escalation_id}</code></dd></div>
-      </dl>
-      <p className="escalation-result__note">
-        Conversation state and routing were not changed.
-      </p>
-    </section>
   )
 }
 
@@ -218,23 +201,38 @@ function ContextBody({
     )
   }
   if (error) return <p>Context is unavailable.</p>
-  if (!detail?.lead) return <p>No lead context is available.</p>
+  if (!detail) return <p>Context is unavailable.</p>
   const ProductHeading = productHeadingLevel
   return (
     <>
       <dl className="context-details">
-        <div><dt>Lead score</dt><dd>{label(detail.lead.score)}</dd></div>
-        <div><dt>Lead stage</dt><dd>{label(detail.lead.stage)}</dd></div>
-        <div><dt>Lead intent</dt><dd>{label(detail.lead.intent)}</dd></div>
+        <div>
+          <dt>Conversation control</dt>
+          <dd>
+            Controlled by {ownershipLabel(detail.ownership)}
+            {detail.ownership.owner_type === 'human' ? ' — AI paused' : ''}
+          </dd>
+        </div>
+        {detail.lead ? (
+          <>
+            <div><dt>Lead score</dt><dd>{label(detail.lead.score)}</dd></div>
+            <div><dt>Lead stage</dt><dd>{label(detail.lead.stage)}</dd></div>
+            <div><dt>Lead intent</dt><dd>{label(detail.lead.intent)}</dd></div>
+          </>
+        ) : null}
       </dl>
-      <ProductHeading>Product interests</ProductHeading>
-      {detail.lead.product_interests.length ? (
-        <ul className="interest-list">
-          {detail.lead.product_interests.slice(0, 5).map((interest, index) => (
-            <li key={`${index}-${interest}`}>{safeInterest(interest)}</li>
-          ))}
-        </ul>
-      ) : <p>No product interests available.</p>}
+      {detail.lead ? (
+        <>
+          <ProductHeading>Product interests</ProductHeading>
+          {detail.lead.product_interests.length ? (
+            <ul className="interest-list">
+              {detail.lead.product_interests.slice(0, 5).map((interest, index) => (
+                <li key={`${index}-${interest}`}>{safeInterest(interest)}</li>
+              ))}
+            </ul>
+          ) : <p>No product interests available.</p>}
+        </>
+      ) : <p>No lead context is available.</p>}
     </>
   )
 }
@@ -480,58 +478,63 @@ export function ConversationWorkspace({
   client,
   conversationId,
   backTo,
+  onOwnershipChanged,
 }: {
   client: ConversationApiClient
   conversationId: string
   backTo: string
+  onOwnershipChanged: () => Promise<void>
 }) {
   const auth = useAuth()
   const detail = useConversationDetail(client, conversationId)
   const workspaceHeadingRef = useRef<HTMLHeadingElement>(null)
-  const escalationResultHeadingRef = useRef<HTMLHeadingElement>(null)
+  const ownershipStatusRef = useRef<HTMLParagraphElement>(null)
   const detailsButtonRef = useRef<HTMLButtonElement>(null)
-  const escalationButtonRef = useRef<HTMLButtonElement>(null)
+  const ownershipButtonRef = useRef<HTMLButtonElement>(null)
   const [contextOpen, setContextOpen] = useState(false)
-  const [escalationOpen, setEscalationOpen] = useState(false)
-  const [createdEscalation, setCreatedEscalation] =
-    useState<OperatorEscalationResponse | null>(null)
-  const [alreadyOpenConversationId, setAlreadyOpenConversationId] =
-    useState<string | null>(null)
+  const [ownershipOpen, setOwnershipOpen] = useState(false)
+  const [ownershipAtOpen, setOwnershipAtOpen] =
+    useState<ConversationOwnership | null>(null)
+  const [successfulVersion, setSuccessfulVersion] = useState<number | null>(null)
   const closeContext = useCallback(() => setContextOpen(false), [])
-  const closeEscalation = useCallback(() => setEscalationOpen(false), [])
-
-  const currentCreatedEscalation =
-    createdEscalation?.conversation_id === conversationId
-      ? createdEscalation
-      : null
-  const alreadyOpen = alreadyOpenConversationId === conversationId
-  const canEscalate = Boolean(
-    detail.detail &&
+  const closeOwnership = useCallback(() => setOwnershipOpen(false), [])
+  const ownership = detail.detail?.ownership
+  const mayReturnOwnedConversation = Boolean(
+    ownership?.owner_type === 'human' &&
+      (
+        ownership.human_owner?.account_id === auth.session?.human.account_id ||
+        auth.session?.human.role === 'administrator'
+      ),
+  )
+  const canChangeOwnership = Boolean(
+    ownership &&
       !detail.loading &&
       !detail.error &&
-      !detail.detail.open_escalation.exists &&
-      !currentCreatedEscalation &&
-      !alreadyOpen &&
-      auth.session?.capabilities.includes('escalation.create'),
+      auth.session?.capabilities.includes('conversation.ownership.change') &&
+      (ownership.owner_type === 'ai' || mayReturnOwnedConversation),
   )
 
-  const handleCreated = async (result: OperatorEscalationResponse) => {
-    setCreatedEscalation(result)
-    setAlreadyOpenConversationId(null)
-    await detail.refresh()
+  const openOwnership = () => {
+    if (!ownership) return
+    setOwnershipAtOpen(ownership)
+    setOwnershipOpen(true)
   }
-
-  const handleAlreadyOpen = async () => {
-    setAlreadyOpenConversationId(conversationId)
-    await detail.refresh()
+  const handleOwnershipChanged = async (
+    result: { ownership: ConversationOwnership },
+  ) => {
+    setSuccessfulVersion(result.ownership.version)
+    await Promise.all([detail.refresh(), onOwnershipChanged()])
+  }
+  const refreshOwnership = async () => {
+    await Promise.all([detail.refresh(), onOwnershipChanged()])
   }
 
   useEffect(() => workspaceHeadingRef.current?.focus(), [conversationId])
   useEffect(() => {
-    if (currentCreatedEscalation && !escalationOpen) {
-      escalationResultHeadingRef.current?.focus()
+    if (successfulVersion !== null && !ownershipOpen) {
+      ownershipStatusRef.current?.focus()
     }
-  }, [currentCreatedEscalation, escalationOpen])
+  }, [ownershipOpen, successfulVersion])
 
   return (
     <section className="conversation-workspace" aria-labelledby="workspace-heading">
@@ -543,16 +546,23 @@ export function ConversationWorkspace({
           </Link>
           <h2 id="workspace-heading" tabIndex={-1} ref={workspaceHeadingRef}>Conversation</h2>
           <div className="workspace-toolbar__actions">
-            {canEscalate ? (
+            {canChangeOwnership ? (
               <button
                 className="button button--primary"
                 type="button"
                 aria-haspopup="dialog"
-                aria-expanded={escalationOpen}
-                onClick={() => setEscalationOpen(true)}
-                ref={escalationButtonRef}
+                aria-expanded={ownershipOpen}
+                aria-label={
+                  ownership?.owner_type === 'ai'
+                    ? 'Escalate to Human'
+                    : 'Return to AI'
+                }
+                onClick={openOwnership}
+                ref={ownershipButtonRef}
               >
-                Escalate
+                {ownership?.owner_type === 'ai'
+                  ? 'Escalate to Human'
+                  : 'Return to AI'}
               </button>
             ) : null}
             <button
@@ -573,18 +583,8 @@ export function ConversationWorkspace({
             loading={detail.loading}
             error={detail.error}
             onRetry={detail.retry}
+            ownershipRef={ownershipStatusRef}
           />
-          {alreadyOpen ? (
-            <InlineAlert tone="warning">
-              This conversation already has an active escalation. Conversation details were refreshed.
-            </InlineAlert>
-          ) : null}
-          {currentCreatedEscalation ? (
-            <EscalationResultCard
-              result={currentCreatedEscalation}
-              headingRef={escalationResultHeadingRef}
-            />
-          ) : null}
         </div>
       </div>
       <div className="workspace-columns">
@@ -599,16 +599,18 @@ export function ConversationWorkspace({
         loading={detail.loading}
         error={detail.error}
       />
-      <EscalationDialog
-        key={conversationId}
-        open={escalationOpen}
-        conversationId={conversationId}
-        client={client}
-        returnFocusRef={escalationButtonRef}
-        onClose={closeEscalation}
-        onCreated={handleCreated}
-        onAlreadyOpen={handleAlreadyOpen}
-      />
+      {ownershipAtOpen ? (
+        <OwnershipDialog
+          open={ownershipOpen}
+          conversationId={conversationId}
+          ownership={ownershipAtOpen}
+          client={client}
+          returnFocusRef={ownershipButtonRef}
+          onClose={closeOwnership}
+          onChanged={handleOwnershipChanged}
+          onConflict={refreshOwnership}
+        />
+      ) : null}
     </section>
   )
 }
