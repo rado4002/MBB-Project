@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
+import structlog
 from fastapi import APIRouter, Depends, Header, Query, Request, Response, status
 from pydantic import UUID4
 from sqlalchemy import exists, func, literal, select, true, tuple_
@@ -44,6 +45,18 @@ from app.modules.m4_conversation.ownership import (
     ReturnToAIUnavailable,
     transition_ownership,
 )
+from app.modules.m4_conversation.operator_replies import (
+    OperatorReplyResult,
+    ReplyAcceptanceUnavailable,
+    ReplyChannelUnsupported,
+    ReplyConversationNotFound,
+    ReplyIdempotencyConflict,
+    ReplyNotEligible,
+    ReplyOwnershipConflict,
+    ReplyOwnershipVersionConflict,
+    accept_operator_reply,
+    mark_operator_reply_accepted,
+)
 from app.modules.m8_maps.operator_escalation import (
     ConversationNotFound,
     EscalationAlreadyOpen,
@@ -68,6 +81,7 @@ from app.schemas.operator_conversations import (
     OperatorMessageItem,
     OperatorMessageMedia,
     OperatorOpenEscalation,
+    OperatorReplyCreate,
     OperatorOwnershipTransitionRequest,
     OperatorOwnershipTransitionResponse,
 )
@@ -81,6 +95,7 @@ router = APIRouter(
     prefix="/operator/conversations",
     tags=["operator-conversations"],
 )
+log = structlog.get_logger(__name__)
 
 _OPEN_ESCALATION_STATUSES = ("open", "in_progress")
 _CURSOR_VERSION = 1
@@ -319,6 +334,84 @@ def _ownership_from_row(row: Any) -> OperatorConversationOwnership:
             version=row["ownership_version"],
             updated_at=row["ownership_updated_at"],
         )
+    )
+
+
+def _operator_message_item(
+    *,
+    message_id: UUID,
+    occurred_at: datetime,
+    direction: str,
+    content_type: str,
+    content: str,
+    language: str,
+    operator_author_account_id: UUID | None,
+    author_display_name: str | None,
+    delivery_state: str | None,
+    delivery_state_timestamp: datetime | None,
+) -> OperatorMessageItem:
+    is_text = content_type == "text"
+    operator_author = None
+    if operator_author_account_id is not None and author_display_name is not None:
+        operator_author = OperatorHumanOwner(
+            account_id=operator_author_account_id,
+            display_name=author_display_name,
+        )
+    return OperatorMessageItem(
+        message_id=message_id,
+        occurred_at=occurred_at,
+        direction=direction,
+        sender_type=(
+            "customer"
+            if direction == "inbound"
+            else "operator" if operator_author is not None else "unknown"
+        ),
+        operator_author=operator_author,
+        delivery_state=delivery_state,
+        delivery_state_timestamp=delivery_state_timestamp,
+        content_type=content_type,
+        text=content if is_text else None,
+        media=(
+            None
+            if is_text
+            else OperatorMessageMedia(kind=content_type, available=False)
+        ),
+        language=language,
+    )
+
+
+def _reply_response(result: OperatorReplyResult) -> OperatorMessageItem:
+    message = result.message
+    response = _operator_message_item(
+        message_id=message.message_id,
+        occurred_at=message.timestamp,
+        direction=message.direction,
+        content_type=message.content_type,
+        content=message.content,
+        language=message.language,
+        operator_author_account_id=message.operator_author_account_id,
+        author_display_name=message.author_display_name,
+        delivery_state=message.delivery_state,
+        delivery_state_timestamp=message.delivery_state_timestamp,
+    )
+    # POST replies report the durable acceptance result. Later history reads
+    # expose any subsequent worker transition to sent, failed, or uncertain.
+    return response.model_copy(
+        update={
+            "delivery_state": "accepted",
+            "delivery_state_timestamp": message.timestamp,
+        }
+    )
+
+
+def _publish_operator_reply(message_id: UUID) -> None:
+    from app.tasks.celery_app import celery_app
+
+    celery_app.send_task(
+        "operator_replies.deliver",
+        kwargs={"message_id": str(message_id)},
+        queue="default",
+        task_id=f"operator-reply-{message_id}",
     )
 
 
@@ -658,6 +751,122 @@ async def change_operator_conversation_ownership(
     )
 
 
+@router.post(
+    "/{conversation_id}/replies",
+    response_model=OperatorMessageItem,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_operator_reply(
+    conversation_id: UUID,
+    body: OperatorReplyCreate,
+    request: Request,
+    response: Response,
+    principal: Annotated[BrowserPrincipal, Depends(require_csrf)],
+    _read_principal: Annotated[
+        BrowserPrincipal, Depends(require_capability("conversation.read"))
+    ],
+    _reply_principal: Annotated[
+        BrowserPrincipal, Depends(require_capability("message.reply"))
+    ],
+    settings: Annotated[Settings, Depends(get_browser_settings)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[
+        UUID4, Header(alias="Idempotency-Key", include_in_schema=True)
+    ],
+) -> OperatorMessageItem:
+    validate_state_changing_request(request, settings)
+    try:
+        result = await accept_operator_reply(
+            db,
+            conversation_id=conversation_id,
+            text=body.text,
+            expected_ownership_version=body.expected_ownership_version,
+            actor_account_id=principal.account.account_id,
+            actor_display_name=principal.account.display_name,
+            actor_role=principal.account.role,
+            message_id=idempotency_key,
+            messaging_adapter=settings.messaging_adapter,
+            whatsapp_mode=settings.whatsapp_mode,
+        )
+    except ReplyConversationNotFound as exc:
+        raise _operator_error(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="CONVERSATION_NOT_FOUND",
+            message="The conversation was not found.",
+        ) from exc
+    except ReplyIdempotencyConflict as exc:
+        raise _operator_error(
+            status_code=status.HTTP_409_CONFLICT,
+            code="IDEMPOTENCY_CONFLICT",
+            message="The idempotency key was already used for another reply.",
+        ) from exc
+    except ReplyOwnershipConflict as exc:
+        raise _operator_error(
+            status_code=status.HTTP_409_CONFLICT,
+            code="OWNERSHIP_CONFLICT",
+            message="Only the current Human owner can reply to this conversation.",
+        ) from exc
+    except ReplyOwnershipVersionConflict as exc:
+        raise _operator_error(
+            status_code=status.HTTP_409_CONFLICT,
+            code="OWNERSHIP_VERSION_CONFLICT",
+            message="Conversation ownership changed. Refresh before replying.",
+        ) from exc
+    except ReplyNotEligible as exc:
+        raise _operator_error(
+            status_code=status.HTTP_409_CONFLICT,
+            code="CONVERSATION_NOT_REPLY_ELIGIBLE",
+            message="This conversation cannot currently receive replies.",
+        ) from exc
+    except ReplyChannelUnsupported as exc:
+        raise _operator_error(
+            status_code=status.HTTP_409_CONFLICT,
+            code="CHANNEL_NOT_REPLY_ELIGIBLE",
+            message="This conversation channel cannot receive operator replies.",
+        ) from exc
+    except ReplyAcceptanceUnavailable as exc:
+        raise _operator_error(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            code="SERVICE_UNAVAILABLE",
+            message="The reply service is temporarily unavailable.",
+        ) from exc
+
+    if result.message.delivery_state is None:
+        try:
+            _publish_operator_reply(result.message.message_id)
+        except Exception as exc:
+            log.error(
+                "operator_reply.publication_failed",
+                message_id=str(result.message.message_id),
+                error_type=type(exc).__name__,
+            )
+            raise _operator_error(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                code="REPLY_PUBLICATION_FAILED",
+                message="The reply was saved but could not be queued. Retry unchanged.",
+            ) from exc
+        try:
+            accepted_message = await mark_operator_reply_accepted(
+                db, result.message.message_id
+            )
+            result = OperatorReplyResult(accepted_message, replayed=result.replayed)
+        except ReplyAcceptanceUnavailable as exc:
+            raise _operator_error(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                code="SERVICE_UNAVAILABLE",
+                message="The queued reply could not be confirmed. Retry unchanged.",
+            ) from exc
+
+    response.status_code = (
+        status.HTTP_200_OK if result.replayed else status.HTTP_202_ACCEPTED
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Idempotent-Replayed"] = (
+        "true" if result.replayed else "false"
+    )
+    return _reply_response(result)
+
+
 @router.get("/{conversation_id}", response_model=OperatorConversationDetail)
 async def get_operator_conversation(
     conversation_id: UUID,
@@ -780,8 +989,16 @@ async def get_operator_message_history(
             Message.content_type,
             Message.content,
             Message.language,
+            Message.operator_author_account_id,
+            Message.author_display_name,
+            Message.delivery_state,
+            Message.delivery_state_timestamp,
         )
         .where(Message.conversation_id == conversation_id)
+        .where(
+            (Message.operator_author_account_id.is_(None))
+            | (Message.delivery_state.is_not(None))
+        )
         .order_by(Message.timestamp.desc(), Message.message_id.desc())
         .limit(limit + 1)
     )
@@ -805,24 +1022,18 @@ async def get_operator_message_history(
     newest_first = rows[:limit]
     items: list[OperatorMessageItem] = []
     for row in reversed(newest_first):
-        content_type = row["content_type"]
-        is_text = content_type == "text"
         items.append(
-            OperatorMessageItem(
+            _operator_message_item(
                 message_id=row["message_id"],
                 occurred_at=row["occurred_at"],
                 direction=row["direction"],
-                sender_type=(
-                    "customer" if row["direction"] == "inbound" else "unknown"
-                ),
-                content_type=content_type,
-                text=row["content"] if is_text else None,
-                media=(
-                    None
-                    if is_text
-                    else OperatorMessageMedia(kind=content_type, available=False)
-                ),
+                content_type=row["content_type"],
+                content=row["content"],
                 language=row["language"],
+                operator_author_account_id=row.get("operator_author_account_id"),
+                author_display_name=row.get("author_display_name"),
+                delivery_state=row.get("delivery_state"),
+                delivery_state_timestamp=row.get("delivery_state_timestamp"),
             )
         )
 

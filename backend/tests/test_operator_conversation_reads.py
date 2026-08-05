@@ -277,6 +277,10 @@ def _message_row(
     direction: str,
     content: str,
     content_type: str = "text",
+    operator_author_account_id: uuid.UUID | None = None,
+    author_display_name: str | None = None,
+    delivery_state: str | None = None,
+    delivery_state_timestamp: datetime | None = None,
 ) -> dict[str, Any]:
     return {
         "message_id": message_id,
@@ -285,6 +289,10 @@ def _message_row(
         "content_type": content_type,
         "content": content,
         "language": "french",
+        "operator_author_account_id": operator_author_account_id,
+        "author_display_name": author_display_name,
+        "delivery_state": delivery_state,
+        "delivery_state_timestamp": delivery_state_timestamp,
     }
 
 
@@ -643,6 +651,8 @@ async def test_message_history_is_bounded_plain_chronological_and_actor_safe(
     assert "mbb.messages.message_id DESC" in history_sql
     assert " < " in history_sql
     assert "whatsapp_message_id" not in history_sql
+    assert "operator_author_account_id IS NULL" in history_sql
+    assert "delivery_state IS NOT NULL" in history_sql
 
     wrong_conversation = await client.get(
         f"/api/v1/operator/conversations/{uuid.uuid4()}/messages",
@@ -657,6 +667,42 @@ async def test_message_history_is_bounded_plain_chronological_and_actor_safe(
             params={"limit": limit},
         )
         assert invalid.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_message_history_exposes_human_snapshot_and_truthful_delivery_state(
+    operator_harness,
+) -> None:
+    client, database, account = operator_harness
+    conversation_id = uuid.uuid4()
+    occurred_at = datetime(2026, 8, 5, 10, tzinfo=timezone.utc)
+    database.message_rows = [
+        _message_row(
+            message_id=uuid.uuid4(),
+            occurred_at=occurred_at,
+            direction="outbound",
+            content="Human-authored reply",
+            operator_author_account_id=account.account_id,
+            author_display_name="Submission-time Operator",
+            delivery_state="accepted",
+            delivery_state_timestamp=occurred_at,
+        )
+    ]
+
+    response = await client.get(
+        f"/api/v1/operator/conversations/{conversation_id}/messages"
+    )
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["sender_type"] == "operator"
+    assert item["operator_author"] == {
+        "account_id": str(account.account_id),
+        "display_name": "Submission-time Operator",
+    }
+    assert item["delivery_state"] == "accepted"
+    assert item["delivery_state_timestamp"] == occurred_at.isoformat().replace(
+        "+00:00", "Z"
+    )
 
 
 @pytest.mark.asyncio

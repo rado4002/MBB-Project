@@ -4,6 +4,8 @@ import type {
   OperatorConversationDetail,
   OperatorConversationQueueResponse,
   OperatorMessageHistoryResponse,
+  OperatorMessageItem,
+  OperatorReplyRequest,
   OwnershipTransitionRequest,
   OwnershipTransitionResponse,
 } from './contracts/conversations'
@@ -29,6 +31,13 @@ export interface ConversationApiClient {
     csrfToken: string,
     signal?: AbortSignal,
   ): Promise<OwnershipTransitionResponse>
+  createReply(
+    conversationId: string,
+    body: OperatorReplyRequest,
+    idempotencyKey: string,
+    csrfToken: string,
+    signal?: AbortSignal,
+  ): Promise<OperatorMessageItem>
 }
 
 export function createConversationApiClient(
@@ -78,6 +87,24 @@ export function createConversationApiClient(
     ) =>
       requestJson<OwnershipTransitionResponse>(
         `${conversationPath(conversationId)}/ownership`,
+        {
+          method: 'POST',
+          body,
+          csrfToken,
+          idempotencyKey,
+          signal,
+        },
+        onSessionExpired,
+      ),
+    createReply: (
+      conversationId,
+      body,
+      idempotencyKey,
+      csrfToken,
+      signal,
+    ) =>
+      requestJson<OperatorMessageItem>(
+        `${conversationPath(conversationId)}/replies`,
         {
           method: 'POST',
           body,

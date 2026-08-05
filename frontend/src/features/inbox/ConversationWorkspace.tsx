@@ -5,6 +5,8 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type RefObject,
 } from 'react'
 import { createPortal } from 'react-dom'
@@ -16,7 +18,7 @@ import type {
   OperatorConversationDetail,
   OperatorMessageItem,
 } from '../../api/contracts/conversations'
-import { errorMessage, type ApiError } from '../../api/errors'
+import { ApiError, errorMessage } from '../../api/errors'
 import { useAuth } from '../../auth/AuthProvider'
 import { InlineAlert } from '../../components/InlineAlert'
 import { OwnershipDialog } from './OwnershipDialog'
@@ -57,6 +59,18 @@ function actorLabel(senderType: MessageSenderType) {
     default:
       return 'Unknown sender'
   }
+}
+
+function messageActorLabel(message: OperatorMessageItem) {
+  if (message.sender_type === 'operator' && message.operator_author) {
+    return `${message.operator_author.display_name} — Operator`
+  }
+  return actorLabel(message.sender_type)
+}
+
+function deliveryLabel(state: OperatorMessageItem['delivery_state']) {
+  if (!state) return null
+  return state.charAt(0).toUpperCase() + state.slice(1)
 }
 
 function ownershipLabel(ownership: ConversationOwnership) {
@@ -371,16 +385,31 @@ function ContextDrawer({
 function MessageTimeline({
   client,
   conversationId,
+  detail,
+  onReplyAccepted,
 }: {
   client: ConversationApiClient
   conversationId: string
+  detail: OperatorConversationDetail | null
+  onReplyAccepted: () => Promise<void>
 }) {
+  const auth = useAuth()
   const history = useMessageHistory(client, conversationId)
   const timelineRef = useRef<HTMLDivElement>(null)
   const initialPositioned = useRef(false)
   const scrollAnchor = useRef<{ height: number; top: number } | null>(null)
   const errorRef = useRef<HTMLDivElement>(null)
   const olderErrorRef = useRef<HTMLDivElement>(null)
+  const lastMessageIdRef = useRef<string | null>(null)
+
+  const canReply = Boolean(
+    detail &&
+      ['active', 'qualifying', 'nurturing', 'escalated'].includes(detail.status) &&
+      detail.ownership.owner_type === 'human' &&
+      detail.ownership.ai_execution_state === 'paused' &&
+      detail.ownership.human_owner?.account_id === auth.session?.human.account_id &&
+      auth.session?.capabilities.includes('message.reply'),
+  )
 
   useLayoutEffect(() => {
     const timeline = timelineRef.current
@@ -396,6 +425,21 @@ function MessageTimeline({
     timeline.scrollTop = anchor.top + (timeline.scrollHeight - anchor.height)
     scrollAnchor.current = null
   }, [history.items.length, history.loadingOlder])
+
+  useLayoutEffect(() => {
+    const timeline = timelineRef.current
+    const lastMessageId = history.items.at(-1)?.message_id ?? null
+    if (
+      timeline &&
+      initialPositioned.current &&
+      lastMessageIdRef.current &&
+      lastMessageId !== lastMessageIdRef.current &&
+      !history.loadingOlder
+    ) {
+      timeline.scrollTop = timeline.scrollHeight
+    }
+    lastMessageIdRef.current = lastMessageId
+  }, [history.items, history.loadingOlder])
 
   useEffect(() => {
     if (history.error) errorRef.current?.focus()
@@ -454,7 +498,8 @@ function MessageTimeline({
           ) : null}
           <ol className="message-list">
             {history.items.map((message) => {
-              const actor = actorLabel(message.sender_type)
+              const actor = messageActorLabel(message)
+              const delivery = deliveryLabel(message.delivery_state)
               return (
                 <li key={message.message_id} className={`message message--${message.direction}`}>
                   <article aria-label={`${actor} message`}>
@@ -463,6 +508,11 @@ function MessageTimeline({
                       <time dateTime={message.occurred_at}>{formatTimestamp(message.occurred_at)}</time>
                     </header>
                     {messageContent(message)}
+                    {delivery ? (
+                      <footer className={`message-delivery message-delivery--${message.delivery_state}`}>
+                        {delivery}
+                      </footer>
+                    ) : null}
                   </article>
                 </li>
               )
@@ -470,8 +520,163 @@ function MessageTimeline({
           </ol>
         </div>
       )}
+      {canReply && detail ? (
+        <ReplyComposer
+          client={client}
+          conversationId={conversationId}
+          expectedOwnershipVersion={detail.ownership.version}
+          onAccepted={(message) => {
+            history.appendAccepted(message)
+            return onReplyAccepted()
+          }}
+        />
+      ) : null}
     </section>
   )
+}
+
+function ReplyComposer({
+  client,
+  conversationId,
+  expectedOwnershipVersion,
+  onAccepted,
+}: {
+  client: ConversationApiClient
+  conversationId: string
+  expectedOwnershipVersion: number
+  onAccepted: (message: OperatorMessageItem) => Promise<void>
+}) {
+  const auth = useAuth()
+  const [text, setText] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [validationError, setValidationError] = useState<string | null>(null)
+  const [requestError, setRequestError] = useState<ApiError | null>(null)
+  const [acceptedAnnouncement, setAcceptedAnnouncement] = useState('')
+  const submittingRef = useRef(false)
+  const focusAfterAcceptanceRef = useRef(false)
+  const attemptRef = useRef<{ text: string; key: string } | null>(null)
+  const errorRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const helpId = useId()
+  const errorId = useId()
+
+  useEffect(() => {
+    if (requestError) errorRef.current?.focus()
+  }, [requestError])
+
+  useEffect(() => {
+    if (!submitting && focusAfterAcceptanceRef.current) {
+      focusAfterAcceptanceRef.current = false
+      textareaRef.current?.focus()
+    }
+  }, [submitting])
+
+  const submit = async (event?: FormEvent<HTMLFormElement>) => {
+    event?.preventDefault()
+    if (submittingRef.current) return
+    if (!text.trim()) {
+      setValidationError('Enter a reply before submitting.')
+      textareaRef.current?.focus()
+      return
+    }
+    if (Array.from(text).length > 4096) {
+      setValidationError('Reply text must be 4,096 characters or fewer.')
+      textareaRef.current?.focus()
+      return
+    }
+
+    const attempt =
+      attemptRef.current?.text === text
+        ? attemptRef.current
+        : { text, key: crypto.randomUUID() }
+    attemptRef.current = attempt
+    submittingRef.current = true
+    setSubmitting(true)
+    setValidationError(null)
+    setRequestError(null)
+    setAcceptedAnnouncement('')
+    try {
+      const csrfToken = await auth.getCsrfForMutation()
+      const message = await client.createReply(
+        conversationId,
+        { text, expected_ownership_version: expectedOwnershipVersion },
+        attempt.key,
+        csrfToken,
+      )
+      historyAssertAccepted(message)
+      setText('')
+      attemptRef.current = null
+      setAcceptedAnnouncement('Reply accepted and added to the timeline.')
+      focusAfterAcceptanceRef.current = true
+      void onAccepted(message).catch(() => undefined)
+    } catch (unknownError) {
+      setRequestError(unknownError instanceof ApiError ? unknownError : null)
+      if (!(unknownError instanceof ApiError)) {
+        setRequestError(new ApiError({
+          status: 0,
+          code: 'reply_unavailable',
+          category: 'unavailable',
+        }))
+      }
+    } finally {
+      submittingRef.current = false
+      setSubmitting(false)
+    }
+  }
+
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+      event.preventDefault()
+      event.currentTarget.form?.requestSubmit()
+    }
+  }
+
+  return (
+    <form className="reply-composer" onSubmit={(event) => void submit(event)}>
+      <label htmlFor={`${helpId}-reply`}>Reply to Customer</label>
+      {requestError ? (
+        <InlineAlert ref={errorRef} requestId={requestError.requestId}>
+          {errorMessage(requestError)} Your reply has been preserved.
+        </InlineAlert>
+      ) : null}
+      <textarea
+        id={`${helpId}-reply`}
+        ref={textareaRef}
+        value={text}
+        maxLength={4096}
+        rows={3}
+        disabled={submitting}
+        aria-invalid={validationError ? 'true' : undefined}
+        aria-describedby={`${helpId} ${validationError ? errorId : ''}`.trim()}
+        onChange={(event) => {
+          setText(event.target.value)
+          setValidationError(null)
+          setRequestError(null)
+        }}
+        onKeyDown={onKeyDown}
+      />
+      <div className="reply-composer__footer">
+        <span id={helpId}>{Array.from(text).length}/4,096 · Ctrl+Enter to submit</span>
+        <button className="button button--primary" type="submit" disabled={submitting}>
+          {submitting ? 'Submitting…' : 'Submit Reply'}
+        </button>
+      </div>
+      {validationError ? <p className="field-error" id={errorId}>{validationError}</p> : null}
+      <p className="visually-hidden" role="status" aria-live="polite">
+        {acceptedAnnouncement}
+      </p>
+    </form>
+  )
+}
+
+function historyAssertAccepted(message: OperatorMessageItem) {
+  if (message.delivery_state !== 'accepted') {
+    throw new ApiError({
+      status: 0,
+      code: 'invalid_reply_state',
+      category: 'unavailable',
+    })
+  }
 }
 
 export function ConversationWorkspace({
@@ -588,7 +793,14 @@ export function ConversationWorkspace({
         </div>
       </div>
       <div className="workspace-columns">
-        <MessageTimeline client={client} conversationId={conversationId} />
+        <MessageTimeline
+          client={client}
+          conversationId={conversationId}
+          detail={detail.detail}
+          onReplyAccepted={async () => {
+            await Promise.all([detail.refresh(), onOwnershipChanged()])
+          }}
+        />
         <ContextPanel detail={detail.detail} loading={detail.loading} error={detail.error} />
       </div>
       <ContextDrawer

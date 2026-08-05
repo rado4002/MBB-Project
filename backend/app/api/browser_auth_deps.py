@@ -39,6 +39,7 @@ ROLE_CAPABILITIES = {
     | {
         "conversation.read",
         "message.read",
+        "message.reply",
         "escalation.create",
         "conversation.ownership.change",
     },
@@ -46,6 +47,7 @@ ROLE_CAPABILITIES = {
     | {
         "conversation.read",
         "message.read",
+        "message.reply",
         "escalation.create",
         "conversation.ownership.change",
     },

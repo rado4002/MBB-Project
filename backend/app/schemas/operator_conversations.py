@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.schemas.common import ContentType, ConversationStatus, Language
 
@@ -94,6 +94,9 @@ class OperatorMessageItem(BaseModel):
     occurred_at: datetime
     direction: Literal["inbound", "outbound"]
     sender_type: Literal["customer", "operator", "system", "unknown"]
+    operator_author: OperatorHumanOwner | None = None
+    delivery_state: Literal["accepted", "sent", "failed", "uncertain"] | None = None
+    delivery_state_timestamp: datetime | None = None
     content_type: ContentType
     text: str | None
     media: OperatorMessageMedia | None
@@ -103,3 +106,15 @@ class OperatorMessageItem(BaseModel):
 class OperatorMessageHistoryResponse(BaseModel):
     items: list[OperatorMessageItem]
     next_older_cursor: str | None
+
+
+class OperatorReplyCreate(BaseModel):
+    text: str = Field(min_length=1, max_length=4096)
+    expected_ownership_version: int = Field(gt=0)
+
+    @field_validator("text")
+    @classmethod
+    def reject_blank_message(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("reply text must not be blank")
+        return value

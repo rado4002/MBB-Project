@@ -22,7 +22,7 @@ export function sessionFixture(
       'message.read',
       ...(role === 'analyst'
         ? []
-        : ['escalation.create', 'conversation.ownership.change']),
+        : ['message.reply', 'escalation.create', 'conversation.ownership.change']),
     ],
     must_change_password: mustChangePassword,
     idle_expires_at_epoch: 1_900_000_000,
@@ -100,6 +100,9 @@ export function messageFixture(
     occurred_at: '2026-08-02T12:30:00Z',
     direction: 'inbound',
     sender_type: 'customer',
+    operator_author: null,
+    delivery_state: null,
+    delivery_state_timestamp: null,
     content_type: 'text',
     text: 'Bonjour, je souhaite des informations.',
     media: null,

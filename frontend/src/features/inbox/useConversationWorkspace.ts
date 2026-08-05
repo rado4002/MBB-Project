@@ -186,9 +186,24 @@ export function useMessageHistory(
     }
   }, [client, conversationId, state.loadingOlder, state.nextOlderCursor])
 
+  const appendAccepted = useCallback((message: OperatorMessageItem) => {
+    setState((current) => {
+      const existingIndex = current.items.findIndex(
+        (item) => item.message_id === message.message_id,
+      )
+      if (existingIndex === -1) {
+        return { ...current, items: [...current.items, message] }
+      }
+      const items = [...current.items]
+      items[existingIndex] = message
+      return { ...current, items }
+    })
+  }, [])
+
   return {
     ...state,
     retry: () => loadRecent(true),
     loadEarlier,
+    appendAccepted,
   }
 }

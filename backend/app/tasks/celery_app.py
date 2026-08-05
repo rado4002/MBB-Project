@@ -45,6 +45,7 @@ celery_app = Celery(
         "app.tasks.maps",
         "app.tasks.escalation",
         "app.tasks.conversion",
+        "app.tasks.operator_replies",
     ],
 )
 
@@ -113,6 +114,7 @@ celery_app.conf.update(
         "app.tasks.maps.*":              {"queue": "maps"},
         "app.tasks.escalation.*":        {"queue": "escalation"},
         "app.tasks.conversion.*":        {"queue": "conversion"},
+        "operator_replies.*":            {"queue": "default"},
         "m7.*":                          {"queue": "conversion"},
     },
     task_default_queue="default",

@@ -148,4 +148,36 @@ describe('E1 conversation queue client', () => {
       '11111111-1111-4111-8111-111111111111',
     )
   })
+
+  it('sends a plain-text operator reply with CSRF and the browser UUID', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({ message_id: '11111111-1111-4111-8111-111111111111' }),
+        { status: 202, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await createConversationApiClient().createReply(
+      'conversation-id',
+      { text: 'Bonjour Marie', expected_ownership_version: 2 },
+      '11111111-1111-4111-8111-111111111111',
+      'csrf-token',
+    )
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/v1/operator/conversations/conversation-id/replies')
+    expect(init).toMatchObject({
+      method: 'POST',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      body: JSON.stringify({ text: 'Bonjour Marie', expected_ownership_version: 2 }),
+    })
+    const headers = new Headers(init?.headers)
+    expect(headers.get('Content-Type')).toBe('application/json')
+    expect(headers.get('X-CSRF-Token')).toBe('csrf-token')
+    expect(headers.get('Idempotency-Key')).toBe(
+      '11111111-1111-4111-8111-111111111111',
+    )
+  })
 })

@@ -15,6 +15,7 @@ export type ConversationLanguage = (typeof conversationLanguages)[number]
 export type EscalationState = (typeof escalationStates)[number]
 export type MessageContentType = 'text' | 'voice_note' | 'image'
 export type MessageDirection = 'inbound' | 'outbound'
+export type MessageDeliveryState = 'accepted' | 'sent' | 'failed' | 'uncertain'
 
 export interface ConversationFilters {
   status?: ConversationStatus
@@ -101,6 +102,12 @@ export interface OperatorMessageItem {
   occurred_at: string
   direction: MessageDirection
   sender_type: MessageSenderType
+  operator_author: {
+    account_id: string
+    display_name: string
+  } | null
+  delivery_state: MessageDeliveryState | null
+  delivery_state_timestamp: string | null
   content_type: MessageContentType
   text: string | null
   media: {
@@ -108,6 +115,11 @@ export interface OperatorMessageItem {
     available: false
   } | null
   language: ConversationLanguage
+}
+
+export interface OperatorReplyRequest {
+  text: string
+  expected_ownership_version: number
 }
 
 export interface OperatorMessageHistoryResponse {
