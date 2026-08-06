@@ -124,7 +124,8 @@ describe('Human and AI conversation ownership control', () => {
     await user.dblClick(submit)
 
     expect(screen.getByRole('button', { name: 'Taking control…' })).toBeDisabled()
-    expect(await screen.findByRole('button', { name: 'Return to AI' })).toBeInTheDocument()
+    const returnToAi = await screen.findByRole('button', { name: 'Return to AI' })
+    expect(returnToAi).toHaveClass('button--secondary')
     expect(screen.queryByRole('button', { name: 'Escalate to Human' })).not.toBeInTheDocument()
     expect(screen.getAllByText(/Controlled by Omar Operator/).length).toBeGreaterThan(0)
     expect(screen.getByText('AI paused')).toBeInTheDocument()

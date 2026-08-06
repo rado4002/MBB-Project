@@ -42,7 +42,7 @@ describe('responsive Inbox workflow refinement', () => {
     const history = await screen.findByRole('region', { name: 'Conversation timeline' })
     expect(history).toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'Conversation queue' })).toBeInTheDocument()
-    expect(screen.getByRole('region', { name: 'Conversation' })).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Marie Client' })).toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'Timeline' })).toBeInTheDocument()
     const context = screen.getByRole('complementary', { name: 'Context' })
     expect(context).toBeInTheDocument()
@@ -58,6 +58,47 @@ describe('responsive Inbox workflow refinement', () => {
     expect(screen.queryByText(/future action|coming soon/i)).not.toBeInTheDocument()
   })
 
+  it('groups conversation actions in a keyboard-accessible narrow-screen overflow', async () => {
+    const originalMatchMedia = window.matchMedia
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: query === '(max-width: 30rem)',
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    })
+    server.use(authenticated(), ...workspaceHandlers())
+    const user = userEvent.setup()
+    const view = renderApp(`/inbox/${conversationId}`)
+
+    try {
+      await waitFor(() => expect(document.getElementById('workspace-heading')).toHaveTextContent('Marie Client'))
+      const actions = screen.getByText('Actions')
+      const menu = actions.closest('details')
+      expect(actions.tagName).toBe('SUMMARY')
+      actions.focus()
+      expect(actions).toHaveFocus()
+      expect(menu).not.toHaveAttribute('open')
+      await user.click(actions)
+      expect(menu).toHaveAttribute('open')
+      expect(screen.getByRole('button', { name: 'Escalate to Human' }))
+        .toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Details' })).toBeInTheDocument()
+    } finally {
+      view.unmount()
+      Object.defineProperty(window, 'matchMedia', {
+        configurable: true,
+        value: originalMatchMedia,
+      })
+    }
+  })
+
   it('keeps selected row state distinct from keyboard focus', async () => {
     server.use(authenticated(), ...workspaceHandlers())
     renderApp(`/inbox/${conversationId}`)
@@ -68,7 +109,7 @@ describe('responsive Inbox workflow refinement', () => {
     const row = rowLink.closest('li')
     expect(rowLink).toHaveAttribute('aria-current', 'page')
     expect(row).toHaveClass('conversation-row--selected')
-    expect(screen.getByRole('heading', { name: 'Conversation' })).toHaveFocus()
+    expect(document.getElementById('workspace-heading')).toHaveFocus()
     expect(rowLink).not.toHaveFocus()
 
     rowLink.focus()
@@ -121,7 +162,7 @@ describe('responsive Inbox workflow refinement', () => {
     queue.scrollTop = 173
     await user.click(rowLink)
 
-    expect(await screen.findByRole('heading', { name: 'Conversation' })).toHaveFocus()
+    await waitFor(() => expect(document.getElementById('workspace-heading')).toHaveFocus())
     expect(window.location.search).toBe('?status=active&language=french')
     expect(screen.getByRole('link', { name: 'Inbox' })).toHaveAttribute(
       'href',

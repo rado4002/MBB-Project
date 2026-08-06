@@ -58,7 +58,7 @@ describe('read-only conversation workspace', () => {
     expect(window.location.search).toBe('?status=active&language=french')
     expect(link).toHaveAttribute('aria-current', 'page')
     expect(await screen.findByRole('heading', { name: 'Timeline' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Conversation' })).toHaveFocus()
+    expect(document.getElementById('workspace-heading')).toHaveFocus()
   })
 
   it('supports direct deep links, Back, Forward, and the progressive Back to Inbox action', async () => {
@@ -132,6 +132,8 @@ describe('read-only conversation workspace', () => {
     expect(screen.queryByText('+243990005678')).not.toBeInTheDocument()
     expect(screen.queryByText(firstId)).not.toBeInTheDocument()
     expect(screen.queryByText(/city|consent|opt-out|raw context/i)).not.toBeInTheDocument()
+    expect(screen.queryByText('Conversation control')).not.toBeInTheDocument()
+    expect(screen.getAllByText('Controlled by MBB AI Assistant')).toHaveLength(1)
   })
 
   it('loads history independently without hiding available conversation details', async () => {
@@ -208,7 +210,7 @@ describe('read-only conversation workspace', () => {
     expect(container.querySelector('script')).toBeNull()
     expect(container.querySelector('a[href^="http"]')).toBeNull()
     expect(screen.queryByText(/delivery status|authored by human/i)).not.toBeInTheDocument()
-    expect(screen.getAllByText('Controlled by MBB AI Assistant')).toHaveLength(2)
+    expect(screen.getAllByText('Controlled by MBB AI Assistant')).toHaveLength(1)
   })
 
   it('shows a truthful empty history without hiding loaded detail', async () => {

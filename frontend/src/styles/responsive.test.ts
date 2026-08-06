@@ -11,7 +11,7 @@ describe('responsive Inbox style contract', () => {
       /@media \(min-width: 48rem\)[\s\S]*?\.inbox-layout \{ grid-template-columns: minmax\(18rem, 0\.9fr\) minmax\(0, 1\.5fr\)/,
     )
     expect(globalCss).toMatch(
-      /@media \(min-width: 80rem\)[\s\S]*?\.workspace-columns \{ grid-template-columns: minmax\(0, 1fr\) minmax\(14rem, 18rem\)/,
+      /@media \(min-width: 80rem\)[\s\S]*?\.workspace-columns \{ grid-template-columns: minmax\(0, 1fr\) minmax\(12rem, 15rem\)/,
     )
     expect(globalCss).toMatch(/\.context-trigger \{ display: none; \}/)
   })
@@ -20,12 +20,22 @@ describe('responsive Inbox style contract', () => {
     expect(globalCss).toMatch(/\.queue-panel \{[^}]*overflow: hidden auto/)
     expect(globalCss).toMatch(/\.message-history \{[^}]*overflow-y: auto; overflow-x: hidden/)
     expect(globalCss).toMatch(/\.message-text, \.message-media \{[^}]*overflow-wrap: anywhere/)
-    expect(globalCss).toMatch(/\.workspace-summary h3 \{[^}]*overflow-wrap: anywhere/)
+    expect(globalCss).toMatch(/\.conversation-header__content h2 \{[^}]*overflow-wrap: anywhere/)
     expect(globalCss).toMatch(/\.context-details dd \{[^}]*overflow-wrap: anywhere/)
     expect(globalCss).toMatch(/body \{[^}]*min-inline-size: 0/)
     expect(globalCss).toMatch(/\.reply-composer \{[^}]*min-inline-size: 0;[^}]*max-inline-size: 100%/)
     expect(globalCss).toMatch(/\.composer-modes \{[^}]*min-inline-size: 0;[^}]*max-width: 100%/)
+    expect(globalCss).toMatch(/\.composer-modes__options \{[^}]*display: inline-flex;[^}]*overflow: hidden/)
     expect(globalCss).not.toMatch(/\.reply-composer \{[^}]*calc\([^}]*-1\)/)
+  })
+
+  it('uses one compact header and supplementary desktop context', () => {
+    expect(globalCss).toMatch(
+      /\.workspace-header \{[^}]*grid-template-columns: auto minmax\(0, 1fr\) auto;[^}]*padding: var\(--space-3\) var\(--space-4\)/,
+    )
+    expect(globalCss).toMatch(/\.conversation-metadata \{[^}]*display: flex;[^}]*flex-wrap: wrap/)
+    expect(globalCss).not.toContain('.workspace-summary')
+    expect(globalCss).not.toContain('.workspace-detail-region')
   })
 
   it('uses the remaining viewport for a flexible timeline and bounded composer', () => {

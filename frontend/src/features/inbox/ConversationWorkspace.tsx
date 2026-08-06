@@ -50,6 +50,25 @@ function safeInterest(value: string) {
   return Array.from(value).slice(0, 80).join('')
 }
 
+function useMediaQuery(query: string) {
+  const [matches, setMatches] = useState(() =>
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia(query).matches
+      : false,
+  )
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return
+    const mediaQuery = window.matchMedia(query)
+    const update = () => setMatches(mediaQuery.matches)
+    update()
+    mediaQuery.addEventListener('change', update)
+    return () => mediaQuery.removeEventListener('change', update)
+  }, [query])
+
+  return matches
+}
+
 function actorLabel(senderType: MessageSenderType) {
   switch (senderType) {
     case 'customer':
@@ -179,13 +198,15 @@ function ConversationHeader({
   loading,
   error,
   onRetry,
+  headingRef,
   ownershipRef,
 }: {
   detail: OperatorConversationDetail | null
   loading: boolean
   error: ApiError | null
   onRetry: () => Promise<void>
-  ownershipRef: RefObject<HTMLParagraphElement | null>
+  headingRef: RefObject<HTMLHeadingElement | null>
+  ownershipRef: RefObject<HTMLSpanElement | null>
 }) {
   const errorRef = useRef<HTMLDivElement>(null)
 
@@ -193,44 +214,55 @@ function ConversationHeader({
     if (error) errorRef.current?.focus()
   }, [error])
 
-  if (loading) return <DetailLoadingState />
+  if (loading) {
+    return (
+      <div className="conversation-header__content">
+        <h2 id="workspace-heading" tabIndex={-1} ref={headingRef}>Conversation</h2>
+        <DetailLoadingState />
+      </div>
+    )
+  }
   if (error) {
     return (
-      <InlineAlert ref={errorRef} requestId={error.requestId}>
-        {workspaceError(error)}
-        <button className="button button--secondary alert__action" type="button" onClick={() => void onRetry()}>
-          Retry details
-        </button>
-      </InlineAlert>
+      <div className="conversation-header__content">
+        <h2 id="workspace-heading" tabIndex={-1} ref={headingRef}>Conversation</h2>
+        <InlineAlert ref={errorRef} requestId={error.requestId}>
+          {workspaceError(error)}
+          <button className="button button--secondary alert__action" type="button" onClick={() => void onRetry()}>
+            Retry details
+          </button>
+        </InlineAlert>
+      </div>
     )
   }
   if (!detail) return null
   const customerName = detail.customer.display_name?.trim() || 'Customer'
   return (
-    <div className="workspace-summary">
+    <div className="conversation-header__content">
+      <h2 id="workspace-heading" tabIndex={-1} ref={headingRef}>{customerName}</h2>
+      <p className="masked-phone">{detail.customer.phone_masked}</p>
       <p className="visually-hidden" role="status">Conversation details loaded.</p>
-      <div>
-        <h3>{customerName}</h3>
-        <p className="masked-phone">{detail.customer.phone_masked}</p>
-      </div>
-      <div className="conversation-labels" aria-label="Conversation attributes">
-        <span>{label(detail.status)}</span>
-        <span>{label(detail.language)}</span>
-        <span>{detail.message_count} messages</span>
+      <div className="conversation-metadata" aria-label="Conversation attributes">
+        <span>Status: {label(detail.status)}</span>
+        <span>Language: {label(detail.language)}</span>
+        <span
+          className="ownership-summary"
+          ref={ownershipRef}
+          tabIndex={-1}
+          aria-live="polite"
+        >
+          Controlled by {ownershipLabel(detail.ownership)}
+        </span>
+        <span>
+          AI {detail.ownership.ai_execution_state === 'paused'
+            ? 'paused'
+            : label(detail.ownership.ai_execution_state)}
+        </span>
+        <span>
+          Last activity <time dateTime={detail.updated_at}>{formatTimestamp(detail.updated_at)}</time>
+        </span>
         {detail.open_escalation.exists ? <span>Open escalation</span> : null}
       </div>
-      <p
-        className="ownership-summary"
-        ref={ownershipRef}
-        tabIndex={-1}
-        aria-live="polite"
-      >
-        <strong>Controlled by {ownershipLabel(detail.ownership)}</strong>
-        {detail.ownership.owner_type === 'human' ? <span>AI paused</span> : null}
-      </p>
-      <p className="workspace-updated">
-        Last updated <time dateTime={detail.updated_at}>{formatTimestamp(detail.updated_at)}</time>
-      </p>
     </div>
   )
 }
@@ -264,13 +296,6 @@ function ContextBody({
   return (
     <>
       <dl className="context-details">
-        <div>
-          <dt>Conversation control</dt>
-          <dd>
-            Controlled by {ownershipLabel(detail.ownership)}
-            {detail.ownership.owner_type === 'human' ? ' — AI paused' : ''}
-          </dd>
-        </div>
         {detail.lead ? (
           <>
             <div><dt>Lead score</dt><dd>{label(detail.lead.score)}</dd></div>
@@ -760,38 +785,42 @@ function ConversationComposer({
           className="composer-modes"
           aria-describedby={replyUnavailableReason ? replyReasonId : undefined}
         >
-          <legend>Composer mode</legend>
-          <label>
-            <input
-              type="radio"
-              name={`${helpId}-mode`}
-              value="reply"
-              checked={activeMode === 'reply'}
-              disabled={!canReply || submitting}
-              aria-describedby={replyUnavailableReason ? replyReasonId : undefined}
-              onChange={() => {
-                setMode('reply')
-                setValidationError(null)
-                setRequestError(null)
-              }}
-            />
-            Reply
-          </label>
-          <label>
-            <input
-              type="radio"
-              name={`${helpId}-mode`}
-              value="internal_note"
-              checked={activeMode === 'internal_note'}
-              disabled={!canCreateNote || submitting}
-              onChange={() => {
-                setMode('internal_note')
-                setValidationError(null)
-                setRequestError(null)
-              }}
-            />
-            Internal Note
-          </label>
+          <legend className="visually-hidden">Choose message type</legend>
+          <div className="composer-modes__options">
+            <label>
+              <input
+                className="composer-mode-input visually-hidden"
+                type="radio"
+                name={`${helpId}-mode`}
+                value="reply"
+                checked={activeMode === 'reply'}
+                disabled={!canReply || submitting}
+                aria-describedby={replyUnavailableReason ? replyReasonId : undefined}
+                onChange={() => {
+                  setMode('reply')
+                  setValidationError(null)
+                  setRequestError(null)
+                }}
+              />
+              Reply
+            </label>
+            <label>
+              <input
+                className="composer-mode-input visually-hidden"
+                type="radio"
+                name={`${helpId}-mode`}
+                value="internal_note"
+                checked={activeMode === 'internal_note'}
+                disabled={!canCreateNote || submitting}
+                onChange={() => {
+                  setMode('internal_note')
+                  setValidationError(null)
+                  setRequestError(null)
+                }}
+              />
+              Internal Note
+            </label>
+          </div>
         </fieldset>
         <div className="composer-notices">
           {replyUnavailableReason ? (
@@ -805,14 +834,15 @@ function ConversationComposer({
             </p>
           ) : null}
           {activeMode === 'internal_note' ? (
-            <div className="internal-note-warning" role="note">
-              <strong>Internal Note</strong>
+            <p className="internal-note-warning" role="note">
               <span>Internal only — not sent to the customer or available to AI.</span>
-            </div>
-          ) : null}
+            </p>
+          ) : (
+            <p className="composer-guidance">Sent to the customer through the conversation channel.</p>
+          )}
         </div>
       </div>
-      <label htmlFor={`${helpId}-composer`}>
+      <label className="visually-hidden" htmlFor={`${helpId}-composer`}>
         {activeMode === 'reply' ? 'Reply to Customer' : 'Internal Note'}
       </label>
       {requestError ? (
@@ -876,9 +906,11 @@ export function ConversationWorkspace({
   const auth = useAuth()
   const detail = useConversationDetail(client, conversationId)
   const workspaceHeadingRef = useRef<HTMLHeadingElement>(null)
-  const ownershipStatusRef = useRef<HTMLParagraphElement>(null)
+  const focusedConversationRef = useRef<string | null>(null)
+  const ownershipStatusRef = useRef<HTMLSpanElement>(null)
   const detailsButtonRef = useRef<HTMLButtonElement>(null)
   const ownershipButtonRef = useRef<HTMLButtonElement>(null)
+  const useNarrowActionMenu = useMediaQuery('(max-width: 30rem)')
   const [contextOpen, setContextOpen] = useState(false)
   const [ownershipOpen, setOwnershipOpen] = useState(false)
   const [ownershipAtOpen, setOwnershipAtOpen] =
@@ -917,7 +949,16 @@ export function ConversationWorkspace({
     await Promise.all([detail.refresh(), onOwnershipChanged()])
   }
 
-  useEffect(() => workspaceHeadingRef.current?.focus(), [conversationId])
+  useEffect(() => {
+    if (focusedConversationRef.current === conversationId || !workspaceHeadingRef.current) return
+    const activeElement = document.activeElement
+    if (
+      activeElement !== document.body &&
+      !activeElement?.closest('.conversation-row')
+    ) return
+    workspaceHeadingRef.current.focus()
+    focusedConversationRef.current = conversationId
+  }, [conversationId, detail.loading])
   useEffect(() => {
     if (successfulVersion !== null && !ownershipOpen) {
       ownershipStatusRef.current?.focus()
@@ -926,17 +967,52 @@ export function ConversationWorkspace({
 
   return (
     <section className="conversation-workspace" aria-labelledby="workspace-heading">
-      <div className="workspace-header">
-        <div className="workspace-toolbar">
-          <Link className="button button--secondary" to={backTo} aria-label="Back to Inbox">
-            <span className="back-label back-label--long" aria-hidden="true">Back to Inbox</span>
-            <span className="back-label back-label--short" aria-hidden="true">Back</span>
-          </Link>
-          <h2 id="workspace-heading" tabIndex={-1} ref={workspaceHeadingRef}>Conversation</h2>
+      <header className="workspace-header">
+        <Link className="button button--secondary" to={backTo} aria-label="Back to Inbox">
+          <span className="back-label back-label--long" aria-hidden="true">Back to Inbox</span>
+          <span className="back-label back-label--short" aria-hidden="true">Back</span>
+        </Link>
+        <ConversationHeader
+          detail={detail.detail}
+          loading={detail.loading}
+          error={detail.error}
+          onRetry={detail.retry}
+          headingRef={workspaceHeadingRef}
+          ownershipRef={ownershipStatusRef}
+        />
+        {useNarrowActionMenu ? (
+          <details className="workspace-action-menu">
+            <summary className="button button--secondary">Actions</summary>
+            <div className="workspace-action-menu__items">
+              {canChangeOwnership ? (
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  aria-haspopup="dialog"
+                  aria-expanded={ownershipOpen}
+                  onClick={openOwnership}
+                  ref={ownershipButtonRef}
+                >
+                  {ownership?.owner_type === 'ai' ? 'Escalate to Human' : 'Return to AI'}
+                </button>
+              ) : null}
+              <button
+                className="button button--secondary"
+                type="button"
+                aria-haspopup="dialog"
+                aria-expanded={contextOpen}
+                onClick={() => setContextOpen(true)}
+                ref={detailsButtonRef}
+              >
+                Details
+              </button>
+            </div>
+          </details>
+        ) : (
           <div className="workspace-toolbar__actions">
             {canChangeOwnership ? (
               <button
-                className="button button--primary"
+                className={`button ${ownership?.owner_type === 'human' ? 'button--secondary' : 'button--primary'}`}
                 type="button"
                 aria-haspopup="dialog"
                 aria-expanded={ownershipOpen}
@@ -964,17 +1040,8 @@ export function ConversationWorkspace({
               Details
             </button>
           </div>
-        </div>
-        <div className="workspace-detail-region" aria-label="Conversation details" aria-busy={detail.loading}>
-          <ConversationHeader
-            detail={detail.detail}
-            loading={detail.loading}
-            error={detail.error}
-            onRetry={detail.retry}
-            ownershipRef={ownershipStatusRef}
-          />
-        </div>
-      </div>
+        )}
+      </header>
       <div className="workspace-columns">
         <MessageTimeline
           client={client}

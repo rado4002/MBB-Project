@@ -93,6 +93,10 @@ describe('manual Human Operator replies', () => {
     const textbox = await screen.findByRole('textbox', { name: 'Reply to Customer' })
     expect(screen.getByRole('radio', { name: 'Reply' })).toBeEnabled()
     expect(screen.queryByText(/^Reply unavailable/)).not.toBeInTheDocument()
+    expect(screen.queryByText('Composer mode')).not.toBeInTheDocument()
+    expect(screen.getByText('Reply to Customer')).toHaveClass('visually-hidden')
+    expect(screen.getByText('Sent to the customer through the conversation channel.'))
+      .toBeInTheDocument()
     expect(textbox).toHaveAttribute('maxlength', '4096')
 
     await user.type(textbox, 'Bonjour Marie')
