@@ -87,6 +87,42 @@ function ownershipLabel(ownership: ConversationOwnership) {
     : ownership.human_owner?.display_name ?? 'Human Operator'
 }
 
+const REPLY_ELIGIBLE_STATUSES = new Set([
+  'active',
+  'qualifying',
+  'nurturing',
+  'escalated',
+])
+
+function replyUnavailableReason(
+  detail: OperatorConversationDetail | null,
+  accountId: string | undefined,
+  hasReplyCapability: boolean,
+) {
+  if (!hasReplyCapability) {
+    return 'Reply unavailable — your account does not have permission to reply.'
+  }
+  if (!detail) {
+    return 'Reply unavailable — conversation ownership is unavailable.'
+  }
+  if (detail.ownership.owner_type === 'ai') {
+    return 'Reply unavailable — this conversation is controlled by MBB AI Assistant.'
+  }
+  if (
+    detail.ownership.ai_execution_state !== 'paused' ||
+    !detail.ownership.human_owner
+  ) {
+    return 'Reply unavailable — conversation ownership is unavailable.'
+  }
+  if (detail.ownership.human_owner.account_id !== accountId) {
+    return `Reply unavailable — only ${detail.ownership.human_owner.display_name} may reply.`
+  }
+  if (!REPLY_ELIGIBLE_STATUSES.has(detail.status)) {
+    return 'Reply unavailable — this conversation is not currently eligible for replies.'
+  }
+  return null
+}
+
 function workspaceError(error: ApiError) {
   if (error.status === 404 || error.code === 'CONVERSATION_NOT_FOUND') {
     return 'This conversation is unavailable.'
@@ -410,16 +446,14 @@ function MessageTimeline({
   const olderErrorRef = useRef<HTMLDivElement>(null)
   const lastMessageIdRef = useRef<string | null>(null)
 
-  const canReply = Boolean(
-    detail &&
-      ['active', 'qualifying', 'nurturing', 'escalated'].includes(detail.status) &&
-      detail.ownership.owner_type === 'human' &&
-      detail.ownership.ai_execution_state === 'paused' &&
-      detail.ownership.human_owner?.account_id === auth.session?.human.account_id &&
-      auth.session?.capabilities.includes('message.reply'),
+  const replyReason = replyUnavailableReason(
+    detail,
+    auth.session?.human.account_id,
+    Boolean(auth.session?.capabilities.includes('message.reply')),
   )
+  const canReply = replyReason === null
   const canCreateNote = Boolean(
-    detail && auth.session?.capabilities.includes('internal_note.create'),
+    auth.session?.capabilities.includes('internal_note.create'),
   )
 
   useLayoutEffect(() => {
@@ -548,13 +582,14 @@ function MessageTimeline({
           </ol>
         </div>
       )}
-      {(canReply || canCreateNote) && detail ? (
+      {(canReply || canCreateNote) ? (
         <ConversationComposer
           client={client}
           conversationId={conversationId}
-          expectedOwnershipVersion={detail.ownership.version}
+          expectedOwnershipVersion={detail?.ownership.version ?? null}
           canReply={canReply}
           canCreateNote={canCreateNote}
+          replyUnavailableReason={replyReason}
           onReplyAccepted={(message) => {
             history.appendAccepted(message)
             return onReplyAccepted()
@@ -572,14 +607,16 @@ function ConversationComposer({
   expectedOwnershipVersion,
   canReply,
   canCreateNote,
+  replyUnavailableReason,
   onReplyAccepted,
   onNoteAccepted,
 }: {
   client: ConversationApiClient
   conversationId: string
-  expectedOwnershipVersion: number
+  expectedOwnershipVersion: number | null
   canReply: boolean
   canCreateNote: boolean
+  replyUnavailableReason: string | null
   onReplyAccepted: (message: OperatorMessageItem) => Promise<void>
   onNoteAccepted: (note: OperatorInternalNoteItem) => void
 }) {
@@ -597,10 +634,12 @@ function ConversationComposer({
   const focusAfterAcceptanceRef = useRef(false)
   const replyAttemptRef = useRef<{ text: string; key: string } | null>(null)
   const noteAttemptRef = useRef<{ text: string; key: string } | null>(null)
+  const previousCanReplyRef = useRef(canReply)
   const errorRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const helpId = useId()
   const errorId = useId()
+  const replyReasonId = useId()
   const activeMode = mode === 'reply' && !canReply && canCreateNote
     ? 'internal_note'
     : mode
@@ -610,6 +649,14 @@ function ConversationComposer({
   useEffect(() => {
     if (requestError) errorRef.current?.focus()
   }, [requestError])
+
+  useEffect(() => {
+    const replyBecameAvailable = !previousCanReplyRef.current && canReply
+    previousCanReplyRef.current = canReply
+    if (replyBecameAvailable && mode === 'internal_note' && !replyText && !noteText) {
+      setMode('reply')
+    }
+  }, [canReply, mode, noteText, replyText])
 
   useEffect(() => {
     if (!submitting && focusAfterAcceptanceRef.current) {
@@ -652,6 +699,7 @@ function ConversationComposer({
     try {
       const csrfToken = await auth.getCsrfForMutation()
       if (activeMode === 'reply') {
+        if (expectedOwnershipVersion === null) return
         const message = await client.createReply(
           conversationId,
           { text, expected_ownership_version: expectedOwnershipVersion },
@@ -707,45 +755,63 @@ function ConversationComposer({
       className={`reply-composer${activeMode === 'internal_note' ? ' reply-composer--internal-note' : ''}`}
       onSubmit={(event) => void submit(event)}
     >
-      <fieldset className="composer-modes">
-        <legend>Composer mode</legend>
-        <label>
-          <input
-            type="radio"
-            name={`${helpId}-mode`}
-            value="reply"
-            checked={activeMode === 'reply'}
-            disabled={!canReply || submitting}
-            onChange={() => {
-              setMode('reply')
-              setValidationError(null)
-              setRequestError(null)
-            }}
-          />
-          Reply
-        </label>
-        <label>
-          <input
-            type="radio"
-            name={`${helpId}-mode`}
-            value="internal_note"
-            checked={activeMode === 'internal_note'}
-            disabled={!canCreateNote || submitting}
-            onChange={() => {
-              setMode('internal_note')
-              setValidationError(null)
-              setRequestError(null)
-            }}
-          />
-          Internal Note
-        </label>
-      </fieldset>
-      {activeMode === 'internal_note' ? (
-        <div className="internal-note-warning" role="note">
-          <strong>Internal Note</strong>
-          <span>Internal only — not sent to the customer or available to AI.</span>
+      <div className="composer-controls">
+        <fieldset
+          className="composer-modes"
+          aria-describedby={replyUnavailableReason ? replyReasonId : undefined}
+        >
+          <legend>Composer mode</legend>
+          <label>
+            <input
+              type="radio"
+              name={`${helpId}-mode`}
+              value="reply"
+              checked={activeMode === 'reply'}
+              disabled={!canReply || submitting}
+              aria-describedby={replyUnavailableReason ? replyReasonId : undefined}
+              onChange={() => {
+                setMode('reply')
+                setValidationError(null)
+                setRequestError(null)
+              }}
+            />
+            Reply
+          </label>
+          <label>
+            <input
+              type="radio"
+              name={`${helpId}-mode`}
+              value="internal_note"
+              checked={activeMode === 'internal_note'}
+              disabled={!canCreateNote || submitting}
+              onChange={() => {
+                setMode('internal_note')
+                setValidationError(null)
+                setRequestError(null)
+              }}
+            />
+            Internal Note
+          </label>
+        </fieldset>
+        <div className="composer-notices">
+          {replyUnavailableReason ? (
+            <p
+              className="reply-unavailable-reason"
+              id={replyReasonId}
+              role="note"
+              tabIndex={0}
+            >
+              {replyUnavailableReason}
+            </p>
+          ) : null}
+          {activeMode === 'internal_note' ? (
+            <div className="internal-note-warning" role="note">
+              <strong>Internal Note</strong>
+              <span>Internal only — not sent to the customer or available to AI.</span>
+            </div>
+          ) : null}
         </div>
-      ) : null}
+      </div>
       <label htmlFor={`${helpId}-composer`}>
         {activeMode === 'reply' ? 'Reply to Customer' : 'Internal Note'}
       </label>

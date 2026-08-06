@@ -39,7 +39,8 @@ describe('responsive Inbox workflow refinement', () => {
     server.use(authenticated(), ...workspaceHandlers())
     renderApp(`/inbox/${conversationId}`)
 
-    expect(await screen.findByRole('region', { name: 'Conversation timeline' })).toBeInTheDocument()
+    const history = await screen.findByRole('region', { name: 'Conversation timeline' })
+    expect(history).toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'Conversation queue' })).toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'Conversation' })).toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'Timeline' })).toBeInTheDocument()
@@ -48,6 +49,12 @@ describe('responsive Inbox workflow refinement', () => {
     expect(context).toHaveAttribute('tabindex', '0')
     context.focus()
     expect(context).toHaveFocus()
+    const timelinePanel = history.closest('.timeline-panel')
+    const composer = timelinePanel?.querySelector<HTMLFormElement>('form.reply-composer') ?? null
+    expect(composer).not.toBeNull()
+    expect(timelinePanel).toContainElement(composer)
+    expect(history).not.toContainElement(composer)
+    expect(timelinePanel?.lastElementChild).toBe(composer)
     expect(screen.queryByText(/future action|coming soon/i)).not.toBeInTheDocument()
   })
 

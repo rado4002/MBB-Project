@@ -91,6 +91,8 @@ describe('manual Human Operator replies', () => {
     const user = userEvent.setup()
     const { container } = renderApp(`/inbox/${conversationId}`)
     const textbox = await screen.findByRole('textbox', { name: 'Reply to Customer' })
+    expect(screen.getByRole('radio', { name: 'Reply' })).toBeEnabled()
+    expect(screen.queryByText(/^Reply unavailable/)).not.toBeInTheDocument()
     expect(textbox).toHaveAttribute('maxlength', '4096')
 
     await user.type(textbox, 'Bonjour Marie')
@@ -193,9 +195,14 @@ describe('manual Human Operator replies', () => {
   })
 
   it.each([
-    ['AI control', conversationDetailFixture(), sessionFixture()],
     [
-      'another Human Operator',
+      'AI control',
+      conversationDetailFixture(),
+      sessionFixture(),
+      'Reply unavailable — this conversation is controlled by MBB AI Assistant.',
+    ],
+    [
+      'another Human Operator for an Administrator',
       humanDetail({
         ownership: {
           ...humanDetail().ownership,
@@ -203,6 +210,18 @@ describe('manual Human Operator replies', () => {
         },
       }),
       sessionFixture('administrator'),
+      'Reply unavailable — only Other Operator may reply.',
+    ],
+    [
+      'another Human Operator for an Operator',
+      humanDetail({
+        ownership: {
+          ...humanDetail().ownership,
+          human_owner: { account_id: 'other-account', display_name: 'Other Operator' },
+        },
+      }),
+      sessionFixture('operator'),
+      'Reply unavailable — only Other Operator may reply.',
     ],
     [
       'missing reply permission',
@@ -211,16 +230,34 @@ describe('manual Human Operator replies', () => {
         ...sessionFixture(),
         capabilities: sessionFixture().capabilities.filter((item) => item !== 'message.reply'),
       },
+      'Reply unavailable — your account does not have permission to reply.',
     ],
-    ['non-reply-eligible status', humanDetail({ status: 'dormant' }), sessionFixture()],
-  ])('hides the composer for %s', async (_case, detail, session) => {
+    [
+      'non-reply-eligible status',
+      humanDetail({ status: 'dormant' }),
+      sessionFixture(),
+      'Reply unavailable — this conversation is not currently eligible for replies.',
+    ],
+  ])('explains unavailable Reply and preserves Internal Note for %s', async (
+    _case,
+    detail,
+    session,
+    expectedReason,
+  ) => {
     server.use(...handlers(() => detail, session))
     renderApp(`/inbox/${conversationId}`)
     await screen.findByRole('heading', { name: 'Timeline' })
+    const replyMode = screen.getByRole('radio', { name: 'Reply' })
+    expect(replyMode).toBeDisabled()
+    const explanation = await screen.findByText(expectedReason)
+    expect(replyMode).toHaveAccessibleDescription(expectedReason)
+    expect(explanation).toHaveAttribute('role', 'note')
+    expect(explanation).toHaveAttribute('tabindex', '0')
     expect(screen.queryByRole('textbox', { name: 'Reply to Customer' })).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Internal Note' })).toBeInTheDocument()
   })
 
-  it('hides the composer when authoritative ownership data is unavailable', async () => {
+  it('keeps Internal Note available and explains Reply when ownership data is unavailable', async () => {
     server.use(
       http.get('/api/v1/operator/conversations/:conversationId', () =>
         HttpResponse.json(
@@ -232,7 +269,11 @@ describe('manual Human Operator replies', () => {
     )
     renderApp(`/inbox/${conversationId}`)
     expect(await screen.findByText('ownership-unavailable')).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: 'Reply' })).toBeDisabled()
+    expect(screen.getByText('Reply unavailable — conversation ownership is unavailable.'))
+      .toHaveAttribute('role', 'note')
     expect(screen.queryByRole('textbox', { name: 'Reply to Customer' })).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Internal Note' })).toBeInTheDocument()
   })
 
   it('removes the composer when refreshed ownership changes after acceptance', async () => {

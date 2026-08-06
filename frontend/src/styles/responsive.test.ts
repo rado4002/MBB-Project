@@ -11,7 +11,7 @@ describe('responsive Inbox style contract', () => {
       /@media \(min-width: 48rem\)[\s\S]*?\.inbox-layout \{ grid-template-columns: minmax\(18rem, 0\.9fr\) minmax\(0, 1\.5fr\)/,
     )
     expect(globalCss).toMatch(
-      /@media \(min-width: 80rem\)[\s\S]*?\.workspace-columns \{ grid-template-columns: minmax\(0, 2fr\) minmax\(16rem, 0\.8fr\)/,
+      /@media \(min-width: 80rem\)[\s\S]*?\.workspace-columns \{ grid-template-columns: minmax\(0, 1fr\) minmax\(14rem, 18rem\)/,
     )
     expect(globalCss).toMatch(/\.context-trigger \{ display: none; \}/)
   })
@@ -22,6 +22,30 @@ describe('responsive Inbox style contract', () => {
     expect(globalCss).toMatch(/\.message-text, \.message-media \{[^}]*overflow-wrap: anywhere/)
     expect(globalCss).toMatch(/\.workspace-summary h3 \{[^}]*overflow-wrap: anywhere/)
     expect(globalCss).toMatch(/\.context-details dd \{[^}]*overflow-wrap: anywhere/)
+    expect(globalCss).toMatch(/body \{[^}]*min-inline-size: 0/)
+    expect(globalCss).toMatch(/\.reply-composer \{[^}]*min-inline-size: 0;[^}]*max-inline-size: 100%/)
+    expect(globalCss).toMatch(/\.composer-modes \{[^}]*min-inline-size: 0;[^}]*max-width: 100%/)
+    expect(globalCss).not.toMatch(/\.reply-composer \{[^}]*calc\([^}]*-1\)/)
+  })
+
+  it('uses the remaining viewport for a flexible timeline and bounded composer', () => {
+    expect(globalCss).toMatch(
+      /\.app-frame \{[^}]*height: 100dvh;[^}]*grid-template-rows: auto minmax\(0, 1fr\);[^}]*overflow: hidden/,
+    )
+    expect(globalCss).toMatch(
+      /\.inbox-page--selected \{[^}]*height: 100%;[^}]*grid-template-rows: auto auto minmax\(0, 1fr\);[^}]*overflow: hidden/,
+    )
+    expect(globalCss).toMatch(
+      /\.workspace-columns \{[^}]*height: 100%;[^}]*min-height: 0;[^}]*overflow: hidden/,
+    )
+    expect(globalCss).toMatch(
+      /\.timeline-panel \{[^}]*grid-template-rows: auto minmax\(8rem, 1fr\) auto;[^}]*overflow: hidden/,
+    )
+    expect(globalCss).toMatch(
+      /\.reply-composer > textarea \{[^}]*min-height: 4\.5rem;[^}]*max-height: 11rem;[^}]*resize: vertical/,
+    )
+    expect(globalCss).not.toContain('height: clamp(32rem, calc(100dvh - 20rem), 48rem)')
+    expect(globalCss).not.toContain('min-height: calc(100dvh - 9rem)')
   })
 
   it('uses tokens and static skeletons with an explicit reduced-motion boundary', () => {
