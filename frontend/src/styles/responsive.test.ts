@@ -49,7 +49,10 @@ describe('responsive Inbox style contract', () => {
       /\.workspace-columns \{[^}]*height: 100%;[^}]*min-height: 0;[^}]*overflow: hidden/,
     )
     expect(globalCss).toMatch(
-      /\.timeline-panel \{[^}]*grid-template-rows: auto minmax\(8rem, 1fr\) auto;[^}]*overflow: hidden/,
+      /\.timeline-panel \{[^}]*grid-template-rows: minmax\(0, 1fr\) auto;[^}]*padding: 0;[^}]*overflow: hidden/,
+    )
+    expect(globalCss).toMatch(
+      /\.reply-composer \{[^}]*margin: 0;[^}]*border-top: 1px solid var\(--color-border\);[^}]*border-radius: 0/,
     )
     expect(globalCss).toMatch(
       /\.reply-composer > textarea \{[^}]*min-height: 4\.5rem;[^}]*max-height: 11rem;[^}]*resize: vertical/,

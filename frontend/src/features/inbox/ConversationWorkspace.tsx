@@ -538,7 +538,9 @@ function MessageTimeline({
       aria-labelledby="messages-heading"
       aria-busy={history.loading || history.loadingOlder}
     >
-      <h3 id="messages-heading">Timeline</h3>
+      <h3 className="timeline-panel__label visually-hidden" id="messages-heading">
+        Timeline
+      </h3>
       {history.loading ? (
         <HistoryLoadingState />
       ) : history.error ? (

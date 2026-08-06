@@ -57,7 +57,10 @@ describe('read-only conversation workspace', () => {
     )
     expect(window.location.search).toBe('?status=active&language=french')
     expect(link).toHaveAttribute('aria-current', 'page')
-    expect(await screen.findByRole('heading', { name: 'Timeline' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Timeline' })).toHaveClass(
+      'timeline-panel__label',
+      'visually-hidden',
+    )
     expect(document.getElementById('workspace-heading')).toHaveFocus()
   })
 

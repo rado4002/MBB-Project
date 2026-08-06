@@ -55,6 +55,8 @@ describe('responsive Inbox workflow refinement', () => {
     expect(timelinePanel).toContainElement(composer)
     expect(history).not.toContainElement(composer)
     expect(timelinePanel?.lastElementChild).toBe(composer)
+    expect(composer?.previousElementSibling).toBe(history)
+    expect(screen.getByRole('heading', { name: 'Timeline' })).toHaveClass('visually-hidden')
     expect(screen.queryByText(/future action|coming soon/i)).not.toBeInTheDocument()
   })
 
