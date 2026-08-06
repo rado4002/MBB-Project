@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ConversationApiClient } from '../../api/conversations'
 import type {
   OperatorConversationDetail,
+  OperatorInternalNoteItem,
   OperatorMessageItem,
+  OperatorTimelineItem,
 } from '../../api/contracts/conversations'
 import { asApiError, type ApiError } from '../../api/errors'
 
@@ -67,7 +69,7 @@ export function useConversationDetail(
 }
 
 interface HistoryState {
-  items: OperatorMessageItem[]
+  items: OperatorTimelineItem[]
   nextOlderCursor: string | null
   loading: boolean
   loadingOlder: boolean
@@ -106,7 +108,7 @@ export function useMessageHistory(
       }))
     }
     try {
-      const response = await client.getMessages(
+      const response = await client.getTimeline(
         conversationId,
         undefined,
         activeController.signal,
@@ -154,16 +156,18 @@ export function useMessageHistory(
       olderError: null,
     }))
     try {
-      const response = await client.getMessages(
+      const response = await client.getTimeline(
         conversationId,
         cursor,
         activeController.signal,
       )
       if (activeVersion !== version.current || activeController.signal.aborted) return
       setState((current) => {
-        const existing = new Set(current.items.map((item) => item.message_id))
+        const itemKey = (item: OperatorTimelineItem) =>
+          item.kind === 'message' ? `message:${item.message_id}` : `internal_note:${item.note_id}`
+        const existing = new Set(current.items.map(itemKey))
         const uniqueOlder = response.items.filter(
-          (item) => !existing.has(item.message_id),
+          (item) => !existing.has(itemKey(item)),
         )
         return {
           ...current,
@@ -189,13 +193,26 @@ export function useMessageHistory(
   const appendAccepted = useCallback((message: OperatorMessageItem) => {
     setState((current) => {
       const existingIndex = current.items.findIndex(
-        (item) => item.message_id === message.message_id,
+        (item) => item.kind === 'message' && item.message_id === message.message_id,
       )
+      const timelineMessage: OperatorTimelineItem = { ...message, kind: 'message' }
       if (existingIndex === -1) {
-        return { ...current, items: [...current.items, message] }
+        return { ...current, items: [...current.items, timelineMessage] }
       }
       const items = [...current.items]
-      items[existingIndex] = message
+      items[existingIndex] = timelineMessage
+      return { ...current, items }
+    })
+  }, [])
+
+  const appendInternalNote = useCallback((note: OperatorInternalNoteItem) => {
+    setState((current) => {
+      const existingIndex = current.items.findIndex(
+        (item) => item.kind === 'internal_note' && item.note_id === note.note_id,
+      )
+      if (existingIndex === -1) return { ...current, items: [...current.items, note] }
+      const items = [...current.items]
+      items[existingIndex] = note
       return { ...current, items }
     })
   }, [])
@@ -205,5 +222,6 @@ export function useMessageHistory(
     retry: () => loadRecent(true),
     loadEarlier,
     appendAccepted,
+    appendInternalNote,
   }
 }

@@ -5,6 +5,7 @@ from app.models.conversation_ownership_idempotency import (
     ConversationOwnershipIdempotency,
 )
 from app.models.message import Message
+from app.models.internal_note import InternalNote
 from app.models.lead import Lead
 from app.models.relance import Relance
 from app.models.maps_tag import MapsTag
@@ -27,6 +28,7 @@ __all__ = [
     "Conversation",
     "ConversationOwnershipIdempotency",
     "Message",
+    "InternalNote",
     "Lead",
     "Relance",
     "MapsTag",

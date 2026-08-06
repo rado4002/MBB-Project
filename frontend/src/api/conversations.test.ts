@@ -109,6 +109,22 @@ describe('E1 conversation queue client', () => {
     )
   })
 
+  it('loads the Operator-only timeline with its signed older-item cursor', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ items: [], next_older_cursor: null }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await createConversationApiClient().getTimeline('conversation-id', 'timeline+/cursor=')
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/api/v1/operator/conversations/conversation-id/timeline?before=timeline%2B%2Fcursor%3D',
+    )
+  })
+
   it('sends an ownership transition with CSRF, idempotency, and no extra fields', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
@@ -178,6 +194,41 @@ describe('E1 conversation queue client', () => {
     expect(headers.get('X-CSRF-Token')).toBe('csrf-token')
     expect(headers.get('Idempotency-Key')).toBe(
       '11111111-1111-4111-8111-111111111111',
+    )
+  })
+
+  it('sends an exact plain-text internal note with CSRF and a distinct browser UUID', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          kind: 'internal_note',
+          note_id: '22222222-2222-4222-8222-222222222222',
+        }),
+        { status: 201, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await createConversationApiClient().createInternalNote(
+      'conversation-id',
+      { text: '  Private — 你好\nline two  ' },
+      '22222222-2222-4222-8222-222222222222',
+      'csrf-token',
+    )
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/v1/operator/conversations/conversation-id/notes')
+    expect(init).toMatchObject({
+      method: 'POST',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      body: JSON.stringify({ text: '  Private — 你好\nline two  ' }),
+    })
+    const headers = new Headers(init?.headers)
+    expect(headers.get('Content-Type')).toBe('application/json')
+    expect(headers.get('X-CSRF-Token')).toBe('csrf-token')
+    expect(headers.get('Idempotency-Key')).toBe(
+      '22222222-2222-4222-8222-222222222222',
     )
   })
 })

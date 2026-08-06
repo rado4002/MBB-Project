@@ -2,7 +2,8 @@ import type { BrowserSession, HumanRole } from '../api/contracts/auth'
 import type {
   OperatorConversationDetail,
   OperatorConversationQueueItem,
-  OperatorMessageItem,
+  OperatorInternalNoteItem,
+  OperatorTimelineMessageItem,
 } from '../api/contracts/conversations'
 
 export function sessionFixture(
@@ -22,7 +23,13 @@ export function sessionFixture(
       'message.read',
       ...(role === 'analyst'
         ? []
-        : ['message.reply', 'escalation.create', 'conversation.ownership.change']),
+        : [
+            'message.reply',
+            'internal_note.read',
+            'internal_note.create',
+            'escalation.create',
+            'conversation.ownership.change',
+          ]),
     ],
     must_change_password: mustChangePassword,
     idle_expires_at_epoch: 1_900_000_000,
@@ -93,9 +100,10 @@ export function conversationDetailFixture(
 
 export function messageFixture(
   id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-  overrides: Partial<OperatorMessageItem> = {},
-): OperatorMessageItem {
+  overrides: Partial<OperatorTimelineMessageItem> = {},
+): OperatorTimelineMessageItem {
   return {
+    kind: 'message',
     message_id: id,
     occurred_at: '2026-08-02T12:30:00Z',
     direction: 'inbound',
@@ -107,6 +115,23 @@ export function messageFixture(
     text: 'Bonjour, je souhaite des informations.',
     media: null,
     language: 'french',
+    ...overrides,
+  }
+}
+
+export function internalNoteFixture(
+  id = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+  overrides: Partial<OperatorInternalNoteItem> = {},
+): OperatorInternalNoteItem {
+  return {
+    kind: 'internal_note',
+    note_id: id,
+    occurred_at: '2026-08-02T12:45:00Z',
+    author: {
+      account_id: 'account-test-only',
+      display_name: 'Omar Operator',
+    },
+    text: 'Internal follow-up context.',
     ...overrides,
   }
 }

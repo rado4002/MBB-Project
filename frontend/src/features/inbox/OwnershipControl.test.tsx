@@ -61,7 +61,7 @@ function handlers(
     http.get('/api/v1/operator/conversations/:conversationId', () =>
       HttpResponse.json(detail()),
     ),
-    http.get('/api/v1/operator/conversations/:conversationId/messages', () =>
+    http.get('/api/v1/operator/conversations/:conversationId/timeline', () =>
       HttpResponse.json({ items: [messageFixture()], next_older_cursor: null }),
     ),
   ]

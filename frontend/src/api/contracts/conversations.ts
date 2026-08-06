@@ -122,7 +122,33 @@ export interface OperatorReplyRequest {
   expected_ownership_version: number
 }
 
+export interface OperatorInternalNoteRequest {
+  text: string
+}
+
+export interface OperatorInternalNoteItem {
+  kind: 'internal_note'
+  note_id: string
+  occurred_at: string
+  author: {
+    account_id: string
+    display_name: string
+  }
+  text: string
+}
+
+export interface OperatorTimelineMessageItem extends OperatorMessageItem {
+  kind: 'message'
+}
+
+export type OperatorTimelineItem = OperatorTimelineMessageItem | OperatorInternalNoteItem
+
 export interface OperatorMessageHistoryResponse {
   items: OperatorMessageItem[]
+  next_older_cursor: string | null
+}
+
+export interface OperatorTimelineResponse {
+  items: OperatorTimelineItem[]
   next_older_cursor: string | null
 }

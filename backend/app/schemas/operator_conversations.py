@@ -1,7 +1,7 @@
 """Minimized browser-operator conversation read contracts."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -118,3 +118,37 @@ class OperatorReplyCreate(BaseModel):
         if not value.strip():
             raise ValueError("reply text must not be blank")
         return value
+
+
+class OperatorInternalNoteCreate(BaseModel):
+    text: str = Field(min_length=1, max_length=4096)
+
+    @field_validator("text")
+    @classmethod
+    def reject_blank_note(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("internal note text must not be blank")
+        return value
+
+
+class OperatorInternalNoteItem(BaseModel):
+    kind: Literal["internal_note"] = "internal_note"
+    note_id: UUID
+    occurred_at: datetime
+    author: OperatorHumanOwner
+    text: str
+
+
+class OperatorTimelineMessageItem(OperatorMessageItem):
+    kind: Literal["message"] = "message"
+
+
+OperatorTimelineItem = Annotated[
+    OperatorTimelineMessageItem | OperatorInternalNoteItem,
+    Field(discriminator="kind"),
+]
+
+
+class OperatorTimelineResponse(BaseModel):
+    items: list[OperatorTimelineItem]
+    next_older_cursor: str | None

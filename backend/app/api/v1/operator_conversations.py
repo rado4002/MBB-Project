@@ -14,7 +14,7 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Depends, Header, Query, Request, Response, status
 from pydantic import UUID4
-from sqlalchemy import exists, func, literal, select, true, tuple_
+from sqlalchemy import TIMESTAMP, String, cast, exists, func, literal, select, true, tuple_, union_all
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,6 +32,7 @@ from app.models.conversation import Conversation
 from app.models.customer import Customer
 from app.models.escalation_ticket import EscalationTicket
 from app.models.lead import Lead
+from app.models.internal_note import InternalNote
 from app.models.message import Message
 from app.models.operator_account import OperatorAccount
 from app.modules.m4_conversation.ownership import (
@@ -44,6 +45,13 @@ from app.modules.m4_conversation.ownership import (
     ReturnToAIDisabled,
     ReturnToAIUnavailable,
     transition_ownership,
+)
+from app.modules.m4_conversation.internal_notes import (
+    InternalNoteConversationNotFound,
+    InternalNoteIdempotencyConflict,
+    InternalNoteResult,
+    InternalNoteUnavailable,
+    create_internal_note,
 )
 from app.modules.m4_conversation.operator_replies import (
     OperatorReplyResult,
@@ -77,11 +85,15 @@ from app.schemas.operator_conversations import (
     OperatorLatestMessage,
     OperatorLeadSummary,
     OperatorHumanOwner,
+    OperatorInternalNoteCreate,
+    OperatorInternalNoteItem,
     OperatorMessageHistoryResponse,
     OperatorMessageItem,
     OperatorMessageMedia,
     OperatorOpenEscalation,
     OperatorReplyCreate,
+    OperatorTimelineMessageItem,
+    OperatorTimelineResponse,
     OperatorOwnershipTransitionRequest,
     OperatorOwnershipTransitionResponse,
 )
@@ -165,11 +177,12 @@ def _cursor_secret(principal: BrowserPrincipal) -> bytes:
 
 def _encode_cursor(
     *,
-    kind: Literal["conversation", "message"],
+    kind: Literal["conversation", "message", "timeline"],
     occurred_at: datetime,
     item_id: UUID,
     principal: BrowserPrincipal,
     conversation_id: UUID | None = None,
+    item_kind: Literal["message", "internal_note"] | None = None,
 ) -> str:
     normalized = occurred_at.astimezone(timezone.utc)
     payload: dict[str, Any] = {
@@ -180,6 +193,10 @@ def _encode_cursor(
     }
     if conversation_id is not None:
         payload["c"] = str(conversation_id)
+    if kind == "timeline":
+        if item_kind not in {"message", "internal_note"}:
+            raise _service_unavailable(RuntimeError("timeline cursor kind is unavailable"))
+        payload["x"] = item_kind
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     signature = hmac.new(
         _cursor_secret(principal),
@@ -192,10 +209,10 @@ def _encode_cursor(
 def _decode_cursor(
     token: str,
     *,
-    kind: Literal["conversation", "message"],
+    kind: Literal["conversation", "message", "timeline"],
     principal: BrowserPrincipal,
     conversation_id: UUID | None = None,
-) -> tuple[datetime, UUID]:
+) -> tuple[datetime, UUID] | tuple[datetime, str, UUID]:
     if not token or len(token) > _MAX_CURSOR_LENGTH or not token.isascii():
         raise _validation_error()
     try:
@@ -232,6 +249,9 @@ def _decode_cursor(
         if occurred_at.tzinfo is None:
             raise ValueError("cursor timestamp has no timezone")
         item_id = UUID(payload["i"])
+        item_kind = payload.get("x")
+        if kind == "timeline" and item_kind not in {"message", "internal_note"}:
+            raise ValueError("invalid timeline item kind")
     except BrowserAuthError:
         raise
     except (
@@ -242,6 +262,8 @@ def _decode_cursor(
         json.JSONDecodeError,
     ) as exc:
         raise _validation_error() from exc
+    if kind == "timeline":
+        return occurred_at.astimezone(timezone.utc), item_kind, item_id
     return occurred_at.astimezone(timezone.utc), item_id
 
 
@@ -401,6 +423,49 @@ def _reply_response(result: OperatorReplyResult) -> OperatorMessageItem:
             "delivery_state": "accepted",
             "delivery_state_timestamp": message.timestamp,
         }
+    )
+
+
+def _internal_note_response(
+    result: InternalNoteResult,
+) -> OperatorInternalNoteItem:
+    note = result.note
+    return OperatorInternalNoteItem(
+        note_id=note.note_id,
+        occurred_at=note.created_at,
+        author=OperatorHumanOwner(
+            account_id=note.author_account_id,
+            display_name=note.author_display_name,
+        ),
+        text=note.content,
+    )
+
+
+def _timeline_message_item(row: Any) -> OperatorTimelineMessageItem:
+    message = _operator_message_item(
+        message_id=row["item_id"],
+        occurred_at=row["occurred_at"],
+        direction=row["direction"],
+        content_type=row["content_type"],
+        content=row["content"],
+        language=row["language"],
+        operator_author_account_id=row["author_account_id"],
+        author_display_name=row["author_display_name"],
+        delivery_state=row["delivery_state"],
+        delivery_state_timestamp=row["delivery_state_timestamp"],
+    )
+    return OperatorTimelineMessageItem(**message.model_dump())
+
+
+def _timeline_note_item(row: Any) -> OperatorInternalNoteItem:
+    return OperatorInternalNoteItem(
+        note_id=row["item_id"],
+        occurred_at=row["occurred_at"],
+        author=OperatorHumanOwner(
+            account_id=row["author_account_id"],
+            display_name=row["author_display_name"],
+        ),
+        text=row["content"],
     )
 
 
@@ -752,6 +817,82 @@ async def change_operator_conversation_ownership(
 
 
 @router.post(
+    "/{conversation_id}/notes",
+    response_model=OperatorInternalNoteItem,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_operator_internal_note(
+    conversation_id: UUID,
+    body: OperatorInternalNoteCreate,
+    request: Request,
+    response: Response,
+    principal: Annotated[BrowserPrincipal, Depends(require_csrf)],
+    _read_principal: Annotated[
+        BrowserPrincipal, Depends(require_capability("conversation.read"))
+    ],
+    _note_principal: Annotated[
+        BrowserPrincipal, Depends(require_capability("internal_note.create"))
+    ],
+    settings: Annotated[Settings, Depends(get_browser_settings)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[
+        UUID4, Header(alias="Idempotency-Key", include_in_schema=True)
+    ],
+) -> OperatorInternalNoteItem:
+    validate_state_changing_request(request, settings)
+    request_id = normalize_or_generate_request_id(
+        getattr(request.state, "request_id", None)
+        or request.headers.get("X-Request-ID")
+    )
+    try:
+        result = await create_internal_note(
+            db,
+            note_id=idempotency_key,
+            conversation_id=conversation_id,
+            content=body.text,
+            actor_account_id=principal.account.account_id,
+            actor_display_name=principal.account.display_name,
+            actor_role=principal.account.role,
+            idempotency_secret=settings.browser_idempotency_hmac_secret,
+            request_id=request_id,
+            settings=settings,
+            source_network_fingerprint=(
+                principal.session.record.ip_prefix_fingerprint
+            ),
+            user_agent_fingerprint=(
+                principal.session.record.user_agent_fingerprint
+            ),
+        )
+    except InternalNoteConversationNotFound as exc:
+        raise _operator_error(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="CONVERSATION_NOT_FOUND",
+            message="The conversation was not found.",
+        ) from exc
+    except InternalNoteIdempotencyConflict as exc:
+        raise _operator_error(
+            status_code=status.HTTP_409_CONFLICT,
+            code="IDEMPOTENCY_CONFLICT",
+            message="The idempotency key was already used for another internal note.",
+        ) from exc
+    except InternalNoteUnavailable as exc:
+        raise _operator_error(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            code="SERVICE_UNAVAILABLE",
+            message="The internal note service is temporarily unavailable.",
+        ) from exc
+
+    response.status_code = (
+        status.HTTP_200_OK if result.replayed else status.HTTP_201_CREATED
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Idempotent-Replayed"] = (
+        "true" if result.replayed else "false"
+    )
+    return _internal_note_response(result)
+
+
+@router.post(
     "/{conversation_id}/replies",
     response_model=OperatorMessageItem,
     status_code=status.HTTP_202_ACCEPTED,
@@ -865,6 +1006,125 @@ async def create_operator_reply(
         "true" if result.replayed else "false"
     )
     return _reply_response(result)
+
+
+@router.get(
+    "/{conversation_id}/timeline",
+    response_model=OperatorTimelineResponse,
+)
+async def get_operator_timeline(
+    conversation_id: UUID,
+    response: Response,
+    principal: Annotated[
+        BrowserPrincipal, Depends(require_capability("conversation.read"))
+    ],
+    _message_principal: Annotated[
+        BrowserPrincipal, Depends(require_capability("message.read"))
+    ],
+    _note_principal: Annotated[
+        BrowserPrincipal, Depends(require_capability("internal_note.read"))
+    ],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=50)] = 30,
+    before: Annotated[str | None, Query(max_length=_MAX_CURSOR_LENGTH)] = None,
+) -> OperatorTimelineResponse:
+    access_statement = select(Conversation.conversation_id).where(
+        Conversation.conversation_id == conversation_id,
+        _operator_access_predicate(principal),
+    )
+    try:
+        accessible_id = await db.scalar(access_statement)
+    except (SQLAlchemyError, OSError, ConnectionError, TimeoutError) as exc:
+        raise _service_unavailable(exc) from exc
+    if accessible_id is None:
+        raise BrowserAuthError(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="CONVERSATION_NOT_FOUND",
+            message="The conversation was not found.",
+        )
+
+    message_items = select(
+        literal("message").label("kind"),
+        Message.message_id.label("item_id"),
+        Message.timestamp.label("occurred_at"),
+        Message.direction.label("direction"),
+        Message.content_type.label("content_type"),
+        Message.content.label("content"),
+        Message.language.label("language"),
+        Message.operator_author_account_id.label("author_account_id"),
+        Message.author_display_name.label("author_display_name"),
+        Message.delivery_state.label("delivery_state"),
+        Message.delivery_state_timestamp.label("delivery_state_timestamp"),
+    ).where(
+        Message.conversation_id == conversation_id,
+        (Message.operator_author_account_id.is_(None))
+        | (Message.delivery_state.is_not(None)),
+    )
+    note_items = select(
+        literal("internal_note").label("kind"),
+        InternalNote.note_id.label("item_id"),
+        InternalNote.created_at.label("occurred_at"),
+        cast(literal(None), String(10)).label("direction"),
+        cast(literal(None), String(20)).label("content_type"),
+        InternalNote.content.label("content"),
+        cast(literal(None), String(10)).label("language"),
+        InternalNote.author_account_id.label("author_account_id"),
+        InternalNote.author_display_name.label("author_display_name"),
+        cast(literal(None), String(20)).label("delivery_state"),
+        cast(literal(None), TIMESTAMP(timezone=True)).label(
+            "delivery_state_timestamp"
+        ),
+    ).where(InternalNote.conversation_id == conversation_id)
+    timeline = union_all(message_items, note_items).subquery("operator_timeline")
+    statement = (
+        select(timeline)
+        .order_by(
+            timeline.c.occurred_at.desc(),
+            timeline.c.kind.desc(),
+            timeline.c.item_id.desc(),
+        )
+        .limit(limit + 1)
+    )
+    if before is not None:
+        before_time, before_kind, before_id = _decode_cursor(
+            before,
+            kind="timeline",
+            principal=principal,
+            conversation_id=conversation_id,
+        )
+        statement = statement.where(
+            tuple_(timeline.c.occurred_at, timeline.c.kind, timeline.c.item_id)
+            < tuple_(before_time, before_kind, before_id)
+        )
+    try:
+        rows = (await db.execute(statement)).mappings().all()
+    except (SQLAlchemyError, OSError, ConnectionError, TimeoutError) as exc:
+        raise _service_unavailable(exc) from exc
+
+    has_more = len(rows) > limit
+    newest_first = rows[:limit]
+    items = [
+        _timeline_message_item(row)
+        if row["kind"] == "message"
+        else _timeline_note_item(row)
+        for row in reversed(newest_first)
+    ]
+    next_older_cursor = None
+    if has_more and newest_first:
+        boundary = newest_first[-1]
+        next_older_cursor = _encode_cursor(
+            kind="timeline",
+            occurred_at=boundary["occurred_at"],
+            item_id=boundary["item_id"],
+            item_kind=boundary["kind"],
+            conversation_id=conversation_id,
+            principal=principal,
+        )
+    response.headers["Cache-Control"] = "no-store"
+    return OperatorTimelineResponse(
+        items=items,
+        next_older_cursor=next_older_cursor,
+    )
 
 
 @router.get("/{conversation_id}", response_model=OperatorConversationDetail)

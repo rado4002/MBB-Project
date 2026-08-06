@@ -5,7 +5,10 @@ import type {
   OperatorConversationQueueResponse,
   OperatorMessageHistoryResponse,
   OperatorMessageItem,
+  OperatorInternalNoteItem,
+  OperatorInternalNoteRequest,
   OperatorReplyRequest,
+  OperatorTimelineResponse,
   OwnershipTransitionRequest,
   OwnershipTransitionResponse,
 } from './contracts/conversations'
@@ -24,6 +27,11 @@ export interface ConversationApiClient {
     before?: string,
     signal?: AbortSignal,
   ): Promise<OperatorMessageHistoryResponse>
+  getTimeline(
+    conversationId: string,
+    before?: string,
+    signal?: AbortSignal,
+  ): Promise<OperatorTimelineResponse>
   changeOwnership(
     conversationId: string,
     body: OwnershipTransitionRequest,
@@ -38,6 +46,13 @@ export interface ConversationApiClient {
     csrfToken: string,
     signal?: AbortSignal,
   ): Promise<OperatorMessageItem>
+  createInternalNote(
+    conversationId: string,
+    body: OperatorInternalNoteRequest,
+    idempotencyKey: string,
+    csrfToken: string,
+    signal?: AbortSignal,
+  ): Promise<OperatorInternalNoteItem>
 }
 
 export function createConversationApiClient(
@@ -78,6 +93,16 @@ export function createConversationApiClient(
         onSessionExpired,
       )
     },
+    getTimeline: (conversationId, before, signal) => {
+      const query = new URLSearchParams()
+      if (before) query.set('before', before)
+      const suffix = query.size ? `?${query.toString()}` : ''
+      return requestJson<OperatorTimelineResponse>(
+        `${conversationPath(conversationId)}/timeline${suffix}`,
+        { signal },
+        onSessionExpired,
+      )
+    },
     changeOwnership: (
       conversationId,
       body,
@@ -105,6 +130,24 @@ export function createConversationApiClient(
     ) =>
       requestJson<OperatorMessageItem>(
         `${conversationPath(conversationId)}/replies`,
+        {
+          method: 'POST',
+          body,
+          csrfToken,
+          idempotencyKey,
+          signal,
+        },
+        onSessionExpired,
+      ),
+    createInternalNote: (
+      conversationId,
+      body,
+      idempotencyKey,
+      csrfToken,
+      signal,
+    ) =>
+      requestJson<OperatorInternalNoteItem>(
+        `${conversationPath(conversationId)}/notes`,
         {
           method: 'POST',
           body,

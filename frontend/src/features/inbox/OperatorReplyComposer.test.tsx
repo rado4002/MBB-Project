@@ -8,6 +8,7 @@ import { expectAccessible } from '../../test/accessibility'
 import {
   conversationDetailFixture,
   conversationFixture,
+  internalNoteFixture,
   messageFixture,
   sessionFixture,
 } from '../../test/fixtures'
@@ -67,7 +68,7 @@ function handlers(
     http.get('/api/v1/operator/conversations/:conversationId', () =>
       HttpResponse.json(detail()),
     ),
-    http.get('/api/v1/operator/conversations/:conversationId/messages', () =>
+    http.get('/api/v1/operator/conversations/:conversationId/timeline', () =>
       HttpResponse.json({ items: [messageFixture()], next_older_cursor: null }),
     ),
   ]
@@ -215,7 +216,7 @@ describe('manual Human Operator replies', () => {
   ])('hides the composer for %s', async (_case, detail, session) => {
     server.use(...handlers(() => detail, session))
     renderApp(`/inbox/${conversationId}`)
-    await screen.findByRole('heading', { name: 'Messages' })
+    await screen.findByRole('heading', { name: 'Timeline' })
     expect(screen.queryByRole('textbox', { name: 'Reply to Customer' })).not.toBeInTheDocument()
   })
 
@@ -256,5 +257,137 @@ describe('manual Human Operator replies', () => {
       expect(screen.queryByRole('textbox', { name: 'Reply to Customer' })).not.toBeInTheDocument(),
     )
     expect(screen.getAllByText('Controlled by MBB AI Assistant').length).toBeGreaterThan(0)
+  })
+})
+
+describe('internal conversation notes', () => {
+  it('keeps Reply and Internal Note drafts separate and renders escaped internal content', async () => {
+    const noteText = '  Private — 你好\n<script>alert(1)</script>  '
+    let requestBody: unknown
+    let idempotencyHeader = ''
+    let replyIdempotencyHeader = ''
+    server.use(
+      ...handlers(),
+      http.post('/api/v1/operator/conversations/:conversationId/notes', async ({ request }) => {
+        requestBody = await request.json()
+        idempotencyHeader = request.headers.get('Idempotency-Key') ?? ''
+        return HttpResponse.json(internalNoteFixture(undefined, { text: noteText }), {
+          status: 201,
+        })
+      }),
+      http.post('/api/v1/operator/conversations/:conversationId/replies', ({ request }) => {
+        replyIdempotencyHeader = request.headers.get('Idempotency-Key') ?? ''
+        return HttpResponse.json(acceptedReply('Reply draft stays here'), { status: 202 })
+      }),
+    )
+    const user = userEvent.setup()
+    const { container } = renderApp(`/inbox/${conversationId}`)
+    const reply = await screen.findByRole('textbox', { name: 'Reply to Customer' })
+    await user.type(reply, 'Reply draft stays here')
+    await user.click(screen.getByRole('radio', { name: 'Internal Note' }))
+
+    const note = screen.getByRole('textbox', { name: 'Internal Note' })
+    expect(note).toHaveValue('')
+    expect(screen.getByText('Internal only — not sent to the customer or available to AI.'))
+      .toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add Internal Note' })).toBeInTheDocument()
+    await user.type(note, noteText)
+    await user.keyboard('{Control>}{Enter}{/Control}')
+
+    const card = await screen.findByRole('article', { name: 'Internal note by Omar Operator' })
+    expect(card).toBeInTheDocument()
+    expect(card.querySelector('.message-text')?.textContent).toBe(noteText)
+    expect(container.querySelector('script')).not.toBeInTheDocument()
+    expect(screen.queryByText('Accepted')).not.toBeInTheDocument()
+    expect(screen.queryByText('Sent')).not.toBeInTheDocument()
+    expect(note).toHaveValue('')
+    expect(requestBody).toEqual({ text: noteText })
+    expect(idempotencyHeader).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    )
+    expect(window.location.href).not.toContain(encodeURIComponent(noteText))
+    expect(window.localStorage.length).toBe(0)
+    expect(window.sessionStorage.length).toBe(0)
+
+    await user.click(screen.getByRole('radio', { name: 'Reply' }))
+    expect(screen.getByRole('textbox', { name: 'Reply to Customer' }))
+      .toHaveValue('Reply draft stays here')
+    await user.click(screen.getByRole('button', { name: 'Submit Reply' }))
+    expect(await screen.findByText('Accepted')).toBeInTheDocument()
+    expect(replyIdempotencyHeader).not.toBe(idempotencyHeader)
+    await expectAccessible(container)
+  })
+
+  it('preserves note text and retry UUID after a transient failure', async () => {
+    const keys: string[] = []
+    let calls = 0
+    server.use(
+      ...handlers(),
+      http.post('/api/v1/operator/conversations/:conversationId/notes', ({ request }) => {
+        calls += 1
+        keys.push(request.headers.get('Idempotency-Key') ?? '')
+        if (calls === 1) {
+          return HttpResponse.json(
+            { error: { code: 'SERVICE_UNAVAILABLE', request_id: 'note-ref' } },
+            { status: 503 },
+          )
+        }
+        return HttpResponse.json(
+          internalNoteFixture(undefined, { text: 'Preserve private note' }),
+          { status: 200 },
+        )
+      }),
+    )
+    const user = userEvent.setup()
+    renderApp(`/inbox/${conversationId}`)
+    await screen.findByRole('textbox', { name: 'Reply to Customer' })
+    await user.click(screen.getByRole('radio', { name: 'Internal Note' }))
+    const note = screen.getByRole('textbox', { name: 'Internal Note' })
+    await user.type(note, 'Preserve private note')
+    await user.click(screen.getByRole('button', { name: 'Add Internal Note' }))
+
+    expect(await screen.findByText('note-ref')).toBeInTheDocument()
+    expect(note).toHaveValue('Preserve private note')
+    await user.click(screen.getByRole('button', { name: 'Add Internal Note' }))
+    expect(await screen.findByRole('article', { name: 'Internal note by Omar Operator' }))
+      .toBeInTheDocument()
+    expect(keys[0]).toBe(keys[1])
+  })
+
+  it('uses a new retry UUID after an idempotency conflict without duplicating the timeline', async () => {
+    const keys: string[] = []
+    let calls = 0
+    server.use(
+      ...handlers(),
+      http.post('/api/v1/operator/conversations/:conversationId/notes', ({ request }) => {
+        calls += 1
+        keys.push(request.headers.get('Idempotency-Key') ?? '')
+        if (calls === 1) {
+          return HttpResponse.json(
+            { error: { code: 'IDEMPOTENCY_CONFLICT', request_id: 'note-conflict' } },
+            { status: 409 },
+          )
+        }
+        return HttpResponse.json(
+          internalNoteFixture(undefined, { text: 'Conflict-safe note' }),
+          { status: 201 },
+        )
+      }),
+    )
+    const user = userEvent.setup()
+    renderApp(`/inbox/${conversationId}`)
+    await screen.findByRole('textbox', { name: 'Reply to Customer' })
+    await user.click(screen.getByRole('radio', { name: 'Internal Note' }))
+    const note = screen.getByRole('textbox', { name: 'Internal Note' })
+    await user.type(note, 'Conflict-safe note')
+    await user.click(screen.getByRole('button', { name: 'Add Internal Note' }))
+
+    expect(await screen.findByText('note-conflict')).toBeInTheDocument()
+    expect(note).toHaveValue('Conflict-safe note')
+    await user.click(screen.getByRole('button', { name: 'Add Internal Note' }))
+    await screen.findByRole('article', { name: 'Internal note by Omar Operator' })
+    expect(keys[0]).not.toBe(keys[1])
+    expect(screen.getAllByRole('article', { name: 'Internal note by Omar Operator' }))
+      .toHaveLength(1)
   })
 })

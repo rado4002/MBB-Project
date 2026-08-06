@@ -9,15 +9,17 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-EXPECTED_HEAD = "d4e5f6a7b8c9"
+EXPECTED_HEAD = "e5f6a7b8c9d0"
 
 
 def test_operator_migrations_extend_the_linear_chain_without_data_inserts() -> None:
     config = Config("alembic.ini")
     script = ScriptDirectory.from_config(config)
     assert script.get_current_head() == EXPECTED_HEAD
-    ownership_revision = script.get_revision(EXPECTED_HEAD)
-    assert ownership_revision.down_revision == "c3d4e5f6a7b8"
+    note_revision = script.get_revision(EXPECTED_HEAD)
+    assert note_revision.down_revision == "d4e5f6a7b8c9"
+    reply_revision = script.get_revision("d4e5f6a7b8c9")
+    assert reply_revision.down_revision == "c3d4e5f6a7b8"
     ownership_revision = script.get_revision("c3d4e5f6a7b8")
     assert ownership_revision.down_revision == "b2e2c3d4e5f6"
     b2_revision = script.get_revision("b2e2c3d4e5f6")

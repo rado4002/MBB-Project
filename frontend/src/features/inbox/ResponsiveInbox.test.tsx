@@ -28,7 +28,7 @@ function workspaceHandlers() {
     http.get('/api/v1/operator/conversations/:conversationId', () =>
       HttpResponse.json(conversationDetailFixture()),
     ),
-    http.get('/api/v1/operator/conversations/:conversationId/messages', () =>
+    http.get('/api/v1/operator/conversations/:conversationId/timeline', () =>
       HttpResponse.json({ items: [messageFixture()], next_older_cursor: null }),
     ),
   ]
@@ -39,10 +39,10 @@ describe('responsive Inbox workflow refinement', () => {
     server.use(authenticated(), ...workspaceHandlers())
     renderApp(`/inbox/${conversationId}`)
 
-    expect(await screen.findByRole('region', { name: 'Message history' })).toBeInTheDocument()
+    expect(await screen.findByRole('region', { name: 'Conversation timeline' })).toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'Conversation queue' })).toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'Conversation' })).toBeInTheDocument()
-    expect(screen.getByRole('region', { name: 'Messages' })).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Timeline' })).toBeInTheDocument()
     const context = screen.getByRole('complementary', { name: 'Context' })
     expect(context).toBeInTheDocument()
     expect(context).toHaveAttribute('tabindex', '0')
@@ -157,7 +157,7 @@ describe('responsive Inbox workflow refinement', () => {
         await delay(100)
         return HttpResponse.json(conversationDetailFixture())
       }),
-      http.get('/api/v1/operator/conversations/:conversationId/messages', async () => {
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', async () => {
         await delay(100)
         return HttpResponse.json({ items: [messageFixture()], next_older_cursor: null })
       }),
@@ -179,7 +179,7 @@ describe('responsive Inbox workflow refinement', () => {
     server.use(authenticated(), ...workspaceHandlers())
     renderApp(`/inbox/${conversationId}`)
 
-    const history = await screen.findByRole('region', { name: 'Message history' })
+    const history = await screen.findByRole('region', { name: 'Conversation timeline' })
     await waitFor(() => expect(history.scrollTop).toBe(640))
     scrollHeight.mockRestore()
   })
@@ -193,7 +193,7 @@ describe('responsive Inbox workflow refinement', () => {
       http.get('/api/v1/operator/conversations/:conversationId', () =>
         HttpResponse.json(conversationDetailFixture()),
       ),
-      http.get('/api/v1/operator/conversations/:conversationId/messages', async () => {
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', async () => {
         await delay(60)
         return HttpResponse.json(
           { error: { code: 'SERVICE_UNAVAILABLE', request_id: 'history-focus-ref' } },
@@ -221,7 +221,7 @@ describe('responsive Inbox workflow refinement', () => {
           customer: { display_name: longName, phone_masked: '***5678' },
         }),
       ),
-      http.get('/api/v1/operator/conversations/:conversationId/messages', () =>
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', () =>
         HttpResponse.json({
           items: [messageFixture(undefined, { text: longMessage })],
           next_older_cursor: null,
@@ -242,7 +242,7 @@ describe('responsive Inbox workflow refinement', () => {
       http.get('/api/v1/operator/conversations/:conversationId', () =>
         HttpResponse.json(conversationDetailFixture()),
       ),
-      http.get('/api/v1/operator/conversations/:conversationId/messages', async () => {
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', async () => {
         await delay(250)
         return HttpResponse.json(
           { error: { code: 'AUTH_SESSION_EXPIRED', request_id: 'drawer-expired' } },
@@ -256,22 +256,24 @@ describe('responsive Inbox workflow refinement', () => {
     await user.click(screen.getByRole('button', { name: 'Details' }))
     expect(screen.getByRole('dialog', { name: 'Conversation details' })).toBeInTheDocument()
 
-    expect(await screen.findByRole('heading', { name: 'Sign in' })).toHaveFocus()
+    const loginHeading = await screen.findByRole('heading', { name: 'Sign in' })
+    await waitFor(() => expect(loginHeading).toHaveFocus())
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(screen.queryByText('Solar starter kit')).not.toBeInTheDocument()
     expect(document.body.style.overflow).toBe('')
   })
 
-  it('keeps the refined workflow free of unsupported write controls', async () => {
+  it('exposes only the supported Internal Note write control on an AI-owned conversation', async () => {
     server.use(authenticated(), ...workspaceHandlers())
     const { container } = renderApp(`/inbox/${conversationId}`)
-    await screen.findByRole('region', { name: 'Message history' })
+    await screen.findByRole('region', { name: 'Conversation timeline' })
 
     expect(screen.getByRole('button', { name: 'Escalate to Human' })).toBeInTheDocument()
     expect(screen.queryByRole('button', {
       name: /reply|send|assign|resolve|compose|return to ai/i,
     })).not.toBeInTheDocument()
-    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Internal Note' })).toBeInTheDocument()
+    expect(screen.getByText('Internal only — not sent to the customer or available to AI.')).toBeInTheDocument()
     expect(screen.queryByText(/channel|delivery status|unread|priority/i)).not.toBeInTheDocument()
     await expectAccessible(container)
   })

@@ -6,6 +6,7 @@ import { expectAccessible } from '../../test/accessibility'
 import {
   conversationDetailFixture,
   conversationFixture,
+  internalNoteFixture,
   messageFixture,
   sessionFixture,
 } from '../../test/fixtures'
@@ -26,7 +27,7 @@ function successfulWorkspace() {
     http.get('/api/v1/operator/conversations/:conversationId', ({ params }) =>
       HttpResponse.json(conversationDetailFixture(String(params.conversationId))),
     ),
-    http.get('/api/v1/operator/conversations/:conversationId/messages', () =>
+    http.get('/api/v1/operator/conversations/:conversationId/timeline', () =>
       HttpResponse.json({ items: [messageFixture()], next_older_cursor: null }),
     ),
   ]
@@ -56,7 +57,7 @@ describe('read-only conversation workspace', () => {
     )
     expect(window.location.search).toBe('?status=active&language=french')
     expect(link).toHaveAttribute('aria-current', 'page')
-    expect(await screen.findByRole('heading', { name: 'Messages' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Timeline' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Conversation' })).toHaveFocus()
   })
 
@@ -81,7 +82,7 @@ describe('read-only conversation workspace', () => {
     window.history.back()
     fireEvent(window, new PopStateEvent('popstate'))
     await waitFor(() => expect(window.location.pathname).toBe(`/inbox/${firstId}`))
-    expect(await screen.findByRole('heading', { name: 'Messages' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Timeline' })).toBeInTheDocument()
 
     window.history.forward()
     fireEvent(window, new PopStateEvent('popstate'))
@@ -112,7 +113,7 @@ describe('read-only conversation workspace', () => {
         await delay(80)
         return HttpResponse.json(detail)
       }),
-      http.get('/api/v1/operator/conversations/:conversationId/messages', () =>
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', () =>
         HttpResponse.json({ items: [], next_older_cursor: null }),
       ),
     )
@@ -139,7 +140,7 @@ describe('read-only conversation workspace', () => {
       http.get('/api/v1/operator/conversations/:conversationId', () =>
         HttpResponse.json(conversationDetailFixture()),
       ),
-      http.get('/api/v1/operator/conversations/:conversationId/messages', async () => {
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', async () => {
         await delay(80)
         return HttpResponse.json({ items: [messageFixture()], next_older_cursor: null })
       }),
@@ -188,13 +189,13 @@ describe('read-only conversation workspace', () => {
       http.get('/api/v1/operator/conversations/:conversationId', () =>
         HttpResponse.json(conversationDetailFixture()),
       ),
-      http.get('/api/v1/operator/conversations/:conversationId/messages', () =>
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', () =>
         HttpResponse.json({ items: messages, next_older_cursor: null }),
       ),
     )
     const { container } = renderApp(`/inbox/${firstId}`)
 
-    const history = await screen.findByRole('region', { name: 'Message history' })
+    const history = await screen.findByRole('region', { name: 'Conversation timeline' })
     const rendered = within(history).getAllByRole('article')
     expect(rendered.map((item) => item.textContent)).toEqual([
       expect.stringContaining('<script>alert(document.cookie)</script>'),
@@ -216,17 +217,17 @@ describe('read-only conversation workspace', () => {
       http.get('/api/v1/operator/conversations/:conversationId', () =>
         HttpResponse.json(conversationDetailFixture()),
       ),
-      http.get('/api/v1/operator/conversations/:conversationId/messages', () =>
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', () =>
         HttpResponse.json({ items: [], next_older_cursor: null }),
       ),
     )
     renderApp(`/inbox/${firstId}`)
 
-    expect(await screen.findByText('No messages are available.')).toBeInTheDocument()
+    expect(await screen.findByText('No timeline items are available.')).toBeInTheDocument()
     expect(screen.getByText('Solar starter kit')).toBeInTheDocument()
   })
 
-  it('loads earlier messages, deduplicates them, and preserves the visible scroll position', async () => {
+  it('loads earlier timeline items, deduplicates by kind and ID, and preserves scroll', async () => {
     const older = messageFixture('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', {
       occurred_at: '2026-08-02T09:00:00Z',
       text: 'Earlier message',
@@ -235,6 +236,10 @@ describe('read-only conversation workspace', () => {
       occurred_at: '2026-08-02T10:00:00Z',
       text: 'Recent one',
     })
+    const noteWithSameId = internalNoteFixture(
+      'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      { occurred_at: '2026-08-02T09:30:00Z', text: 'Distinct note kind' },
+    )
     const recent = messageFixture('cccccccc-cccc-4ccc-8ccc-cccccccccccc', {
       occurred_at: '2026-08-02T11:00:00Z',
       text: 'Recent two',
@@ -244,16 +249,16 @@ describe('read-only conversation workspace', () => {
       http.get('/api/v1/operator/conversations/:conversationId', () =>
         HttpResponse.json(conversationDetailFixture()),
       ),
-      http.get('/api/v1/operator/conversations/:conversationId/messages', ({ request }) => {
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', ({ request }) => {
         const before = new URL(request.url).searchParams.get('before')
         return before === 'opaque-older'
-          ? HttpResponse.json({ items: [older, duplicate], next_older_cursor: null })
+          ? HttpResponse.json({ items: [older, noteWithSameId, duplicate], next_older_cursor: null })
           : HttpResponse.json({ items: [duplicate, recent], next_older_cursor: 'opaque-older' })
       }),
     )
     const user = userEvent.setup()
     renderApp(`/inbox/${firstId}?status=active`)
-    const history = await screen.findByRole('region', { name: 'Message history' })
+    const history = await screen.findByRole('region', { name: 'Conversation timeline' })
     Object.defineProperty(history, 'scrollHeight', {
       configurable: true,
       get: () => within(history).getAllByRole('article').length * 100,
@@ -261,13 +266,14 @@ describe('read-only conversation workspace', () => {
     history.scrollTop = 40
 
     await user.click(within(history).getByRole('button', { name: 'Load Earlier' }))
-    await waitFor(() => expect(within(history).getAllByRole('article')).toHaveLength(3))
+    await waitFor(() => expect(within(history).getAllByRole('article')).toHaveLength(4))
     expect(within(history).getAllByRole('article').map((item) => item.textContent)).toEqual([
       expect.stringContaining('Earlier message'),
+      expect.stringContaining('Distinct note kind'),
       expect.stringContaining('Recent one'),
       expect.stringContaining('Recent two'),
     ])
-    expect(history.scrollTop).toBe(140)
+    expect(history.scrollTop).toBe(240)
     expect(window.location.search).toBe('?status=active')
   })
 
@@ -280,7 +286,7 @@ describe('read-only conversation workspace', () => {
           { status: 503 },
         ),
       ),
-      http.get('/api/v1/operator/conversations/:conversationId/messages', () =>
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', () =>
         HttpResponse.json({ items: [messageFixture()], next_older_cursor: null }),
       ),
     )
@@ -294,7 +300,7 @@ describe('read-only conversation workspace', () => {
       http.get('/api/v1/operator/conversations/:conversationId', () =>
         HttpResponse.json(conversationDetailFixture()),
       ),
-      http.get('/api/v1/operator/conversations/:conversationId/messages', () =>
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', () =>
         HttpResponse.json(
           { error: { code: 'SERVICE_UNAVAILABLE', request_id: 'history-ref' } },
           { status: 503 },
@@ -312,7 +318,7 @@ describe('read-only conversation workspace', () => {
       http.get('/api/v1/operator/conversations/:conversationId', () =>
         HttpResponse.json(conversationDetailFixture()),
       ),
-      http.get('/api/v1/operator/conversations/:conversationId/messages', ({ request }) =>
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', ({ request }) =>
         new URL(request.url).searchParams.has('before')
           ? HttpResponse.json(
               { error: { code: 'SERVICE_UNAVAILABLE', request_id: 'older-ref' } },
@@ -323,7 +329,7 @@ describe('read-only conversation workspace', () => {
     )
     const user = userEvent.setup()
     renderApp(`/inbox/${firstId}`)
-    const history = await screen.findByRole('region', { name: 'Message history' })
+    const history = await screen.findByRole('region', { name: 'Conversation timeline' })
     await user.click(within(history).getByRole('button', { name: 'Load Earlier' }))
 
     expect(await within(history).findByText('Earlier messages could not be loaded.', { exact: false })).toBeInTheDocument()
@@ -352,7 +358,7 @@ describe('read-only conversation workspace', () => {
           },
         })
       }),
-      http.get('/api/v1/operator/conversations/:conversationId/messages', async ({ params }) => {
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', async ({ params }) => {
         const id = String(params.conversationId)
         if (id === firstId) await delay(120)
         return HttpResponse.json({
@@ -382,7 +388,7 @@ describe('read-only conversation workspace', () => {
           { status: 404 },
         ),
       ),
-      http.get('/api/v1/operator/conversations/:conversationId/messages', () =>
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', () =>
         HttpResponse.json(
           { error: { code: 'CONVERSATION_NOT_FOUND', request_id: 'history-not-found-ref' } },
           { status: 404 },
@@ -404,7 +410,7 @@ describe('read-only conversation workspace', () => {
           { status: 403 },
         ),
       ),
-      http.get('/api/v1/operator/conversations/:conversationId/messages', () =>
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', () =>
         HttpResponse.json(
           { error: { code: 'CAPABILITY_REQUIRED', request_id: 'history-permission-ref' } },
           { status: 403 },
@@ -427,7 +433,7 @@ describe('read-only conversation workspace', () => {
           { status: 401 },
         ),
       ),
-      http.get('/api/v1/operator/conversations/:conversationId/messages', async () => {
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', async () => {
         await delay(80)
         return HttpResponse.json({ items: [messageFixture()], next_older_cursor: null })
       }),
@@ -448,12 +454,12 @@ describe('read-only conversation workspace', () => {
       ...successfulWorkspace(),
     )
     const { container } = renderApp(`/inbox/${firstId}`)
-    await screen.findByRole('region', { name: 'Message history' })
+    await screen.findByRole('region', { name: 'Conversation timeline' })
 
     expect(screen.getByRole('button', { name: 'Escalate to Human' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /reply|send|assign|resolve|compose|return to ai/i })).not.toBeInTheDocument()
     expect(screen.queryByText(/channel|delivery status|unread|priority/i)).not.toBeInTheDocument()
-    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Internal Note' })).toBeInTheDocument()
     await expectAccessible(container)
   })
 })

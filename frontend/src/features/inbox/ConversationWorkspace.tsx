@@ -16,7 +16,9 @@ import type {
   ConversationOwnership,
   MessageSenderType,
   OperatorConversationDetail,
+  OperatorInternalNoteItem,
   OperatorMessageItem,
+  OperatorTimelineItem,
 } from '../../api/contracts/conversations'
 import { ApiError, errorMessage } from '../../api/errors'
 import { useAuth } from '../../auth/AuthProvider'
@@ -71,6 +73,12 @@ function messageActorLabel(message: OperatorMessageItem) {
 function deliveryLabel(state: OperatorMessageItem['delivery_state']) {
   if (!state) return null
   return state.charAt(0).toUpperCase() + state.slice(1)
+}
+
+function timelineItemKey(item: OperatorTimelineItem) {
+  return item.kind === 'message'
+    ? `message:${item.message_id}`
+    : `internal_note:${item.note_id}`
 }
 
 function ownershipLabel(ownership: ConversationOwnership) {
@@ -410,6 +418,9 @@ function MessageTimeline({
       detail.ownership.human_owner?.account_id === auth.session?.human.account_id &&
       auth.session?.capabilities.includes('message.reply'),
   )
+  const canCreateNote = Boolean(
+    detail && auth.session?.capabilities.includes('internal_note.create'),
+  )
 
   useLayoutEffect(() => {
     const timeline = timelineRef.current
@@ -428,7 +439,9 @@ function MessageTimeline({
 
   useLayoutEffect(() => {
     const timeline = timelineRef.current
-    const lastMessageId = history.items.at(-1)?.message_id ?? null
+    const lastMessageId = history.items.at(-1)
+      ? timelineItemKey(history.items.at(-1) as OperatorTimelineItem)
+      : null
     if (
       timeline &&
       initialPositioned.current &&
@@ -466,7 +479,7 @@ function MessageTimeline({
       aria-labelledby="messages-heading"
       aria-busy={history.loading || history.loadingOlder}
     >
-      <h3 id="messages-heading">Messages</h3>
+      <h3 id="messages-heading">Timeline</h3>
       {history.loading ? (
         <HistoryLoadingState />
       ) : history.error ? (
@@ -477,10 +490,10 @@ function MessageTimeline({
           </button>
         </InlineAlert>
       ) : history.items.length === 0 ? (
-        <p className="workspace-state">No messages are available.</p>
+        <p className="workspace-state">No timeline items are available.</p>
       ) : (
-        <div className="message-history" ref={timelineRef} role="region" aria-label="Message history" tabIndex={0}>
-          <p className="visually-hidden" role="status">{history.items.length} messages loaded.</p>
+        <div className="message-history" ref={timelineRef} role="region" aria-label="Conversation timeline" tabIndex={0}>
+          <p className="visually-hidden" role="status">{history.items.length} timeline items loaded.</p>
           {history.nextOlderCursor ? (
             <div className="load-earlier" aria-live="polite">
               <button className="button button--secondary" type="button" disabled={history.loadingOlder} onClick={loadEarlier}>
@@ -497,11 +510,26 @@ function MessageTimeline({
             </InlineAlert>
           ) : null}
           <ol className="message-list">
-            {history.items.map((message) => {
+            {history.items.map((item) => {
+              if (item.kind === 'internal_note') {
+                return (
+                  <li key={timelineItemKey(item)} className="internal-note">
+                    <article aria-label={`Internal note by ${item.author.display_name}`}>
+                      <header>
+                        <strong>Internal Note</strong>
+                        <time dateTime={item.occurred_at}>{formatTimestamp(item.occurred_at)}</time>
+                      </header>
+                      <p className="internal-note__author">{item.author.display_name} — Operator</p>
+                      <p className="message-text">{item.text}</p>
+                    </article>
+                  </li>
+                )
+              }
+              const message = item
               const actor = messageActorLabel(message)
               const delivery = deliveryLabel(message.delivery_state)
               return (
-                <li key={message.message_id} className={`message message--${message.direction}`}>
+                <li key={timelineItemKey(message)} className={`message message--${message.direction}`}>
                   <article aria-label={`${actor} message`}>
                     <header>
                       <strong>{actor}</strong>
@@ -520,45 +548,64 @@ function MessageTimeline({
           </ol>
         </div>
       )}
-      {canReply && detail ? (
-        <ReplyComposer
+      {(canReply || canCreateNote) && detail ? (
+        <ConversationComposer
           client={client}
           conversationId={conversationId}
           expectedOwnershipVersion={detail.ownership.version}
-          onAccepted={(message) => {
+          canReply={canReply}
+          canCreateNote={canCreateNote}
+          onReplyAccepted={(message) => {
             history.appendAccepted(message)
             return onReplyAccepted()
           }}
+          onNoteAccepted={(note) => history.appendInternalNote(note)}
         />
       ) : null}
     </section>
   )
 }
 
-function ReplyComposer({
+function ConversationComposer({
   client,
   conversationId,
   expectedOwnershipVersion,
-  onAccepted,
+  canReply,
+  canCreateNote,
+  onReplyAccepted,
+  onNoteAccepted,
 }: {
   client: ConversationApiClient
   conversationId: string
   expectedOwnershipVersion: number
-  onAccepted: (message: OperatorMessageItem) => Promise<void>
+  canReply: boolean
+  canCreateNote: boolean
+  onReplyAccepted: (message: OperatorMessageItem) => Promise<void>
+  onNoteAccepted: (note: OperatorInternalNoteItem) => void
 }) {
   const auth = useAuth()
-  const [text, setText] = useState('')
+  const [mode, setMode] = useState<'reply' | 'internal_note'>(
+    canReply ? 'reply' : 'internal_note',
+  )
+  const [replyText, setReplyText] = useState('')
+  const [noteText, setNoteText] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [validationError, setValidationError] = useState<string | null>(null)
   const [requestError, setRequestError] = useState<ApiError | null>(null)
   const [acceptedAnnouncement, setAcceptedAnnouncement] = useState('')
   const submittingRef = useRef(false)
   const focusAfterAcceptanceRef = useRef(false)
-  const attemptRef = useRef<{ text: string; key: string } | null>(null)
+  const replyAttemptRef = useRef<{ text: string; key: string } | null>(null)
+  const noteAttemptRef = useRef<{ text: string; key: string } | null>(null)
   const errorRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const helpId = useId()
   const errorId = useId()
+  const activeMode = mode === 'reply' && !canReply && canCreateNote
+    ? 'internal_note'
+    : mode
+  const text = activeMode === 'reply' ? replyText : noteText
+  const setText = activeMode === 'reply' ? setReplyText : setNoteText
 
   useEffect(() => {
     if (requestError) errorRef.current?.focus()
@@ -575,16 +622,23 @@ function ReplyComposer({
     event?.preventDefault()
     if (submittingRef.current) return
     if (!text.trim()) {
-      setValidationError('Enter a reply before submitting.')
+      setValidationError(
+        activeMode === 'reply'
+          ? 'Enter a reply before submitting.'
+          : 'Enter an internal note before submitting.',
+      )
       textareaRef.current?.focus()
       return
     }
     if (Array.from(text).length > 4096) {
-      setValidationError('Reply text must be 4,096 characters or fewer.')
+      setValidationError(
+        `${activeMode === 'reply' ? 'Reply' : 'Internal note'} text must be 4,096 characters or fewer.`,
+      )
       textareaRef.current?.focus()
       return
     }
 
+    const attemptRef = activeMode === 'reply' ? replyAttemptRef : noteAttemptRef
     const attempt =
       attemptRef.current?.text === text
         ? attemptRef.current
@@ -597,24 +651,41 @@ function ReplyComposer({
     setAcceptedAnnouncement('')
     try {
       const csrfToken = await auth.getCsrfForMutation()
-      const message = await client.createReply(
-        conversationId,
-        { text, expected_ownership_version: expectedOwnershipVersion },
-        attempt.key,
-        csrfToken,
-      )
-      historyAssertAccepted(message)
-      setText('')
-      attemptRef.current = null
-      setAcceptedAnnouncement('Reply accepted and added to the timeline.')
+      if (activeMode === 'reply') {
+        const message = await client.createReply(
+          conversationId,
+          { text, expected_ownership_version: expectedOwnershipVersion },
+          attempt.key,
+          csrfToken,
+        )
+        historyAssertAccepted(message)
+        setReplyText('')
+        replyAttemptRef.current = null
+        setAcceptedAnnouncement('Reply accepted and added to the timeline.')
+        void onReplyAccepted(message).catch(() => undefined)
+      } else {
+        const note = await client.createInternalNote(
+          conversationId,
+          { text },
+          attempt.key,
+          csrfToken,
+        )
+        setNoteText('')
+        noteAttemptRef.current = null
+        setAcceptedAnnouncement('Internal note added to the timeline.')
+        onNoteAccepted(note)
+      }
       focusAfterAcceptanceRef.current = true
-      void onAccepted(message).catch(() => undefined)
     } catch (unknownError) {
-      setRequestError(unknownError instanceof ApiError ? unknownError : null)
+      const apiError = unknownError instanceof ApiError ? unknownError : null
+      setRequestError(apiError)
+      if (activeMode === 'internal_note' && apiError?.code === 'IDEMPOTENCY_CONFLICT') {
+        noteAttemptRef.current = null
+      }
       if (!(unknownError instanceof ApiError)) {
         setRequestError(new ApiError({
           status: 0,
-          code: 'reply_unavailable',
+          code: activeMode === 'reply' ? 'reply_unavailable' : 'internal_note_unavailable',
           category: 'unavailable',
         }))
       }
@@ -632,15 +703,59 @@ function ReplyComposer({
   }
 
   return (
-    <form className="reply-composer" onSubmit={(event) => void submit(event)}>
-      <label htmlFor={`${helpId}-reply`}>Reply to Customer</label>
+    <form
+      className={`reply-composer${activeMode === 'internal_note' ? ' reply-composer--internal-note' : ''}`}
+      onSubmit={(event) => void submit(event)}
+    >
+      <fieldset className="composer-modes">
+        <legend>Composer mode</legend>
+        <label>
+          <input
+            type="radio"
+            name={`${helpId}-mode`}
+            value="reply"
+            checked={activeMode === 'reply'}
+            disabled={!canReply || submitting}
+            onChange={() => {
+              setMode('reply')
+              setValidationError(null)
+              setRequestError(null)
+            }}
+          />
+          Reply
+        </label>
+        <label>
+          <input
+            type="radio"
+            name={`${helpId}-mode`}
+            value="internal_note"
+            checked={activeMode === 'internal_note'}
+            disabled={!canCreateNote || submitting}
+            onChange={() => {
+              setMode('internal_note')
+              setValidationError(null)
+              setRequestError(null)
+            }}
+          />
+          Internal Note
+        </label>
+      </fieldset>
+      {activeMode === 'internal_note' ? (
+        <div className="internal-note-warning" role="note">
+          <strong>Internal Note</strong>
+          <span>Internal only — not sent to the customer or available to AI.</span>
+        </div>
+      ) : null}
+      <label htmlFor={`${helpId}-composer`}>
+        {activeMode === 'reply' ? 'Reply to Customer' : 'Internal Note'}
+      </label>
       {requestError ? (
         <InlineAlert ref={errorRef} requestId={requestError.requestId}>
-          {errorMessage(requestError)} Your reply has been preserved.
+          {errorMessage(requestError)} Your {activeMode === 'reply' ? 'reply' : 'internal note'} has been preserved.
         </InlineAlert>
       ) : null}
       <textarea
-        id={`${helpId}-reply`}
+        id={`${helpId}-composer`}
         ref={textareaRef}
         value={text}
         maxLength={4096}
@@ -658,7 +773,9 @@ function ReplyComposer({
       <div className="reply-composer__footer">
         <span id={helpId}>{Array.from(text).length}/4,096 · Ctrl+Enter to submit</span>
         <button className="button button--primary" type="submit" disabled={submitting}>
-          {submitting ? 'Submitting…' : 'Submit Reply'}
+          {activeMode === 'reply'
+            ? submitting ? 'Submitting…' : 'Submit Reply'
+            : submitting ? 'Adding…' : 'Add Internal Note'}
         </button>
       </div>
       {validationError ? <p className="field-error" id={errorId}>{validationError}</p> : null}
