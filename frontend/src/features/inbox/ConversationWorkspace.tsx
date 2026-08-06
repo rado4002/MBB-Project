@@ -824,25 +824,16 @@ function ConversationComposer({
             </label>
           </div>
         </fieldset>
-        <div className="composer-notices">
-          {replyUnavailableReason ? (
-            <p
-              className="reply-unavailable-reason"
-              id={replyReasonId}
-              role="note"
-              tabIndex={0}
-            >
-              {replyUnavailableReason}
-            </p>
-          ) : null}
-          {activeMode === 'internal_note' ? (
-            <p className="internal-note-warning" role="note">
-              <span>Internal only — not sent to the customer or available to AI.</span>
-            </p>
-          ) : (
-            <p className="composer-guidance">Sent to the customer through the conversation channel.</p>
-          )}
-        </div>
+        {replyUnavailableReason ? (
+          <p
+            className="reply-unavailable-reason"
+            id={replyReasonId}
+            role="note"
+            tabIndex={0}
+          >
+            {replyUnavailableReason}
+          </p>
+        ) : null}
       </div>
       <label className="visually-hidden" htmlFor={`${helpId}-composer`}>
         {activeMode === 'reply' ? 'Reply to Customer' : 'Internal Note'}
@@ -857,7 +848,7 @@ function ConversationComposer({
         ref={textareaRef}
         value={text}
         maxLength={4096}
-        rows={3}
+        rows={2}
         disabled={submitting}
         aria-invalid={validationError ? 'true' : undefined}
         aria-describedby={`${helpId} ${validationError ? errorId : ''}`.trim()}
@@ -869,7 +860,18 @@ function ConversationComposer({
         onKeyDown={onKeyDown}
       />
       <div className="reply-composer__footer">
-        <span id={helpId}>{Array.from(text).length}/4,096 · Ctrl+Enter to submit</span>
+        <div className="reply-composer__meta" id={helpId}>
+          {activeMode === 'internal_note' ? (
+            <span className="internal-note-warning" role="note">
+              Internal only — not sent to the customer or available to AI.
+            </span>
+          ) : (
+            <span className="composer-guidance">
+              Sent to the customer through the conversation channel.
+            </span>
+          )}
+          <span>{Array.from(text).length}/4,096 · Ctrl+Enter to submit</span>
+        </div>
         <button className="button button--primary" type="submit" disabled={submitting}>
           {activeMode === 'reply'
             ? submitting ? 'Submitting…' : 'Submit Reply'

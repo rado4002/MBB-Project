@@ -249,13 +249,13 @@ h2 { font-size: 1.125rem; }
 .message-delivery--accepted { color: var(--color-warning); }
 .message-delivery--sent { color: var(--color-primary-hover); }
 .message-delivery--failed, .message-delivery--uncertain { color: var(--color-error); }
-.reply-composer { min-width: 0; min-inline-size: 0; max-width: 100%; max-inline-size: 100%; display: grid; gap: var(--space-1); margin: 0; padding: var(--space-2) var(--space-3); background: var(--color-surface); border: 0; border-top: 1px solid var(--color-border); border-radius: 0; }
+.reply-composer { min-width: 0; min-inline-size: 0; max-width: 100%; max-inline-size: 100%; display: grid; gap: var(--space-1); margin: 0; padding: var(--space-1) var(--space-3); background: var(--color-surface); border: 0; border-top: 1px solid var(--color-border); border-radius: 0; }
 .reply-composer--internal-note { background: color-mix(in srgb, var(--color-warning) 5%, var(--color-surface)); }
-.reply-composer > textarea { box-sizing: border-box; field-sizing: content; width: 100%; min-width: 0; min-inline-size: 0; max-width: 100%; max-inline-size: 100%; min-height: 4.5rem; max-height: 10rem; padding: var(--space-2); overflow-y: auto; color: var(--color-text); background: var(--color-surface); border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); resize: vertical; }
+.reply-composer > textarea { box-sizing: border-box; field-sizing: content; width: 100%; min-width: 0; min-inline-size: 0; max-width: 100%; max-inline-size: 100%; min-height: 3.5rem; max-height: 8.5rem; padding: var(--space-2); overflow-y: auto; color: var(--color-text); background: var(--color-surface); border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); resize: vertical; }
 .reply-composer > textarea[aria-invalid="true"] { border-color: var(--color-error); }
 .reply-composer > .alert { margin: 0; }
-.reply-composer__footer { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
-.reply-composer__footer span { color: var(--color-text-muted); font-size: 0.8rem; }
+.reply-composer__footer { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.reply-composer__meta { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); color: var(--color-text-muted); font-size: 0.8rem; }
 .reply-composer > .field-error { margin: 0; }
 .composer-controls { min-width: 0; max-width: 100%; display: grid; gap: var(--space-2); }
 .composer-modes { min-width: 0; min-inline-size: 0; max-width: 100%; margin: 0; padding: 0; border: 0; }
@@ -265,9 +265,8 @@ h2 { font-size: 1.125rem; }
 .composer-modes label:has(input:checked) { color: var(--color-primary-text); background: var(--color-primary); }
 .composer-modes label:has(input:disabled) { color: var(--color-text-muted); cursor: not-allowed; opacity: 0.7; }
 .composer-modes label:has(input:focus-visible) { outline: 3px solid var(--color-focus); outline-offset: -3px; }
-.composer-notices { min-width: 0; display: grid; gap: var(--space-1); }
 .reply-unavailable-reason { margin: 0; color: var(--color-warning); font-size: 0.875rem; font-weight: 700; overflow-wrap: anywhere; }
-.composer-guidance, .internal-note-warning { min-width: 0; margin: 0; color: var(--color-text-muted); font-size: 0.875rem; overflow-wrap: anywhere; }
+.composer-guidance, .internal-note-warning { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .internal-note-warning { color: var(--color-warning); font-weight: 650; }
 
 .context-drawer { position: fixed; z-index: 100; inset: 0; display: flex; justify-content: flex-end; background: var(--color-overlay); }
@@ -325,7 +324,7 @@ h2 { font-size: 1.125rem; }
   .conversation-row__heading { display: grid; }
   .conversation-row time { white-space: normal; }
   .workspace-header { padding: var(--space-3); }
-  .reply-composer { padding: var(--space-2) var(--space-3); padding-block-end: max(var(--space-2), env(safe-area-inset-bottom)); }
+  .reply-composer { padding: var(--space-1) var(--space-3); padding-block-end: max(var(--space-2), env(safe-area-inset-bottom)); }
   .reply-composer__footer { align-items: stretch; flex-direction: column; }
   .reply-composer__footer .button { width: 100%; }
   .workspace-header .button { min-width: 0; padding-inline: var(--space-3); }
@@ -338,7 +337,7 @@ h2 { font-size: 1.125rem; }
 
 @media (min-width: 64rem) {
   .composer-controls { grid-template-columns: auto minmax(0, 1fr); align-items: center; }
-  .composer-notices { justify-items: end; text-align: right; }
+  .reply-unavailable-reason { justify-self: end; text-align: right; }
 }
 
 @media (min-width: 48rem) {

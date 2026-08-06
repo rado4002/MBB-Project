@@ -55,10 +55,13 @@ describe('responsive Inbox style contract', () => {
       /\.reply-composer \{[^}]*margin: 0;[^}]*border-top: 1px solid var\(--color-border\);[^}]*border-radius: 0/,
     )
     expect(globalCss).toMatch(
-      /\.reply-composer \{[^}]*gap: var\(--space-1\);[^}]*padding: var\(--space-2\) var\(--space-3\)/,
+      /\.reply-composer \{[^}]*gap: var\(--space-1\);[^}]*padding: var\(--space-1\) var\(--space-3\)/,
     )
     expect(globalCss).toMatch(
-      /\.reply-composer > textarea \{[^}]*field-sizing: content;[^}]*min-height: 4\.5rem;[^}]*max-height: 10rem;[^}]*overflow-y: auto;[^}]*resize: vertical/,
+      /\.reply-composer > textarea \{[^}]*field-sizing: content;[^}]*min-height: 3\.5rem;[^}]*max-height: 8\.5rem;[^}]*overflow-y: auto;[^}]*resize: vertical/,
+    )
+    expect(globalCss).toMatch(
+      /\.reply-composer__meta \{[^}]*display: flex;[^}]*flex-wrap: wrap/,
     )
     expect(globalCss).toMatch(
       /@media \(min-width: 64rem\)[\s\S]*?\.composer-controls \{ grid-template-columns: auto minmax\(0, 1fr\); align-items: center/,

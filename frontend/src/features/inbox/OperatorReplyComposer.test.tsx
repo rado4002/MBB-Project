@@ -95,10 +95,12 @@ describe('manual Human Operator replies', () => {
     expect(screen.queryByText(/^Reply unavailable/)).not.toBeInTheDocument()
     expect(screen.queryByText('Composer mode')).not.toBeInTheDocument()
     expect(screen.getByText('Reply to Customer')).toHaveClass('visually-hidden')
-    expect(screen.getByText('Sent to the customer through the conversation channel.'))
-      .toBeInTheDocument()
+    const guidance = screen.getByText('Sent to the customer through the conversation channel.')
+    expect(guidance).toBeInTheDocument()
+    const compactMeta = guidance.closest('.reply-composer__meta')
+    expect(compactMeta).toContainElement(screen.getByText('0/4,096 · Ctrl+Enter to submit'))
     expect(textbox).toHaveAttribute('maxlength', '4096')
-    expect(textbox).toHaveAttribute('rows', '3')
+    expect(textbox).toHaveAttribute('rows', '2')
 
     await user.type(textbox, 'Bonjour Marie')
     await user.click(screen.getByRole('button', { name: 'Submit Reply' }))
@@ -107,6 +109,7 @@ describe('manual Human Operator replies', () => {
     expect(screen.getByText('Accepted')).toBeInTheDocument()
     expect(screen.queryByText('Sent')).not.toBeInTheDocument()
     expect(textbox).toHaveValue('')
+    expect(textbox).toHaveAttribute('rows', '2')
     await waitFor(() => expect(textbox).toHaveFocus())
     expect(requestBody).toEqual({
       text: 'Bonjour Marie',
@@ -159,6 +162,27 @@ describe('manual Human Operator replies', () => {
     expect(textbox).toHaveValue(longMultilineDraft)
     expect(screen.getByText(`${longMultilineDraft.length}/4,096 · Ctrl+Enter to submit`))
       .toBeInTheDocument()
+  })
+
+  it('restores each mode draft for content-driven textarea sizing', async () => {
+    server.use(...handlers())
+    const user = userEvent.setup()
+    renderApp(`/inbox/${conversationId}`)
+    const reply = await screen.findByRole('textbox', { name: 'Reply to Customer' })
+    const replyDraft = Array.from({ length: 9 }, (_, index) => `Reply line ${index + 1}`).join('\n')
+
+    fireEvent.change(reply, { target: { value: replyDraft } })
+    await user.click(screen.getByRole('radio', { name: 'Internal Note' }))
+    const note = screen.getByRole('textbox', { name: 'Internal Note' })
+    fireEvent.change(note, { target: { value: 'Private line 1\nPrivate line 2' } })
+
+    await user.click(screen.getByRole('radio', { name: 'Reply' }))
+    expect(screen.getByRole('textbox', { name: 'Reply to Customer' })).toHaveValue(replyDraft)
+    expect(screen.getByRole('textbox', { name: 'Reply to Customer' })).toHaveAttribute('rows', '2')
+
+    await user.click(screen.getByRole('radio', { name: 'Internal Note' }))
+    expect(screen.getByRole('textbox', { name: 'Internal Note' }))
+      .toHaveValue('Private line 1\nPrivate line 2')
   })
 
   it('prevents double submission while the first request is pending', async () => {
