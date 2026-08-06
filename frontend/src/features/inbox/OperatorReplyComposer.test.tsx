@@ -98,6 +98,7 @@ describe('manual Human Operator replies', () => {
     expect(screen.getByText('Sent to the customer through the conversation channel.'))
       .toBeInTheDocument()
     expect(textbox).toHaveAttribute('maxlength', '4096')
+    expect(textbox).toHaveAttribute('rows', '3')
 
     await user.type(textbox, 'Bonjour Marie')
     await user.click(screen.getByRole('button', { name: 'Submit Reply' }))
@@ -142,6 +143,22 @@ describe('manual Human Operator replies', () => {
     await user.keyboard('{Control>}{Enter}{/Control}')
     expect(await screen.findByText('Keyboard reply')).toBeInTheDocument()
     expect(calls).toBe(1)
+  })
+
+  it('keeps long multiline input editable inside the bounded textarea', async () => {
+    server.use(...handlers())
+    renderApp(`/inbox/${conversationId}`)
+    const textbox = await screen.findByRole('textbox', { name: 'Reply to Customer' })
+    const longMultilineDraft = Array.from(
+      { length: 12 },
+      (_, index) => `Draft line ${index + 1}`,
+    ).join('\n')
+
+    fireEvent.change(textbox, { target: { value: longMultilineDraft } })
+
+    expect(textbox).toHaveValue(longMultilineDraft)
+    expect(screen.getByText(`${longMultilineDraft.length}/4,096 · Ctrl+Enter to submit`))
+      .toBeInTheDocument()
   })
 
   it('prevents double submission while the first request is pending', async () => {

@@ -55,7 +55,13 @@ describe('responsive Inbox style contract', () => {
       /\.reply-composer \{[^}]*margin: 0;[^}]*border-top: 1px solid var\(--color-border\);[^}]*border-radius: 0/,
     )
     expect(globalCss).toMatch(
-      /\.reply-composer > textarea \{[^}]*min-height: 4\.5rem;[^}]*max-height: 11rem;[^}]*resize: vertical/,
+      /\.reply-composer \{[^}]*gap: var\(--space-1\);[^}]*padding: var\(--space-2\) var\(--space-3\)/,
+    )
+    expect(globalCss).toMatch(
+      /\.reply-composer > textarea \{[^}]*field-sizing: content;[^}]*min-height: 4\.5rem;[^}]*max-height: 10rem;[^}]*overflow-y: auto;[^}]*resize: vertical/,
+    )
+    expect(globalCss).toMatch(
+      /@media \(min-width: 64rem\)[\s\S]*?\.composer-controls \{ grid-template-columns: auto minmax\(0, 1fr\); align-items: center/,
     )
     expect(globalCss).not.toContain('height: clamp(32rem, calc(100dvh - 20rem), 48rem)')
     expect(globalCss).not.toContain('min-height: calc(100dvh - 9rem)')
