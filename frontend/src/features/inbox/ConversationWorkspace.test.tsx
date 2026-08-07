@@ -202,6 +202,9 @@ describe('read-only conversation workspace', () => {
 
     const history = await screen.findByRole('region', { name: 'Conversation timeline' })
     const rendered = within(history).getAllByRole('article')
+    expect(rendered.every((item) => (
+      item.querySelector('header strong') && item.querySelector('header time[datetime]')
+    ))).toBe(true)
     expect(rendered.map((item) => item.textContent)).toEqual([
       expect.stringContaining('<script>alert(document.cookie)</script>'),
       expect.stringContaining('Unknown sender'),

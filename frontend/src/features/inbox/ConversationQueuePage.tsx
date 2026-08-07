@@ -183,6 +183,41 @@ export function ConversationQueuePage() {
 
   const clearFilters = () => setSearchParams(new URLSearchParams())
 
+  const filterControls = (
+    <div className="conversation-filters__controls">
+      <label>
+        Status
+        <select value={filters.status ?? ''} onChange={(event) => updateFilter('status', event.target.value)}>
+          <option value="">All statuses</option>
+          {conversationStatuses.map((status) => <option key={status} value={status}>{statusLabels[status]}</option>)}
+        </select>
+      </label>
+      <label>
+        Escalation
+        <select value={filters.escalation_state ?? ''} onChange={(event) => updateFilter('escalation_state', event.target.value)}>
+          <option value="">Any escalation state</option>
+          {escalationStates.map((state) => <option key={state} value={state}>{escalationLabels[state]}</option>)}
+        </select>
+      </label>
+      <label>
+        Language
+        <select value={filters.language ?? ''} onChange={(event) => updateFilter('language', event.target.value)}>
+          <option value="">All languages</option>
+          {conversationLanguages.map((language) => <option key={language} value={language}>{languageLabels[language]}</option>)}
+        </select>
+      </label>
+    </div>
+  )
+  const activeFilterControls = activeFilters.length ? (
+    <div className="active-filters" aria-label="Active filters">
+      <span>Active:</span>
+      {filters.status ? <span className="filter-chip">Status: {statusLabels[filters.status]}</span> : null}
+      {filters.escalation_state ? <span className="filter-chip">Escalation: {escalationLabels[filters.escalation_state]}</span> : null}
+      {filters.language ? <span className="filter-chip">Language: {languageLabels[filters.language]}</span> : null}
+      <button className="button button--text" type="button" onClick={clearFilters}>Clear Filters</button>
+    </div>
+  ) : null
+
   return (
     <div className={`inbox-page${conversationId ? ' inbox-page--selected' : ''}`}>
       <header className="page-header inbox-header">
@@ -200,41 +235,26 @@ export function ConversationQueuePage() {
         </button>
       </header>
 
-      <section className="conversation-filters" aria-labelledby="filters-heading">
-        <h2 id="filters-heading">Filters</h2>
-        <div className="conversation-filters__controls">
-          <label>
-            Status
-            <select value={filters.status ?? ''} onChange={(event) => updateFilter('status', event.target.value)}>
-              <option value="">All statuses</option>
-              {conversationStatuses.map((status) => <option key={status} value={status}>{statusLabels[status]}</option>)}
-            </select>
-          </label>
-          <label>
-            Escalation
-            <select value={filters.escalation_state ?? ''} onChange={(event) => updateFilter('escalation_state', event.target.value)}>
-              <option value="">Any escalation state</option>
-              {escalationStates.map((state) => <option key={state} value={state}>{escalationLabels[state]}</option>)}
-            </select>
-          </label>
-          <label>
-            Language
-            <select value={filters.language ?? ''} onChange={(event) => updateFilter('language', event.target.value)}>
-              <option value="">All languages</option>
-              {conversationLanguages.map((language) => <option key={language} value={language}>{languageLabels[language]}</option>)}
-            </select>
-          </label>
-        </div>
-        {activeFilters.length ? (
-          <div className="active-filters" aria-label="Active filters">
-            <span>Active:</span>
-            {filters.status ? <span className="filter-chip">Status: {statusLabels[filters.status]}</span> : null}
-            {filters.escalation_state ? <span className="filter-chip">Escalation: {escalationLabels[filters.escalation_state]}</span> : null}
-            {filters.language ? <span className="filter-chip">Language: {languageLabels[filters.language]}</span> : null}
-            <button className="button button--text" type="button" onClick={clearFilters}>Clear Filters</button>
+      {conversationId ? (
+        <details className="conversation-filters conversation-filters--compact">
+          <summary>
+            <span>Filters</span>
+            <span className="conversation-filters__summary-state">
+              {activeFilters.length ? `${activeFilters.length} active` : 'All conversations'}
+            </span>
+          </summary>
+          <div className="conversation-filters__body">
+            {filterControls}
+            {activeFilterControls}
           </div>
-        ) : null}
-      </section>
+        </details>
+      ) : (
+        <section className="conversation-filters" aria-labelledby="filters-heading">
+          <h2 id="filters-heading">Filters</h2>
+          {filterControls}
+          {activeFilterControls}
+        </section>
+      )}
 
       <div className={`inbox-layout${conversationId ? ' inbox-layout--selected' : ''}`}>
         <section className="queue-panel" aria-labelledby="queue-heading" aria-busy={queue.loading || queue.refreshing}>

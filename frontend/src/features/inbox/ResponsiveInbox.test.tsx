@@ -60,6 +60,37 @@ describe('responsive Inbox workflow refinement', () => {
     expect(screen.queryByText(/future action|coming soon/i)).not.toBeInTheDocument()
   })
 
+  it('keeps selected-conversation filters in a compact keyboard-accessible disclosure', async () => {
+    server.use(authenticated(), ...workspaceHandlers())
+    const user = userEvent.setup()
+    renderApp(
+      `/inbox/${conversationId}?status=active&escalation_state=open&language=french`,
+    )
+
+    await screen.findByRole('region', { name: 'Conversation timeline' })
+    const summary = screen.getByText('Filters').closest('summary')
+    const disclosure = summary?.closest('details')
+    expect(summary).not.toBeNull()
+    expect(disclosure).toHaveClass('conversation-filters--compact')
+    expect(disclosure).not.toHaveAttribute('open')
+    expect(summary).toHaveTextContent('3 active')
+
+    summary?.focus()
+    expect(summary).toHaveFocus()
+    await user.click(summary as HTMLElement)
+    expect(disclosure).toHaveAttribute('open')
+    expect(screen.getByLabelText('Status')).toHaveValue('active')
+    expect(screen.getByLabelText('Escalation')).toHaveValue('open')
+    expect(screen.getByLabelText('Language')).toHaveValue('french')
+    expect(screen.getByLabelText('Active filters')).toHaveTextContent('Status: Active')
+
+    await user.selectOptions(screen.getByLabelText('Status'), 'qualifying')
+    await waitFor(() => {
+      expect(window.location.search)
+        .toBe('?status=qualifying&escalation_state=open&language=french')
+    })
+  })
+
   it('groups conversation actions in a keyboard-accessible narrow-screen overflow', async () => {
     const originalMatchMedia = window.matchMedia
     Object.defineProperty(window, 'matchMedia', {

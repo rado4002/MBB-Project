@@ -31,11 +31,37 @@ describe('responsive Inbox style contract', () => {
 
   it('uses one compact header and supplementary desktop context', () => {
     expect(globalCss).toMatch(
-      /\.workspace-header \{[^}]*grid-template-columns: auto minmax\(0, 1fr\) auto;[^}]*padding: var\(--space-3\) var\(--space-4\)/,
+      /\.workspace-header \{[^}]*grid-template-columns: auto minmax\(0, 1fr\) auto;[^}]*padding: var\(--space-2\) var\(--space-3\)/,
+    )
+    expect(globalCss).toMatch(
+      /\.conversation-header__content--loaded \{[^}]*grid-template-columns: auto minmax\(0, 1fr\);[^}]*align-items: baseline/,
     )
     expect(globalCss).toMatch(/\.conversation-metadata \{[^}]*display: flex;[^}]*flex-wrap: wrap/)
     expect(globalCss).not.toContain('.workspace-summary')
     expect(globalCss).not.toContain('.workspace-detail-region')
+  })
+
+  it('uses a compact selected-conversation filter disclosure and dense readable messages', () => {
+    expect(globalCss).toMatch(
+      /\.inbox-page--selected \.inbox-header h1 \{[^}]*font-size: 1\.125rem/,
+    )
+    expect(globalCss).toMatch(
+      /\.conversation-filters--compact \{[^}]*position: relative;[^}]*margin-bottom: var\(--space-1\)/,
+    )
+    expect(globalCss).toMatch(
+      /\.conversation-filters__body \{[^}]*position: absolute;[^}]*width: min\(100%, 48rem\)/,
+    )
+    expect(globalCss).toMatch(/\.message-list \{[^}]*gap: var\(--space-2\)/)
+    expect(globalCss).toMatch(/\.message article \{[^}]*padding: var\(--space-3\)/)
+    expect(globalCss).toMatch(
+      /\.message article header \{[^}]*align-items: baseline;[^}]*margin-bottom: var\(--space-1\)/,
+    )
+    expect(globalCss).toMatch(
+      /@media \(max-width: 47\.99rem\) \{[\s\S]*?\.inbox-page--selected \.inbox-header,\s*\.inbox-page--selected \.queue-panel \{ display: none; \}/,
+    )
+    expect(globalCss).not.toMatch(
+      /@media \(max-width: 47\.99rem\) \{[\s\S]*?\.inbox-page--selected \.conversation-filters[^\n]*display: none/,
+    )
   })
 
   it('uses the remaining viewport for a flexible timeline and bounded composer', () => {

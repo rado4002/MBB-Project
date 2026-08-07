@@ -238,9 +238,9 @@ function ConversationHeader({
   if (!detail) return null
   const customerName = detail.customer.display_name?.trim() || 'Customer'
   return (
-    <div className="conversation-header__content">
+    <div className="conversation-header__content conversation-header__content--loaded">
       <h2 id="workspace-heading" tabIndex={-1} ref={headingRef}>{customerName}</h2>
-      <p className="masked-phone">{detail.customer.phone_masked}</p>
+      <span className="masked-phone">{detail.customer.phone_masked}</span>
       <p className="visually-hidden" role="status">Conversation details loaded.</p>
       <div className="conversation-metadata" aria-label="Conversation attributes">
         <span>Status: {label(detail.status)}</span>
@@ -577,10 +577,12 @@ function MessageTimeline({
                   <li key={timelineItemKey(item)} className="internal-note">
                     <article aria-label={`Internal note by ${item.author.display_name}`}>
                       <header>
-                        <strong>Internal Note</strong>
+                        <strong>
+                          Internal Note
+                          <span className="internal-note__author"> · {item.author.display_name} — Operator</span>
+                        </strong>
                         <time dateTime={item.occurred_at}>{formatTimestamp(item.occurred_at)}</time>
                       </header>
-                      <p className="internal-note__author">{item.author.display_name} — Operator</p>
                       <p className="message-text">{item.text}</p>
                     </article>
                   </li>
