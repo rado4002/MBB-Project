@@ -44,6 +44,7 @@ ROLE_CAPABILITIES = {
         "internal_note.create",
         "escalation.create",
         "conversation.ownership.change",
+        "operator_account.manage",
     },
     "operator": BASE_CAPABILITIES
     | {

@@ -219,6 +219,7 @@ from app.api.v1 import (  # noqa: E402  (after app creation intentional)
     maps,
     messages,
     operator_conversations,
+    operator_accounts,
     orders,
     payments,
     relances,
@@ -238,6 +239,7 @@ app.include_router(analytics.router, prefix=_V1_PREFIX)
 app.include_router(admin.router, prefix=_V1_PREFIX)
 app.include_router(auth.router, prefix=_V1_PREFIX)
 app.include_router(operator_conversations.router, prefix=_V1_PREFIX)
+app.include_router(operator_accounts.router, prefix=_V1_PREFIX)
 
 
 # ── Middleware (added AFTER routers so order is correct) ──────────────────────

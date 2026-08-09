@@ -17,10 +17,16 @@ from app.operator_identity.accounts import (
     AdministrativeAuthorization,
     BootstrapUnavailable,
     bootstrap_first_administrator,
+    create_browser_managed_operator,
+    disable_browser_managed_operator,
     disable_operator_account,
+    enable_browser_managed_operator,
+    ManagedOperatorTargetDenied,
+    OperatorAccountConflict,
     provision_operator_account,
     reactivate_operator_account,
     reset_operator_password,
+    set_browser_managed_operator_password,
 )
 from app.operator_identity.passwords import verify_password
 
@@ -273,3 +279,126 @@ def test_cli_exposes_only_approved_internal_commands() -> None:
         "reactivate-operator-account",
     ):
         assert command in help_text
+
+
+@pytest.mark.asyncio
+async def test_browser_managed_operator_lifecycle_uses_explicit_passwords(
+    db_session: AsyncSession,
+) -> None:
+    administrator = (await _bootstrap(db_session)).account
+    authorization = _authorization(administrator)
+    initial_password = "Cobalt-River-83!"
+    account = await create_browser_managed_operator(
+        db_session,
+        authorization=authorization,
+        username="browser.operator",
+        display_name="Browser Operator",
+        email="browser.operator@example.test",
+        password=initial_password,
+        settings=_settings(),
+        source_network_fingerprint="a" * 64,
+        user_agent_fingerprint="b" * 64,
+    )
+    assert account.role == "operator"
+    assert account.status == "active"
+    assert account.must_change_password is False
+    assert account.temporary_password_expires_at is None
+    assert verify_password(account.password_hash, initial_password)
+
+    session_store = AsyncMock()
+    session_store.revoke_all_sessions.return_value = ("one", "two")
+    initial_version = account.auth_version
+    new_password = "Sunset-Lantern-74!"
+    await set_browser_managed_operator_password(
+        db_session,
+        session_store,
+        authorization=authorization,
+        account_id=account.account_id,
+        password=new_password,
+        settings=_settings(),
+    )
+    assert account.auth_version == initial_version + 1
+    assert not verify_password(account.password_hash, initial_password)
+    assert verify_password(account.password_hash, new_password)
+    assert account.must_change_password is False
+
+    await disable_browser_managed_operator(
+        db_session,
+        session_store,
+        authorization=authorization,
+        account_id=account.account_id,
+        settings=_settings(),
+    )
+    assert account.status == "disabled"
+    disabled_version = account.auth_version
+
+    enabled_password = "Marble-Window-61!"
+    await enable_browser_managed_operator(
+        db_session,
+        session_store,
+        authorization=authorization,
+        account_id=account.account_id,
+        password=enabled_password,
+        settings=_settings(),
+    )
+    assert account.status == "active"
+    assert account.auth_version == disabled_version + 1
+    assert account.must_change_password is False
+    assert verify_password(account.password_hash, enabled_password)
+    assert session_store.revoke_all_sessions.await_count == 3
+
+    audit_events = (
+        await db_session.scalars(
+            select(OperatorAuditEvent).where(
+                OperatorAuditEvent.target_id == str(account.account_id)
+            )
+        )
+    ).all()
+    assert [event.action for event in audit_events] == [
+        "operator_account.provisioned",
+        "operator_account.password_reset",
+        "operator_account.disabled",
+        "operator_account.reactivated_with_password_reset",
+    ]
+    audit_text = " ".join(str(event.event_metadata) for event in audit_events)
+    for secret in (initial_password, new_password, enabled_password):
+        assert secret not in audit_text
+    assert all(event.reason_code == "operator_browser" for event in audit_events)
+
+
+@pytest.mark.asyncio
+async def test_browser_management_rejects_duplicates_and_non_operator_targets(
+    db_session: AsyncSession,
+) -> None:
+    administrator = (await _bootstrap(db_session)).account
+    authorization = _authorization(administrator)
+    await create_browser_managed_operator(
+        db_session,
+        authorization=authorization,
+        username="unique.operator",
+        display_name="Unique Operator",
+        email="unique@example.test",
+        password="Copper-River-47!",
+        settings=_settings(),
+    )
+    with pytest.raises(OperatorAccountConflict):
+        await create_browser_managed_operator(
+            db_session,
+            authorization=authorization,
+            username="unique.operator",
+            display_name="Duplicate Operator",
+            email="different@example.test",
+            password="Amber-Lantern-58!",
+            settings=_settings(),
+        )
+
+    session_store = AsyncMock()
+    with pytest.raises(ManagedOperatorTargetDenied):
+        await disable_browser_managed_operator(
+            db_session,
+            session_store,
+            authorization=authorization,
+            account_id=administrator.account_id,
+            settings=_settings(),
+        )
+    session_store.revoke_all_sessions.assert_not_awaited()

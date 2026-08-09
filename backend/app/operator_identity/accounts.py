@@ -9,17 +9,19 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
 from app.models.operator_account import (
     OperatorAccount,
     normalize_display_name,
+    normalize_email,
     normalize_username,
 )
 from app.operator_identity.audit import append_operator_audit_event
 from app.operator_identity.browser_sessions import BrowserSessionStore
-from app.operator_identity.passwords import hash_password
+from app.operator_identity.passwords import hash_password, validate_user_chosen_password
 
 ALLOWED_ROLES = frozenset({"administrator", "operator", "analyst"})
 
@@ -37,6 +39,18 @@ class AdministrativeAuthorizationDenied(OperatorAccountError):
 
 
 class AccountStateError(OperatorAccountError):
+    pass
+
+
+class OperatorAccountConflict(OperatorAccountError):
+    pass
+
+
+class ManagedOperatorNotFound(OperatorAccountError):
+    pass
+
+
+class ManagedOperatorTargetDenied(OperatorAccountError):
     pass
 
 
@@ -350,3 +364,296 @@ async def reactivate_operator_account(
         settings=configured,
     )
     return IssuedTemporaryCredential(account=account, _plaintext=temporary_password)
+
+
+async def _load_managed_operator(
+    session: AsyncSession, account_id: uuid.UUID
+) -> OperatorAccount:
+    account = await session.scalar(
+        select(OperatorAccount)
+        .where(OperatorAccount.account_id == account_id)
+        .with_for_update()
+    )
+    if account is None:
+        raise ManagedOperatorNotFound("operator account was not found")
+    if account.role != "operator":
+        raise ManagedOperatorTargetDenied("only Operator accounts can be managed")
+    return account
+
+
+def _browser_audit_metadata(
+    authorization: AdministrativeAuthorization,
+    *,
+    before_status: str | None = None,
+    after_status: str | None = None,
+    before_auth_version: int | None = None,
+    after_auth_version: int | None = None,
+    revoked_session_count: int | None = None,
+) -> dict[str, str | int]:
+    metadata: dict[str, str | int] = {
+        "source": "operator_browser",
+        **_authorization_metadata(authorization),
+    }
+    if before_status is not None:
+        metadata["previous_status"] = before_status
+    if after_status is not None:
+        metadata["new_status"] = after_status
+    if before_auth_version is not None:
+        metadata["previous_auth_version"] = before_auth_version
+    if after_auth_version is not None:
+        metadata["new_auth_version"] = after_auth_version
+    if revoked_session_count is not None:
+        metadata["revoked_session_count"] = revoked_session_count
+    return metadata
+
+
+async def create_browser_managed_operator(
+    session: AsyncSession,
+    *,
+    authorization: AdministrativeAuthorization,
+    username: str,
+    display_name: str,
+    email: str | None,
+    password: str,
+    source_network_fingerprint: str | None = None,
+    user_agent_fingerprint: str | None = None,
+    settings: Settings | None = None,
+    now: datetime | None = None,
+) -> OperatorAccount:
+    """Create an active Operator with a user-chosen password from the browser UI."""
+    configured = settings or get_settings()
+    event_time = now or _utcnow()
+    actor = await _require_active_administrator(session, authorization)
+    normalized_username = normalize_username(username)
+    normalized_display_name = normalize_display_name(display_name)
+    normalized_email = normalize_email(email)
+    validate_user_chosen_password(
+        password,
+        username=normalized_username,
+        display_name=normalized_display_name,
+    )
+    account = OperatorAccount(
+        username_normalized=normalized_username,
+        display_name=normalized_display_name,
+        email_normalized=normalized_email,
+        password_hash=hash_password(password),
+        role="operator",
+        status="active",
+        auth_version=1,
+        must_change_password=False,
+        temporary_password_expires_at=None,
+        password_changed_at=event_time,
+        updated_at=event_time,
+    )
+    try:
+        async with session.begin_nested():
+            session.add(account)
+            await session.flush()
+    except IntegrityError as exc:
+        raise OperatorAccountConflict(
+            "an Operator with that username or email already exists"
+        ) from exc
+    await append_operator_audit_event(
+        session,
+        category="security",
+        actor_kind="human",
+        actor_account_id=actor.account_id,
+        actor_display_name=actor.display_name,
+        effective_role=actor.role,
+        request_id=authorization.authorization_reference.strip(),
+        action="operator_account.provisioned",
+        target_type="operator_account",
+        target_id=str(account.account_id),
+        reason_code="operator_browser",
+        outcome="succeeded",
+        metadata={
+            **_browser_audit_metadata(
+                authorization,
+                after_status=account.status,
+                after_auth_version=account.auth_version,
+            ),
+            "created_role": "operator",
+        },
+        source_network_fingerprint=source_network_fingerprint,
+        user_agent_fingerprint=user_agent_fingerprint,
+        occurred_at=event_time,
+        settings=configured,
+    )
+    return account
+
+
+async def set_browser_managed_operator_password(
+    session: AsyncSession,
+    session_store: BrowserSessionStore,
+    *,
+    authorization: AdministrativeAuthorization,
+    account_id: uuid.UUID,
+    password: str,
+    source_network_fingerprint: str | None = None,
+    user_agent_fingerprint: str | None = None,
+    settings: Settings | None = None,
+    now: datetime | None = None,
+) -> OperatorAccount:
+    configured = settings or get_settings()
+    event_time = now or _utcnow()
+    actor = await _require_active_administrator(session, authorization)
+    account = await _load_managed_operator(session, account_id)
+    if account.status != "active":
+        raise AccountStateError("only an active Operator password can be changed")
+    validate_user_chosen_password(
+        password,
+        username=account.username_normalized,
+        display_name=account.display_name,
+        current_password_hash=account.password_hash,
+    )
+    before_version = account.auth_version
+    revoked = await session_store.revoke_all_sessions(account.account_id)
+    account.password_hash = hash_password(password)
+    account.must_change_password = False
+    account.temporary_password_expires_at = None
+    account.password_changed_at = event_time
+    account.auth_version += 1
+    account.updated_at = event_time
+    await session.flush()
+    await append_operator_audit_event(
+        session,
+        category="security",
+        actor_kind="human",
+        actor_account_id=actor.account_id,
+        actor_display_name=actor.display_name,
+        effective_role=actor.role,
+        request_id=authorization.authorization_reference.strip(),
+        action="operator_account.password_reset",
+        target_type="operator_account",
+        target_id=str(account.account_id),
+        reason_code="operator_browser",
+        outcome="succeeded",
+        metadata=_browser_audit_metadata(
+            authorization,
+            before_status=account.status,
+            after_status=account.status,
+            before_auth_version=before_version,
+            after_auth_version=account.auth_version,
+            revoked_session_count=len(revoked),
+        ),
+        source_network_fingerprint=source_network_fingerprint,
+        user_agent_fingerprint=user_agent_fingerprint,
+        occurred_at=event_time,
+        settings=configured,
+    )
+    return account
+
+
+async def disable_browser_managed_operator(
+    session: AsyncSession,
+    session_store: BrowserSessionStore,
+    *,
+    authorization: AdministrativeAuthorization,
+    account_id: uuid.UUID,
+    source_network_fingerprint: str | None = None,
+    user_agent_fingerprint: str | None = None,
+    settings: Settings | None = None,
+    now: datetime | None = None,
+) -> OperatorAccount:
+    configured = settings or get_settings()
+    event_time = now or _utcnow()
+    actor = await _require_active_administrator(session, authorization)
+    account = await _load_managed_operator(session, account_id)
+    if account.status != "active":
+        raise AccountStateError("Operator account is already disabled")
+    before_version = account.auth_version
+    revoked = await session_store.revoke_all_sessions(account.account_id)
+    account.status = "disabled"
+    account.auth_version += 1
+    account.updated_at = event_time
+    await session.flush()
+    await append_operator_audit_event(
+        session,
+        category="security",
+        actor_kind="human",
+        actor_account_id=actor.account_id,
+        actor_display_name=actor.display_name,
+        effective_role=actor.role,
+        request_id=authorization.authorization_reference.strip(),
+        action="operator_account.disabled",
+        target_type="operator_account",
+        target_id=str(account.account_id),
+        reason_code="operator_browser",
+        outcome="succeeded",
+        metadata=_browser_audit_metadata(
+            authorization,
+            before_status="active",
+            after_status=account.status,
+            before_auth_version=before_version,
+            after_auth_version=account.auth_version,
+            revoked_session_count=len(revoked),
+        ),
+        source_network_fingerprint=source_network_fingerprint,
+        user_agent_fingerprint=user_agent_fingerprint,
+        occurred_at=event_time,
+        settings=configured,
+    )
+    return account
+
+
+async def enable_browser_managed_operator(
+    session: AsyncSession,
+    session_store: BrowserSessionStore,
+    *,
+    authorization: AdministrativeAuthorization,
+    account_id: uuid.UUID,
+    password: str,
+    source_network_fingerprint: str | None = None,
+    user_agent_fingerprint: str | None = None,
+    settings: Settings | None = None,
+    now: datetime | None = None,
+) -> OperatorAccount:
+    configured = settings or get_settings()
+    event_time = now or _utcnow()
+    actor = await _require_active_administrator(session, authorization)
+    account = await _load_managed_operator(session, account_id)
+    if account.status != "disabled":
+        raise AccountStateError("only a disabled Operator can be re-enabled")
+    validate_user_chosen_password(
+        password,
+        username=account.username_normalized,
+        display_name=account.display_name,
+        current_password_hash=account.password_hash,
+    )
+    before_version = account.auth_version
+    revoked = await session_store.revoke_all_sessions(account.account_id)
+    account.status = "active"
+    account.password_hash = hash_password(password)
+    account.must_change_password = False
+    account.temporary_password_expires_at = None
+    account.password_changed_at = event_time
+    account.auth_version += 1
+    account.updated_at = event_time
+    await session.flush()
+    await append_operator_audit_event(
+        session,
+        category="security",
+        actor_kind="human",
+        actor_account_id=actor.account_id,
+        actor_display_name=actor.display_name,
+        effective_role=actor.role,
+        request_id=authorization.authorization_reference.strip(),
+        action="operator_account.reactivated_with_password_reset",
+        target_type="operator_account",
+        target_id=str(account.account_id),
+        reason_code="operator_browser",
+        outcome="succeeded",
+        metadata=_browser_audit_metadata(
+            authorization,
+            before_status="disabled",
+            after_status=account.status,
+            before_auth_version=before_version,
+            after_auth_version=account.auth_version,
+            revoked_session_count=len(revoked),
+        ),
+        source_network_fingerprint=source_network_fingerprint,
+        user_agent_fingerprint=user_agent_fingerprint,
+        occurred_at=event_time,
+        settings=configured,
+    )
+    return account

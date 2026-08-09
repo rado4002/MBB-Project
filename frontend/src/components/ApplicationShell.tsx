@@ -7,6 +7,7 @@ const pageNames: Record<string, string> = {
   '/inbox': 'Inbox',
   '/account': 'My Account',
   '/session': 'Session',
+  '/operators': 'Operators',
 }
 
 export function ApplicationShell() {
@@ -45,6 +46,11 @@ export function ApplicationShell() {
           <NavLink to={inboxDestination} className={({ isActive }) => (isActive ? 'active' : undefined)}>
             Inbox
           </NavLink>
+          {auth.session.capabilities.includes('operator_account.manage') ? (
+            <NavLink to="/operators" className={({ isActive }) => (isActive ? 'active' : undefined)}>
+              Operators
+            </NavLink>
+          ) : null}
         </nav>
         <AccountMenu human={auth.session.human} onLogout={logout} />
       </header>

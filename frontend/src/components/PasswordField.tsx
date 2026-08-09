@@ -1,16 +1,19 @@
-import { useState, type InputHTMLAttributes } from 'react'
+import { forwardRef, useState, type InputHTMLAttributes } from 'react'
 
 interface PasswordFieldProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'type'> {
   label: string
 }
 
-export function PasswordField({ label, id, ...inputProps }: PasswordFieldProps) {
+export const PasswordField = forwardRef<HTMLInputElement, PasswordFieldProps>(function PasswordField(
+  { label, id, ...inputProps },
+  ref,
+) {
   const [visible, setVisible] = useState(false)
   return (
     <div className="field">
       <label htmlFor={id}>{label}</label>
       <div className="password-input">
-        <input id={id} type={visible ? 'text' : 'password'} {...inputProps} />
+        <input ref={ref} id={id} type={visible ? 'text' : 'password'} {...inputProps} />
         <button
           type="button"
           className="password-toggle"
@@ -23,4 +26,4 @@ export function PasswordField({ label, id, ...inputProps }: PasswordFieldProps) 
       </div>
     </div>
   )
-}
+})

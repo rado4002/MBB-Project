@@ -9,6 +9,7 @@ import { LoginPage } from '../features/auth/LoginPage'
 import { PasswordChangePage } from '../features/auth/PasswordChangePage'
 import { ConversationQueuePage } from '../features/inbox/ConversationQueuePage'
 import { NotFoundPage } from '../features/NotFoundPage'
+import { OperatorAccountsPage } from '../features/operators/OperatorAccountsPage'
 import { SessionPage } from '../features/session/SessionPage'
 
 function EntryRoute() {
@@ -27,6 +28,14 @@ function LoginRoute() {
   if (auth.status === 'password_change_required') return <Navigate to="/password-change" replace />
   if (auth.status === 'authenticated') return <Navigate to="/inbox" replace />
   return <LoginPage />
+}
+
+function OperatorAccountsRoute() {
+  const auth = useAuth()
+  if (!auth.session?.capabilities.includes('operator_account.manage')) {
+    return <Navigate to="/inbox" replace />
+  }
+  return <OperatorAccountsPage />
 }
 
 export function AppRouter() {
@@ -53,6 +62,7 @@ export function AppRouter() {
         <Route path="/inbox/:conversationId" element={<ConversationQueuePage />} />
         <Route path="/account" element={<AccountPage />} />
         <Route path="/session" element={<SessionPage />} />
+        <Route path="/operators" element={<OperatorAccountsRoute />} />
       </Route>
       <Route path="*" element={<NotFoundPage />} />
     </Routes>
