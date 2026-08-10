@@ -60,6 +60,10 @@ class ConversationContextUpdate(BaseModel):
     @classmethod
     def max_size(cls, v: dict) -> dict:
         import json
+        if "commercial_state" in v:
+            raise ValueError(
+                "commercial_state is reserved for the typed commercial-state service"
+            )
         if len(json.dumps(v).encode()) > 10_240:
             raise ValueError("Context object exceeds 10 KB limit")
         return v

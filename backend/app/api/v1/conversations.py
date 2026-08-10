@@ -10,7 +10,8 @@ import uuid
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import bindparam, func, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import DBSession, IdempotencyKey, get_current_role, require_role
@@ -121,15 +122,28 @@ async def update_conversation_context(
     idempotency_key: IdempotencyKey,
 ):
     """Manually update conversation JSONB context (Celery tasks or Hub Team). Idempotent via key tracking."""
-    conv = await db.get(Conversation, conversation_id)
-    if not conv:
+    changed = await db.execute(
+        update(Conversation)
+        .where(Conversation.conversation_id == conversation_id)
+        .values(
+            context=Conversation.context.op("||")(
+                bindparam("conversation_context_patch", body.context, type_=JSONB)
+            ),
+            updated_at=func.now(),
+        )
+        .returning(
+            Conversation.conversation_id,
+            Conversation.context,
+            Conversation.updated_at,
+        )
+    )
+    row = changed.one_or_none()
+    if row is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    conv.context = {**conv.context, **body.context}
-    await db.flush()
     return ConversationContextResponse(
-        conversation_id=conv.conversation_id,
-        context=conv.context,
-        updated_at=conv.updated_at,
+        conversation_id=row.conversation_id,
+        context=row.context,
+        updated_at=row.updated_at,
     )
 
 
