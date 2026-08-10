@@ -17,7 +17,7 @@ REVISION = "e5f6a7b8c9d0"
 
 def test_internal_notes_migration_is_additive_seed_free_and_reversible() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_current_head() == REVISION
+    assert script.get_current_head() == "f6a7b8c9d0e1"
     assert script.get_revision(REVISION).down_revision == "d4e5f6a7b8c9"
 
     source = (

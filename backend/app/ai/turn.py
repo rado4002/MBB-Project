@@ -1,7 +1,8 @@
 """Provider-neutral MBB AI turn contract and service."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from typing import Mapping, Sequence
 
 from app.adapters.base import BaseAIAdapter
@@ -18,6 +19,7 @@ class AITurn:
     user_content: str
     language: str
     history: Sequence[Mapping[str, str]] = ()
+    turn_id: uuid.UUID = field(default_factory=uuid.uuid4, init=False)
 
 
 class AITurnService:

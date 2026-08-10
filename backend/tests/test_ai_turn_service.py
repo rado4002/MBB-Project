@@ -43,6 +43,7 @@ async def test_turn_separates_policy_from_customer_runtime_content():
     assert result == "assistant response"
     assert len(adapter.calls) == 1
     request = adapter.calls[0]
+    assert "turn_id" not in request
     assert request["system"] == get_system_policy("lingala").text
     assert customer_text not in request["system"]
     assert history_text not in request["system"]
