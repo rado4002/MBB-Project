@@ -169,7 +169,7 @@ def process_inbound_message(
     3. Voice note → escalation ticket + ack → return
     4. Opt-out → ack → return
     5. Build response prompt from session cache + DB history
-    6. Call configured AI adapter or use fallback when AI is disabled/unavailable
+    6. Call the MBB AI turn service or use fallback when AI is disabled/unavailable
     7. Persist outbound message
     8. Dispatch MAPS tag generation (async Celery task)
     9. Update Redis session cache
@@ -201,7 +201,6 @@ async def _process(
     from app.database import async_session_factory
     from app.modules.m1_gateway.service import process_inbound
     from app.modules.m1_gateway.session_cache import get_session, save_session, SessionState
-    from app.adapters import get_ai_adapter
     from sqlalchemy import select
 
     t0 = time.monotonic()
@@ -338,14 +337,16 @@ async def _process(
             history = session_state.history
 
         # ── Step 6: Generate response or use local fallback ───────────────────
-        from app.modules.m2_language.prompts import get_system_prompt
-        ai = get_ai_adapter()
-        system_prompt = get_system_prompt(language, history)
+        from app.ai.turn import AITurn, get_ai_turn_service
+
+        ai_turn_service = get_ai_turn_service()
         try:
-            ai_response = await ai.generate(
-                prompt=content,
-                system=system_prompt,
-                max_tokens=512,
+            ai_response = await ai_turn_service.generate(
+                AITurn(
+                    user_content=content,
+                    language=language,
+                    history=history,
+                )
             )
         except Exception as exc:
             log.warning("m1.ai_fallback.used", conv_id=conv_id, error=str(exc))

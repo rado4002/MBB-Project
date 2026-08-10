@@ -261,16 +261,16 @@ def test_system_prompt_swahili():
     assert "KAMWE" in p
 
 
-def test_system_prompt_with_history():
+def test_system_prompt_excludes_untrusted_history():
     from app.modules.m2_language.prompts import get_system_prompt
     history = [
         {"direction": "inbound", "content": "Mbote!"},
         {"direction": "outbound", "content": "Mbote ndeko!"},
     ]
     p = get_system_prompt("lingala", history)
-    assert "Client:" in p
-    assert "Mbote!" in p
-    assert "Historique" in p
+    assert "Mbote!" not in p
+    assert "Mbote ndeko!" not in p
+    assert p == get_system_prompt("lingala")
 
 
 def test_system_prompt_unknown_language_defaults_french():

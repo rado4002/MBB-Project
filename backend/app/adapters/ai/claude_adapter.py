@@ -5,7 +5,6 @@ Wraps the Anthropic Messages API with:
   - Circuit breaker (3 consecutive failures → open)
   - Exponential back-off retry (max 3 attempts)
   - Timeout from settings (default 25 s)
-  - DRC tone system prompt injection
 """
 from __future__ import annotations
 
@@ -22,18 +21,6 @@ settings = get_settings()
 
 _MAX_RETRIES = 3
 _RETRY_DELAYS = (2.0, 5.0, 10.0)
-
-# DRC tone system prompt appended to every generate() call
-_DRC_SYSTEM_SUFFIX = (
-    "\n\nTONE RULES (mandatory):\n"
-    "- Feel like a helpful young Congolese friend — warm, casual, respectful.\n"
-    "- 2-3 sentences MAX per message.\n"
-    "- Help first, sell second.\n"
-    "- NEVER robotic, NEVER pushy, NEVER formal.\n"
-    "- Respect opt-out signals instantly ('stop', 'arrête', 'yaka te', 'tika').\n"
-    "- Use the customer's preferred language (Lingala / French / Swahili)."
-)
-
 
 class AIAdapterError(RuntimeError):
     """Raised when the AI model is unreachable after retries."""
@@ -86,7 +73,7 @@ class ClaudeAdapter(BaseAIAdapter):
 
         Args:
             prompt:     User-side message content.
-            system:     System prompt (DRC tone suffix is appended automatically).
+            system:     System policy supplied by the MBB AI turn service.
             max_tokens: Maximum tokens in the response.
 
         Returns the assistant's text response.
@@ -94,15 +81,13 @@ class ClaudeAdapter(BaseAIAdapter):
         import asyncio
 
         self._check_circuit()
-        full_system = system + _DRC_SYSTEM_SUFFIX
-
         for attempt, delay in enumerate((*_RETRY_DELAYS, None), start=1):
             try:
                 t0 = time.monotonic()
                 message = await self._client.messages.create(
                     model=settings.claude_model,
                     max_tokens=max_tokens,
-                    system=full_system,
+                    system=system,
                     messages=[{"role": "user", "content": prompt}],
                 )
                 elapsed_ms = int((time.monotonic() - t0) * 1000)

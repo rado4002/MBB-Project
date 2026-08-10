@@ -52,6 +52,11 @@ class _AI:
         return "outbound response"
 
 
+class _FailingAI:
+    async def generate(self, **_kwargs):
+        raise RuntimeError("AI unavailable")
+
+
 class _Messaging:
     def __init__(self, events, *, error=None):
         self.events = events
@@ -76,6 +81,7 @@ def _patch_normal_flow(
     outbound_id,
     outbound_commit_error=None,
     messaging_error=None,
+    ai=None,
 ):
     import app.adapters as adapters
     import app.database as database
@@ -125,7 +131,7 @@ def _patch_normal_flow(
     monkeypatch.setattr(service, "persist_outbound", persist_outbound)
     monkeypatch.setattr(session_cache, "get_session", get_session)
     monkeypatch.setattr(session_cache, "save_session", save_session)
-    monkeypatch.setattr(adapters, "get_ai_adapter", lambda: _AI())
+    monkeypatch.setattr(adapters, "get_ai_adapter", lambda: ai or _AI())
     monkeypatch.setattr(adapters, "get_messaging_adapter", lambda: messaging)
     monkeypatch.setattr(
         conversation_engine,
@@ -196,6 +202,27 @@ def test_human_ownership_stops_generation_persistence_and_send(monkeypatch):
     assert result["send_status"] == "skipped"
     assert events == ["inbound", "commit", "rollback"]
     assert messaging.calls == []
+
+
+def test_ai_failure_preserves_localized_fallback_and_outbound_path(monkeypatch):
+    from app.i18n.messages import t
+
+    outbound_id = uuid.uuid4()
+    events, messaging = _patch_normal_flow(
+        monkeypatch,
+        outbound_id=outbound_id,
+        ai=_FailingAI(),
+    )
+
+    result = _run(_process(_Task()))
+
+    fallback = t("error_fallback", "french")
+    assert messaging.calls == [
+        ("+243812345678", fallback, str(outbound_id))
+    ]
+    assert events.index("persist") < events.index("commit", 2) < events.index("adapter")
+    assert result["status"] == "processed"
+    assert result["outbound_message_id"] == str(outbound_id)
 
 
 def test_outbound_commit_failure_is_fail_closed_without_fallback_uuid(monkeypatch):
