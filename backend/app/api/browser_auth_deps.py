@@ -45,6 +45,7 @@ ROLE_CAPABILITIES = {
         "escalation.create",
         "conversation.ownership.change",
         "operator_account.manage",
+        "commerce.manage",
     },
     "operator": BASE_CAPABILITIES
     | {

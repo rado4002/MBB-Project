@@ -45,7 +45,8 @@ def _minimal_record(**overrides) -> AITurnAuditRecord:
 def test_migration_is_linear_additive_seed_free_and_reversible() -> None:
     revision = "f6a7b8c9d0e1"
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_current_head() == "a7b8c9d0e1f2"
+    assert script.get_current_head() == "b8c9d0e1f2a3"
+    assert script.get_revision("b8c9d0e1f2a3").down_revision == "a7b8c9d0e1f2"
     assert script.get_revision("a7b8c9d0e1f2").down_revision == revision
     assert script.get_revision(revision).down_revision == "e5f6a7b8c9d0"
 

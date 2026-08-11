@@ -214,6 +214,7 @@ from app.api.v1 import (  # noqa: E402  (after app creation intentional)
     analytics,
     auth,
     conversations,
+    commerce_admin,
     customers,
     leads,
     maps,
@@ -229,6 +230,7 @@ _V1_PREFIX = "/api/v1"
 
 app.include_router(messages.router, prefix=_V1_PREFIX)
 app.include_router(conversations.router, prefix=_V1_PREFIX)
+app.include_router(commerce_admin.router, prefix=_V1_PREFIX)
 app.include_router(leads.router, prefix=_V1_PREFIX)
 app.include_router(relances.router, prefix=_V1_PREFIX)
 app.include_router(orders.router, prefix=_V1_PREFIX)
