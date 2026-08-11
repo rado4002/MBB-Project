@@ -30,7 +30,7 @@ class Conversation(Base):
         ),
         CheckConstraint(
             "(owner_type = 'ai' AND human_owner_account_id IS NULL "
-            "AND ai_execution_state = 'eligible') OR "
+            "AND ai_execution_state IN ('eligible', 'paused')) OR "
             "(owner_type = 'human' AND human_owner_account_id IS NOT NULL "
             "AND ai_execution_state = 'paused')",
             name="chk_conv_exclusive_owner",

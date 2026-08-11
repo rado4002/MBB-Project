@@ -22,13 +22,18 @@ def _snapshot(
     account_id: uuid.UUID | None = None,
     display_name: str | None = None,
     version: int = 2,
+    ai_execution_state: str | None = None,
 ) -> OwnershipSnapshot:
     return OwnershipSnapshot(
         conversation_id=conversation_id,
         owner_type=owner_type,
         human_owner_account_id=account_id,
         human_owner_display_name=display_name,
-        ai_execution_state="paused" if owner_type == "human" else "eligible",
+        ai_execution_state=(
+            ai_execution_state
+            if ai_execution_state is not None
+            else "paused" if owner_type == "human" else "eligible"
+        ),
         version=version,
         updated_at=datetime.now(timezone.utc),
     )
@@ -112,6 +117,41 @@ async def test_ownership_conflict_returns_safe_current_owner(
         assert response.json()["error"]["code"] == "OWNERSHIP_CONFLICT"
         assert response.json()["error"]["message"] == (
             "This conversation is now controlled by Alice Operator."
+        )
+    finally:
+        await client.aclose()
+        await redis_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_waiting_conflict_does_not_claim_ai_or_human_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _database, _account, redis_client, csrf, _calls = await _client(
+        monkeypatch
+    )
+    conversation_id = uuid.uuid4()
+
+    async def _conflict(*_args, **_kwargs):
+        raise OwnershipConflict(
+            _snapshot(
+                conversation_id,
+                owner_type="ai",
+                version=2,
+                ai_execution_state="paused",
+            )
+        )
+
+    monkeypatch.setattr(operator_conversations, "transition_ownership", _conflict)
+    try:
+        response = await client.post(
+            f"/api/v1/operator/conversations/{conversation_id}/ownership",
+            json={"target_owner_type": "human", "expected_version": 1},
+            headers=_headers(csrf),
+        )
+        assert response.status_code == 409
+        assert response.json()["error"]["message"] == (
+            "This conversation is waiting for a Human Operator."
         )
     finally:
         await client.aclose()

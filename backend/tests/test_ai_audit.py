@@ -29,7 +29,11 @@ from app.models.ai_turn_audit import AITurnAudit
 
 def _minimal_record(**overrides) -> AITurnAuditRecord:
     values = {
-        "turn_id": AITurn(user_content="test", language="french").turn_id,
+        "turn_id": AITurn(
+            user_content="test",
+            language="french",
+            expected_ownership_version=1,
+        ).turn_id,
         "conversation_id": uuid.uuid4(),
         "policy_version": AI_SYSTEM_POLICY_VERSION,
         "outcome": AITurnOutcome.failed,
@@ -41,7 +45,8 @@ def _minimal_record(**overrides) -> AITurnAuditRecord:
 def test_migration_is_linear_additive_seed_free_and_reversible() -> None:
     revision = "f6a7b8c9d0e1"
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_current_head() == revision
+    assert script.get_current_head() == "a7b8c9d0e1f2"
+    assert script.get_revision("a7b8c9d0e1f2").down_revision == revision
     assert script.get_revision(revision).down_revision == "e5f6a7b8c9d0"
 
     source = (
@@ -73,8 +78,12 @@ def test_stable_actor_is_application_owned_and_not_an_operator_account() -> None
 
 
 def test_turn_identity_is_unique_opaque_and_not_caller_overridable() -> None:
-    first = AITurn(user_content="first", language="french")
-    second = AITurn(user_content="second", language="lingala")
+    first = AITurn(
+        user_content="first", language="french", expected_ownership_version=1
+    )
+    second = AITurn(
+        user_content="second", language="lingala", expected_ownership_version=2
+    )
 
     assert isinstance(first.turn_id, uuid.UUID)
     assert first.turn_id != second.turn_id
@@ -83,6 +92,7 @@ def test_turn_identity_is_unique_opaque_and_not_caller_overridable() -> None:
         AITurn(  # type: ignore[call-arg]
             user_content="provider content",
             language="french",
+            expected_ownership_version=1,
             turn_id=uuid.uuid4(),
         )
 
@@ -199,6 +209,22 @@ def test_capability_summary_is_bounded_and_cannot_hold_raw_payloads() -> None:
             outcome=CapabilityAuditOutcome.success,
             safe_code="should_not_exist",
         )
+
+
+def test_handoff_capability_fits_existing_provenance_contract() -> None:
+    summary = CapabilityAuditSummary(
+        capability_name="request_human_handoff",
+        decision=CapabilityAuditDecision.executed,
+        outcome=CapabilityAuditOutcome.success,
+    )
+    record = _minimal_record(
+        outcome=AITurnOutcome.handoff_requested,
+        exposed_capabilities=("request_human_handoff",),
+        capability_activity=(summary,),
+    )
+
+    assert record.outcome == AITurnOutcome.handoff_requested
+    assert record.capability_activity == (summary,)
 
 
 def test_commercial_state_uses_only_revision_and_bounded_field_references() -> None:

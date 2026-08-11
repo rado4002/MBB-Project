@@ -100,10 +100,14 @@ function timelineItemKey(item: OperatorTimelineItem) {
     : `internal_note:${item.note_id}`
 }
 
-function ownershipLabel(ownership: ConversationOwnership) {
-  return ownership.owner_type === 'ai'
+function ownershipSummary(ownership: ConversationOwnership) {
+  if (ownership.owner_type === 'ai' && ownership.ai_execution_state === 'paused') {
+    return 'Waiting for Human'
+  }
+  const owner = ownership.owner_type === 'ai'
     ? 'MBB AI Assistant'
     : ownership.human_owner?.display_name ?? 'Human Operator'
+  return `Controlled by ${owner}`
 }
 
 const REPLY_ELIGIBLE_STATUSES = new Set([
@@ -125,6 +129,9 @@ function replyUnavailableReason(
     return 'Reply unavailable — conversation ownership is unavailable.'
   }
   if (detail.ownership.owner_type === 'ai') {
+    if (detail.ownership.ai_execution_state === 'paused') {
+      return 'Reply unavailable — waiting for a Human Operator to take control.'
+    }
     return 'Reply unavailable — this conversation is controlled by MBB AI Assistant.'
   }
   if (
@@ -251,7 +258,7 @@ function ConversationHeader({
           tabIndex={-1}
           aria-live="polite"
         >
-          Controlled by {ownershipLabel(detail.ownership)}
+          {ownershipSummary(detail.ownership)}
         </span>
         <span>
           AI {detail.ownership.ai_execution_state === 'paused'

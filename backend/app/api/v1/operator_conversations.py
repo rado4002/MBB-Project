@@ -771,15 +771,22 @@ async def change_operator_conversation_ownership(
             message="The unchanged ownership request is still in progress.",
         ) from exc
     except OwnershipConflict as exc:
-        owner = (
-            exc.current.human_owner_display_name
-            if exc.current.owner_type == "human"
-            else "MBB AI Assistant"
-        ) or "another Human Operator"
+        if (
+            exc.current.owner_type == "ai"
+            and exc.current.ai_execution_state == "paused"
+        ):
+            conflict_message = "This conversation is waiting for a Human Operator."
+        else:
+            owner = (
+                exc.current.human_owner_display_name
+                if exc.current.owner_type == "human"
+                else "MBB AI Assistant"
+            ) or "another Human Operator"
+            conflict_message = f"This conversation is now controlled by {owner}."
         raise _operator_error(
             status_code=status.HTTP_409_CONFLICT,
             code="OWNERSHIP_CONFLICT",
-            message=f"This conversation is now controlled by {owner}.",
+            message=conflict_message,
         ) from exc
     except ReturnToAIDisabled as exc:
         raise _operator_error(

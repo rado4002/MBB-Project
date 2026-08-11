@@ -15,6 +15,7 @@ Switch adapters by changing env vars — no module code changes required:
     MESSAGING_ADAPTER=whatsapp
 """
 from functools import lru_cache
+from typing import Literal
 
 from app.adapters.base import (
     BaseAIAdapter,
@@ -28,15 +29,33 @@ from app.config import get_settings
 settings = get_settings()
 
 
-@lru_cache()
-def get_ai_adapter() -> BaseAIAdapter:
-    if settings.ai_adapter in {"disabled", "local"}:
+def _build_ai_adapter(configured_name: str) -> BaseAIAdapter:
+    if configured_name in {"disabled", "local"}:
         from app.adapters.ai.disabled_adapter import DisabledAIAdapter
         return DisabledAIAdapter()
-    if settings.ai_adapter == "claude":
+    if configured_name == "claude":
         from app.adapters.ai.claude_adapter import ClaudeAdapter
         return ClaudeAdapter()
-    raise ValueError(f"Unknown AI adapter: {settings.ai_adapter}")
+    raise ValueError(f"Unknown AI adapter: {configured_name}")
+
+
+@lru_cache()
+def get_ai_adapter() -> BaseAIAdapter:
+    return _build_ai_adapter(settings.ai_adapter)
+
+
+def ai_adapter_eligibility(
+    configured_name: str,
+) -> Literal["eligible", "disabled", "unavailable"]:
+    """Resolve local adapter usability without making a provider request."""
+    try:
+        adapter = _build_ai_adapter(configured_name)
+    except (ValueError, ImportError, RuntimeError):
+        return "unavailable"
+
+    from app.adapters.ai.disabled_adapter import DisabledAIAdapter
+
+    return "disabled" if isinstance(adapter, DisabledAIAdapter) else "eligible"
 
 
 @lru_cache()

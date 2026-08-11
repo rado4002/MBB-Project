@@ -33,6 +33,7 @@ async def test_turn_separates_policy_from_customer_runtime_content():
         AITurn(
             user_content=customer_text,
             language="lingala",
+            expected_ownership_version=7,
             history=(
                 {"direction": "inbound", "content": history_text},
                 {"direction": "outbound", "content": "prior assistant reply"},
@@ -44,6 +45,7 @@ async def test_turn_separates_policy_from_customer_runtime_content():
     assert len(adapter.calls) == 1
     request = adapter.calls[0]
     assert "turn_id" not in request
+    assert "expected_ownership_version" not in request
     assert request["system"] == get_system_policy("lingala").text
     assert customer_text not in request["system"]
     assert history_text not in request["system"]
@@ -57,7 +59,13 @@ async def test_turn_without_history_preserves_existing_user_prompt_shape():
     adapter = _RecordingAdapter()
     service = AITurnService(adapter)
 
-    await service.generate(AITurn(user_content="Mbote", language="french"))
+    await service.generate(
+        AITurn(
+            user_content="Mbote",
+            language="french",
+            expected_ownership_version=1,
+        )
+    )
 
     assert adapter.calls[0]["prompt"] == "Mbote"
 
@@ -72,7 +80,12 @@ async def test_turn_preserves_existing_six_message_history_window():
     )
 
     await service.generate(
-        AITurn(user_content="current message", language="french", history=history)
+        AITurn(
+            user_content="current message",
+            language="french",
+            expected_ownership_version=3,
+            history=history,
+        )
     )
 
     prompt = adapter.calls[0]["prompt"]
@@ -89,7 +102,13 @@ async def test_adapter_failure_propagates_for_m1_safe_fallback():
     service = AITurnService(_RecordingAdapter(error=failure))
 
     with pytest.raises(RuntimeError, match="adapter unavailable"):
-        await service.generate(AITurn(user_content="Mbote", language="french"))
+        await service.generate(
+            AITurn(
+                user_content="Mbote",
+                language="french",
+                expected_ownership_version=2,
+            )
+        )
 
 
 @pytest.mark.asyncio
@@ -99,7 +118,22 @@ async def test_disabled_adapter_preserves_safe_failure_without_network_client():
     service = AITurnService(DisabledAIAdapter())
 
     with pytest.raises(AIAdapterDisabled, match="AI adapter disabled"):
-        await service.generate(AITurn(user_content="Mbote", language="french"))
+        await service.generate(
+            AITurn(
+                user_content="Mbote",
+                language="french",
+                expected_ownership_version=2,
+            )
+        )
+
+
+def test_turn_requires_a_positive_ownership_generation():
+    with pytest.raises(ValueError, match="ownership version"):
+        AITurn(
+            user_content="Mbote",
+            language="french",
+            expected_ownership_version=0,
+        )
 
 
 def test_policy_is_explicitly_versioned_and_contains_authority_limits():
@@ -129,6 +163,23 @@ def test_new_ai_modules_are_provider_neutral():
     source = inspect.getsource(policy_module) + inspect.getsource(turn_module)
     for provider_term in ("DeepSeek", "OpenAI", "Anthropic", "reasoning_content"):
         assert provider_term not in source
+
+
+def test_return_eligibility_uses_the_local_adapter_factory_without_network():
+    from app.adapters import ai_adapter_eligibility
+
+    assert ai_adapter_eligibility("disabled") == "disabled"
+    assert ai_adapter_eligibility("local") == "disabled"
+    assert ai_adapter_eligibility("unknown-provider") == "unavailable"
+    assert ai_adapter_eligibility("claude") == "eligible"
+
+
+def test_ownership_business_service_has_no_provider_literal():
+    import app.modules.m4_conversation.ownership as ownership_module
+
+    source = inspect.getsource(ownership_module)
+    assert 'ai_adapter != "claude"' not in source
+    assert "get_ai_adapter" not in source
 
 
 def test_m1_business_seam_uses_turn_service_not_adapter_directly():

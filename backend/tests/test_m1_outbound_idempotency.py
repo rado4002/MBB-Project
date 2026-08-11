@@ -143,6 +143,11 @@ def _patch_normal_flow(
         return True
 
     monkeypatch.setattr(m1, "_ai_may_reply", _allow_ai)
+
+    async def _ownership_version(*_args, **_kwargs):
+        return 4
+
+    monkeypatch.setattr(m1, "_ai_reply_ownership_version", _ownership_version)
     monkeypatch.setattr(
         m1,
         "settings",
@@ -192,13 +197,51 @@ def test_human_ownership_stops_generation_persistence_and_send(monkeypatch):
         outbound_id=uuid.uuid4(),
     )
 
-    async def _pause_ai(*_args, **_kwargs):
+    async def _no_ai_generation(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        m1,
+        "_ai_reply_ownership_version",
+        _no_ai_generation,
+    )
+
+    async def _not_waiting(*_args, **_kwargs):
         return False
 
-    monkeypatch.setattr(m1, "_ai_may_reply", _pause_ai)
+    monkeypatch.setattr(m1, "_ai_is_waiting_for_human", _not_waiting)
     result = _run(_process(_Task()))
 
     assert result["status"] == "human_controlled"
+    assert result["send_status"] == "skipped"
+    assert events == ["inbound", "commit", "rollback"]
+    assert messaging.calls == []
+
+
+def test_waiting_for_human_suppresses_ai_without_claiming_human_ownership(
+    monkeypatch,
+):
+    events, messaging = _patch_normal_flow(
+        monkeypatch,
+        outbound_id=uuid.uuid4(),
+    )
+
+    async def _no_ai_generation(*_args, **_kwargs):
+        return None
+
+    async def _waiting(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(
+        m1,
+        "_ai_reply_ownership_version",
+        _no_ai_generation,
+    )
+    monkeypatch.setattr(m1, "_ai_is_waiting_for_human", _waiting)
+
+    result = _run(_process(_Task()))
+
+    assert result["status"] == "waiting_for_human"
     assert result["send_status"] == "skipped"
     assert events == ["inbound", "commit", "rollback"]
     assert messaging.calls == []
@@ -344,11 +387,57 @@ def test_last_moment_human_takeover_blocks_adapter_send(monkeypatch):
             "private-message",
             idempotency_key=str(uuid.uuid4()),
             conversation_id=uuid.uuid4(),
+            expected_ownership_version=4,
         )
     )
 
     assert result == {"status": "skipped"}
     assert events == ["rollback"]
+
+
+def test_complete_human_cycle_does_not_reauthorize_stale_ai_send(monkeypatch):
+    import app.adapters as adapters
+    import app.database as database
+
+    events = []
+    session = _Session(events)
+    observed_versions = []
+
+    async def _generation_gate(
+        *_args, expected_ownership_version=None, **_kwargs
+    ):
+        observed_versions.append(expected_ownership_version)
+        return False
+
+    monkeypatch.setattr(
+        m1,
+        "settings",
+        SimpleNamespace(whatsapp_send_enabled=True),
+    )
+    monkeypatch.setattr(m1, "_ai_may_reply", _generation_gate)
+    monkeypatch.setattr(
+        database,
+        "async_session_factory",
+        lambda: _SessionContext(session),
+    )
+    monkeypatch.setattr(
+        adapters,
+        "get_messaging_adapter",
+        lambda: pytest.fail("stale turn reached the messaging adapter"),
+    )
+
+    result = _run(
+        m1._send_safe(
+            "+243812345678",
+            "stale generation N output",
+            idempotency_key=str(uuid.uuid4()),
+            conversation_id=uuid.uuid4(),
+            expected_ownership_version=4,
+        )
+    )
+
+    assert result == {"status": "skipped"}
+    assert observed_versions == [4]
 
 
 def test_empty_provider_id_is_unknown_or_failed(monkeypatch):

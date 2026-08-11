@@ -7,9 +7,9 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 _CAPABILITY_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SAFE_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -18,6 +18,11 @@ _MODEL_FORBIDDEN_ARGUMENTS = frozenset(
     {
         "allowed_tools",
         "conversation_id",
+        "turn_id",
+        "ownership_version",
+        "expected_ownership_version",
+        "human_owner_account_id",
+        "owner_type",
         "customer_id",
         "business_id",
         "tenant_id",
@@ -40,6 +45,12 @@ class TrustedCapabilityContext:
     """MBB-supplied business scope that model arguments cannot modify."""
 
     conversation_id: uuid.UUID
+    turn_id: uuid.UUID
+    expected_ownership_version: int
+
+    def __post_init__(self) -> None:
+        if self.expected_ownership_version <= 0:
+            raise ValueError("expected ownership version must be positive")
 
 
 CapabilityHandler = Callable[
@@ -202,5 +213,66 @@ class CapabilityExecutor:
         )
 
 
-# Intentionally empty until an authoritative MBB business capability is approved.
-AI_CAPABILITY_REGISTRY = CapabilityRegistry(())
+class RequestHumanHandoffInput(StrictCapabilityModel):
+    reason_category: Literal[
+        "customer_requested_human",
+        "unsupported_action",
+        "policy_exception",
+        "insufficient_business_evidence",
+        "repeated_misunderstanding",
+        "required_capability_unavailable",
+    ]
+
+
+class RequestHumanHandoffOutput(StrictCapabilityModel):
+    state: Literal["waiting_for_human"]
+    ownership_version: int = Field(gt=0)
+    escalation_ticket_id: uuid.UUID
+    replayed: bool
+
+
+async def _request_human_handoff(
+    context: TrustedCapabilityContext,
+    _arguments: StrictCapabilityModel,
+) -> object:
+    from app.database import async_session_factory
+    from app.modules.m4_conversation.ai_handoff import (
+        AIHandoffConversationNotFound,
+        AIHandoffUnavailable,
+        StaleAIAuthority,
+        request_human_handoff,
+    )
+
+    async with async_session_factory() as session:
+        try:
+            result = await request_human_handoff(
+                session,
+                conversation_id=context.conversation_id,
+                expected_ownership_version=context.expected_ownership_version,
+            )
+        except AIHandoffConversationNotFound as exc:
+            raise SafeCapabilityError("conversation_not_found") from exc
+        except StaleAIAuthority as exc:
+            raise SafeCapabilityError("stale_ai_authority") from exc
+        except AIHandoffUnavailable as exc:
+            raise SafeCapabilityError("handoff_unavailable") from exc
+
+    return {
+        "state": "waiting_for_human",
+        "ownership_version": result.ownership_version,
+        "escalation_ticket_id": result.escalation_ticket_id,
+        "replayed": result.replayed,
+    }
+
+
+AI_CAPABILITY_REGISTRY = CapabilityRegistry(
+    (
+        CapabilityDefinition(
+            name="request_human_handoff",
+            description="Pause AI and request Human attention for this conversation.",
+            input_model=RequestHumanHandoffInput,
+            output_model=RequestHumanHandoffOutput,
+            handler=_request_human_handoff,
+        ),
+    )
+)

@@ -111,7 +111,11 @@ async def test_migration_round_trip_references_and_existing_rows_are_preserved()
     _migrate(DATABASE_URL, "upgrade", "head")
     engine = create_async_engine(DATABASE_URL)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    turn_id = AITurn(user_content="test", language="french").turn_id
+    turn_id = AITurn(
+        user_content="test",
+        language="french",
+        expected_ownership_version=1,
+    ).turn_id
     record = AITurnAuditRecord(
         turn_id=turn_id,
         conversation_id=conversation_id,
@@ -155,7 +159,11 @@ async def test_migration_round_trip_references_and_existing_rows_are_preserved()
         assert await session.scalar(select(func.count()).select_from(Message)) == 2
 
     missing_message = AITurnAuditRecord(
-        turn_id=AITurn(user_content="test", language="french").turn_id,
+        turn_id=AITurn(
+            user_content="test",
+            language="french",
+            expected_ownership_version=1,
+        ).turn_id,
         conversation_id=conversation_id,
         source_message_id=uuid.uuid4(),
         policy_version=AI_SYSTEM_POLICY_VERSION,
@@ -205,7 +213,7 @@ async def test_migration_round_trip_references_and_existing_rows_are_preserved()
         )
         assert await connection.scalar(
             text(
-                "SELECT version_num = 'f6a7b8c9d0e1' FROM mbb.alembic_version"
+                "SELECT version_num = 'a7b8c9d0e1f2' FROM mbb.alembic_version"
             )
         )
         assert await connection.scalar(text("SELECT COUNT(*) FROM mbb.customers")) == 1

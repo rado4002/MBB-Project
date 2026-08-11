@@ -10,11 +10,15 @@ B2_REVISION = "b2e2c3d4e5f6"
 C3_REVISION = "c3d4e5f6a7b8"
 D4_REVISION = "d4e5f6a7b8c9"
 E5_REVISION = "e5f6a7b8c9d0"
+F6_REVISION = "f6a7b8c9d0e1"
+A7_REVISION = "a7b8c9d0e1f2"
 
 
 def test_b1_b2_c3_are_additive_linear_reversible_migrations() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_current_head() == E5_REVISION
+    assert script.get_current_head() == A7_REVISION
+    assert script.get_revision(A7_REVISION).down_revision == F6_REVISION
+    assert script.get_revision(F6_REVISION).down_revision == E5_REVISION
     assert script.get_revision(E5_REVISION).down_revision == D4_REVISION
     assert script.get_revision(D4_REVISION).down_revision == C3_REVISION
     assert script.get_revision(C3_REVISION).down_revision == B2_REVISION

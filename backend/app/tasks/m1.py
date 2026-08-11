@@ -33,10 +33,39 @@ class _BaseTask(Task):
     default_retry_delay = 30
 
 
-async def _ai_may_reply(session, conversation_id: uuid.UUID, *, lock: bool = False) -> bool:
+async def _ai_may_reply(
+    session,
+    conversation_id: uuid.UUID,
+    *,
+    lock: bool = False,
+    expected_ownership_version: int | None = None,
+) -> bool:
     from app.modules.m4_conversation.ownership import ai_may_reply
 
-    return await ai_may_reply(session, conversation_id, lock=lock)
+    return await ai_may_reply(
+        session,
+        conversation_id,
+        lock=lock,
+        expected_ownership_version=expected_ownership_version,
+    )
+
+
+async def _ai_reply_ownership_version(
+    session,
+    conversation_id: uuid.UUID,
+) -> int | None:
+    from app.modules.m4_conversation.ownership import ai_reply_ownership_version
+
+    return await ai_reply_ownership_version(session, conversation_id)
+
+
+async def _ai_is_waiting_for_human(
+    session,
+    conversation_id: uuid.UUID,
+) -> bool:
+    from app.modules.m4_conversation.ownership import ai_is_waiting_for_human
+
+    return await ai_is_waiting_for_human(session, conversation_id)
 
 
 def _integrity_constraint_name(exc: IntegrityError) -> str | None:
@@ -100,6 +129,7 @@ async def _persist_outbound(
     content: str,
     language: str,
     processing_time_ms: int,
+    expected_ownership_version: int,
 ) -> uuid.UUID | None:
     """Persist and commit the response identity before any outbound attempt."""
     from app.database import async_session_factory
@@ -107,12 +137,17 @@ async def _persist_outbound(
 
     async with async_session_factory() as session:
         try:
-            if not await _ai_may_reply(session, conversation_id, lock=True):
+            if not await _ai_may_reply(
+                session,
+                conversation_id,
+                lock=True,
+                expected_ownership_version=expected_ownership_version,
+            ):
                 await session.rollback()
                 log.info(
                     "m1.persist_outbound.skipped",
                     conversation_id=str(conversation_id),
-                    reason="ai_paused",
+                    reason="ai_authority_changed",
                 )
                 return None
             outbound_id = await persist_outbound(
@@ -246,11 +281,27 @@ async def _process(
 
         conv_id = str(inbound.conversation_id)
         language = inbound.language
-        if not await _ai_may_reply(session, inbound.conversation_id):
+        expected_ownership_version = await _ai_reply_ownership_version(
+            session,
+            inbound.conversation_id,
+        )
+        if expected_ownership_version is None:
+            waiting_for_human = await _ai_is_waiting_for_human(
+                session,
+                inbound.conversation_id,
+            )
             await session.rollback()
-            log.info("m1.autonomous_reply.skipped", conv_id=conv_id, reason="human_owner")
+            log.info(
+                "m1.autonomous_reply.skipped",
+                conv_id=conv_id,
+                reason="ai_not_eligible",
+            )
             return {
-                "status": "human_controlled",
+                "status": (
+                    "waiting_for_human"
+                    if waiting_for_human
+                    else "human_controlled"
+                ),
                 "conversation_id": conv_id,
                 "send_status": "skipped",
             }
@@ -263,6 +314,7 @@ async def _process(
                 content=response_text,
                 language=language,
                 processing_time_ms=int((time.monotonic() - t0) * 1000),
+                expected_ownership_version=expected_ownership_version,
             )
             if outbound_id is None:
                 return _persistence_failure_result(conv_id)
@@ -271,6 +323,7 @@ async def _process(
                 response_text,
                 idempotency_key=str(outbound_id),
                 conversation_id=inbound.conversation_id,
+                expected_ownership_version=expected_ownership_version,
             )
             return {
                 "status": "opt_out",
@@ -293,6 +346,7 @@ async def _process(
                 content=response_text,
                 language=language,
                 processing_time_ms=int((time.monotonic() - t0) * 1000),
+                expected_ownership_version=expected_ownership_version,
             )
             if outbound_id is None:
                 return _persistence_failure_result(conv_id)
@@ -301,6 +355,7 @@ async def _process(
                 response_text,
                 idempotency_key=str(outbound_id),
                 conversation_id=inbound.conversation_id,
+                expected_ownership_version=expected_ownership_version,
             )
             return {
                 "status": "escalated_voice_note",
@@ -345,6 +400,7 @@ async def _process(
                 AITurn(
                     user_content=content,
                     language=language,
+                    expected_ownership_version=expected_ownership_version,
                     history=history,
                 )
             )
@@ -360,6 +416,7 @@ async def _process(
             content=ai_response,
             language=language,
             processing_time_ms=processing_ms,
+            expected_ownership_version=expected_ownership_version,
         )
         if out_msg_id is None:
             return _persistence_failure_result(conv_id)
@@ -426,6 +483,7 @@ async def _process(
             ai_response,
             idempotency_key=str(out_msg_id),
             conversation_id=inbound.conversation_id,
+            expected_ownership_version=expected_ownership_version,
         )
 
         log.info(
@@ -454,6 +512,7 @@ async def _send_safe(
     *,
     idempotency_key: str,
     conversation_id: uuid.UUID | None = None,
+    expected_ownership_version: int | None = None,
 ) -> dict[str, str]:
     """Send once through the adapter and report only confirmed outcomes."""
     from app.adapters import get_messaging_adapter
@@ -473,9 +532,17 @@ async def _send_safe(
             )
         else:
             async with async_session_factory() as session:
-                if not await _ai_may_reply(session, conversation_id, lock=True):
+                if expected_ownership_version is None or not await _ai_may_reply(
+                    session,
+                    conversation_id,
+                    lock=True,
+                    expected_ownership_version=expected_ownership_version,
+                ):
                     await session.rollback()
-                    log.info("m1.send_message.skipped", reason="ai_paused")
+                    log.info(
+                        "m1.send_message.skipped",
+                        reason="ai_authority_changed",
+                    )
                     return {"status": "skipped"}
                 adapter = get_messaging_adapter()
                 provider_message_id = await adapter.send_message(

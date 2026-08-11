@@ -14,11 +14,13 @@ from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.adapters import ai_adapter_eligibility
 from app.models.conversation import Conversation
 from app.models.conversation_ownership_idempotency import (
     ConversationOwnershipIdempotency,
 )
 from app.models.operator_account import OperatorAccount
+from app.models.escalation_ticket import EscalationTicket
 from app.operator_identity.audit import append_operator_audit_event
 
 _RESERVATION_LIFETIME = timedelta(minutes=5)
@@ -252,16 +254,66 @@ async def ai_may_reply(
     conversation_id: uuid.UUID,
     *,
     lock: bool = False,
+    expected_ownership_version: int | None = None,
 ) -> bool:
     """Read or lock the authoritative gate used by autonomous reply execution."""
     statement = select(
         Conversation.owner_type,
         Conversation.ai_execution_state,
+        Conversation.ownership_version,
     ).where(Conversation.conversation_id == conversation_id)
     if lock:
         statement = statement.with_for_update()
     row = (await session.execute(statement)).one_or_none()
-    return bool(row and row[0] == "ai" and row[1] == "eligible")
+    return bool(
+        row
+        and row[0] == "ai"
+        and row[1] == "eligible"
+        and (
+            expected_ownership_version is None
+            or row[2] == expected_ownership_version
+        )
+    )
+
+
+async def ai_reply_ownership_version(
+    session: AsyncSession,
+    conversation_id: uuid.UUID,
+) -> int | None:
+    """Return the trusted generation only while AI currently has authority."""
+    row = (
+        await session.execute(
+            select(
+                Conversation.owner_type,
+                Conversation.ai_execution_state,
+                Conversation.ownership_version,
+            ).where(Conversation.conversation_id == conversation_id)
+        )
+    ).one_or_none()
+    if row is None or row[0] != "ai" or row[1] != "eligible":
+        return None
+    return row[2]
+
+
+async def ai_is_waiting_for_human(
+    session: AsyncSession,
+    conversation_id: uuid.UUID,
+) -> bool:
+    row = (
+        await session.execute(
+            select(
+                Conversation.owner_type,
+                Conversation.human_owner_account_id,
+                Conversation.ai_execution_state,
+            ).where(Conversation.conversation_id == conversation_id)
+        )
+    ).one_or_none()
+    return bool(
+        row
+        and row[0] == "ai"
+        and row[1] is None
+        and row[2] == "paused"
+    )
 
 
 async def transition_ownership(
@@ -350,10 +402,11 @@ async def transition_ownership(
             ):
                 await _discard(session, reservation)
                 raise OwnershipConflict(current)
-            if ai_adapter in {"disabled", "local"}:
+            eligibility = ai_adapter_eligibility(ai_adapter)
+            if eligibility == "disabled":
                 await _discard(session, reservation)
                 raise ReturnToAIDisabled
-            if ai_adapter != "claude":
+            if eligibility != "eligible":
                 await _discard(session, reservation)
                 raise ReturnToAIUnavailable
             next_human_owner = None
@@ -381,6 +434,28 @@ async def transition_ownership(
         if changed.rowcount != 1:
             raise OwnershipTransitionUnavailable(
                 "ownership compare-and-set was not applied"
+            )
+        if target_owner_type == "human":
+            await session.execute(
+                update(EscalationTicket)
+                .where(
+                    EscalationTicket.conversation_id == conversation_id,
+                    EscalationTicket.source == "ai_capability",
+                    EscalationTicket.escalation_type == "human_handoff",
+                    EscalationTicket.status == "open",
+                )
+                .values(status="in_progress")
+            )
+        else:
+            await session.execute(
+                update(EscalationTicket)
+                .where(
+                    EscalationTicket.conversation_id == conversation_id,
+                    EscalationTicket.source == "ai_capability",
+                    EscalationTicket.escalation_type == "human_handoff",
+                    EscalationTicket.status.in_(("open", "in_progress")),
+                )
+                .values(status="closed")
             )
         await append_operator_audit_event(
             session,

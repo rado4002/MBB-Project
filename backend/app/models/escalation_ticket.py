@@ -16,7 +16,8 @@ class EscalationTicket(Base):
             "priority IN ('high', 'medium', 'low')", name="chk_esc_priority"
         ),
         CheckConstraint(
-            "reason IN ('voice_note', 'complex_complaint', 'high_value_lead', 'unresolved_3x', 'sav_issue')",
+            "reason IN ('voice_note', 'complex_complaint', 'high_value_lead', "
+            "'unresolved_3x', 'sav_issue', 'human_handoff')",
             name="chk_esc_reason",
         ),
         CheckConstraint(
@@ -24,12 +25,13 @@ class EscalationTicket(Base):
             name="chk_esc_status",
         ),
         CheckConstraint(
-            "source IN ('legacy', 'operator_browser')",
+            "source IN ('legacy', 'operator_browser', 'ai_capability')",
             name="chk_esc_source",
         ),
         CheckConstraint(
             "escalation_type IS NULL OR escalation_type IN "
-            "('voice_note', 'complex_issue', 'high_value_lead', 'payment_issue')",
+            "('voice_note', 'complex_issue', 'high_value_lead', 'payment_issue', "
+            "'human_handoff')",
             name="chk_esc_escalation_type",
         ),
         CheckConstraint(
@@ -42,6 +44,12 @@ class EscalationTicket(Base):
             "(escalation_type IS NOT NULL AND operator_reason IS NOT NULL "
             "AND created_by_account_id IS NOT NULL)",
             name="chk_esc_operator_browser_fields",
+        ),
+        CheckConstraint(
+            "source <> 'ai_capability' OR "
+            "(escalation_type = 'human_handoff' AND reason = 'human_handoff' "
+            "AND operator_reason IS NULL AND created_by_account_id IS NULL)",
+            name="chk_esc_ai_capability_fields",
         ),
         Index("idx_esc_conversation", "conversation_id"),
         Index("idx_esc_customer", "customer_id"),

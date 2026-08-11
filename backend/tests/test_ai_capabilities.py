@@ -41,6 +41,14 @@ def _definition(name, handler):
     )
 
 
+def _context() -> TrustedCapabilityContext:
+    return TrustedCapabilityContext(
+        conversation_id=uuid.uuid4(),
+        turn_id=uuid.uuid4(),
+        expected_ownership_version=3,
+    )
+
+
 def test_registry_is_explicit_resolvable_and_rejects_duplicates():
     async def handler(_context, arguments):
         return {"value": arguments.text}
@@ -62,7 +70,7 @@ async def test_unknown_tool_fails_safely():
         requested_name="not_registered",
         model_arguments={},
         allowed_capabilities={"not_registered"},
-        context=TrustedCapabilityContext(conversation_id=uuid.uuid4()),
+        context=_context(),
     )
 
     assert result == CapabilityFailure(CapabilityErrorCategory.unknown_tool)
@@ -84,7 +92,7 @@ async def test_model_can_request_but_cannot_grant_itself_a_capability():
         (_definition("tool_a", tool_a), _definition("tool_b", tool_b))
     )
     executor = CapabilityExecutor(registry)
-    trusted_context = TrustedCapabilityContext(conversation_id=uuid.uuid4())
+    trusted_context = _context()
 
     denied = await executor.execute(
         requested_name="tool_b",
@@ -129,7 +137,7 @@ async def test_valid_input_executes_with_separate_trusted_context():
     executor = CapabilityExecutor(
         CapabilityRegistry((_definition("echo_value", handler),))
     )
-    context = TrustedCapabilityContext(conversation_id=uuid.uuid4())
+    context = _context()
 
     result = await executor.execute(
         requested_name="echo_value",
@@ -168,7 +176,7 @@ async def test_invalid_input_never_invokes_handler(arguments):
         requested_name="echo_value",
         model_arguments=arguments,
         allowed_capabilities={"echo_value"},
-        context=TrustedCapabilityContext(conversation_id=uuid.uuid4()),
+        context=_context(),
     )
 
     assert result == CapabilityFailure(CapabilityErrorCategory.invalid_arguments)
@@ -189,7 +197,7 @@ async def test_invalid_handler_output_fails_without_returning_internal_object():
         requested_name="echo_value",
         model_arguments={"text": "valid", "count": 1},
         allowed_capabilities={"echo_value"},
-        context=TrustedCapabilityContext(conversation_id=uuid.uuid4()),
+        context=_context(),
     )
 
     assert result == CapabilityFailure(CapabilityErrorCategory.execution_failed)
@@ -212,7 +220,7 @@ async def test_safe_and_unexpected_errors_do_not_leak_internal_details():
         )
     )
     executor = CapabilityExecutor(registry)
-    context = TrustedCapabilityContext(conversation_id=uuid.uuid4())
+    context = _context()
     arguments = {"text": "valid", "count": 1}
 
     safe_result = await executor.execute(
@@ -256,9 +264,44 @@ def test_provider_neutral_specification_exposes_only_allowed_registered_tools():
     assert set(specifications[0].input_schema["properties"]) == {"text", "count"}
 
 
-def test_production_registry_is_intentionally_empty():
-    assert len(AI_CAPABILITY_REGISTRY) == 0
+def test_production_registry_contains_only_the_approved_handoff_capability():
+    assert len(AI_CAPABILITY_REGISTRY) == 1
     assert AI_CAPABILITY_REGISTRY.specifications(set()) == ()
+    specifications = AI_CAPABILITY_REGISTRY.specifications(
+        {"request_human_handoff"}
+    )
+    assert len(specifications) == 1
+    assert specifications[0].name == "request_human_handoff"
+    assert set(specifications[0].input_schema["properties"]) == {
+        "reason_category"
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "authority_argument",
+    (
+        "conversation_id",
+        "turn_id",
+        "ownership_version",
+        "expected_ownership_version",
+        "human_owner_account_id",
+        "owner_type",
+        "allowed_tools",
+    ),
+)
+async def test_handoff_rejects_model_supplied_authority(authority_argument):
+    result = await CapabilityExecutor(AI_CAPABILITY_REGISTRY).execute(
+        requested_name="request_human_handoff",
+        model_arguments={
+            "reason_category": "customer_requested_human",
+            authority_argument: "model-controlled",
+        },
+        allowed_capabilities={"request_human_handoff"},
+        context=_context(),
+    )
+
+    assert result == CapabilityFailure(CapabilityErrorCategory.invalid_arguments)
 
 
 def test_core_source_is_provider_neutral_and_has_no_dynamic_discovery():

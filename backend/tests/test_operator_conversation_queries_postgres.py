@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 from fastapi import Response
-from sqlalchemy import insert, text
+from sqlalchemy import insert, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.api.browser_auth_deps import BrowserPrincipal, BrowserSessionContext
@@ -221,6 +221,11 @@ async def test_realistic_query_counts_and_postgresql_plans() -> None:
             session = AsyncSession(bind=connection, expire_on_commit=False)
             try:
                 conversation_ids = await _seed_disposable_rows(session)
+                await session.execute(
+                    update(Conversation)
+                    .where(Conversation.conversation_id == conversation_ids[0])
+                    .values(ai_execution_state="paused", ownership_version=2)
+                )
                 counted = CountingSession(session)
 
                 queue = await list_operator_conversations(
@@ -246,6 +251,11 @@ async def test_realistic_query_counts_and_postgresql_plans() -> None:
                     db=counted,
                 )
                 assert detail.conversation_id == conversation_ids[0]
+                assert detail.ownership.owner_type == "ai"
+                assert detail.ownership.human_owner is None
+                assert detail.ownership.ai_execution_state == "paused"
+                assert detail.ownership.version == 2
+                assert detail.open_escalation.exists is True
                 assert len(counted.statements) == 1
                 detail_statement = counted.statements[0]
 

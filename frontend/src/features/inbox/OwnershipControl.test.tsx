@@ -42,6 +42,26 @@ function humanQueue(): OperatorConversationQueueItem {
   }
 }
 
+function waitingDetail(): OperatorConversationDetail {
+  return {
+    ...conversationDetailFixture(),
+    ownership: {
+      ...conversationDetailFixture().ownership,
+      ai_execution_state: 'paused',
+      version: 2,
+    },
+    open_escalation: { exists: true },
+  }
+}
+
+function waitingQueue(): OperatorConversationQueueItem {
+  return {
+    ...conversationFixture(),
+    ownership: waitingDetail().ownership,
+    open_escalation: { exists: true },
+  }
+}
+
 function handlers(
   detail: () => OperatorConversationDetail = conversationDetailFixture,
   queue: () => OperatorConversationQueueItem = conversationFixture,
@@ -68,6 +88,19 @@ function handlers(
 }
 
 describe('Human and AI conversation ownership control', () => {
+  it('renders paused AI authority truthfully as waiting for Human', async () => {
+    server.use(...handlers(waitingDetail, waitingQueue))
+    const { container } = renderApp('/inbox/' + conversationId)
+
+    expect((await screen.findAllByText('Waiting for Human')).length).toBeGreaterThan(0)
+    expect(screen.queryByText('Controlled by MBB AI Assistant')).not.toBeInTheDocument()
+    expect(screen.getAllByText('Open escalation').length).toBeGreaterThan(0)
+    expect(
+      screen.getByText('Reply unavailable — waiting for a Human Operator to take control.'),
+    ).toBeInTheDocument()
+    await expectAccessible(container)
+  })
+
   it('shows exactly one contextual action and no ticket-style fields', async () => {
     server.use(...handlers())
     const user = userEvent.setup()

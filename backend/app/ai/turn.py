@@ -18,8 +18,13 @@ class AITurn:
 
     user_content: str
     language: str
+    expected_ownership_version: int
     history: Sequence[Mapping[str, str]] = ()
     turn_id: uuid.UUID = field(default_factory=uuid.uuid4, init=False)
+
+    def __post_init__(self) -> None:
+        if self.expected_ownership_version <= 0:
+            raise ValueError("expected ownership version must be positive")
 
 
 class AITurnService:

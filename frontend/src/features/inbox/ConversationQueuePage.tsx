@@ -99,7 +99,9 @@ function QueueRow({
             <span>{languageLabels[item.language]}</span>
             <span>
               {item.ownership.owner_type === 'ai'
-                ? 'Controlled by MBB AI Assistant'
+                ? item.ownership.ai_execution_state === 'paused'
+                  ? 'Waiting for Human'
+                  : 'Controlled by MBB AI Assistant'
                 : `Controlled by ${item.ownership.human_owner?.display_name ?? 'Human Operator'}`}
             </span>
             {item.open_escalation.exists ? <span>Open escalation</span> : null}
