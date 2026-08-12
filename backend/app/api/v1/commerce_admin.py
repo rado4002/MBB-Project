@@ -39,6 +39,11 @@ from app.schemas.commerce_admin import (
     PriceResponse,
     ProductCreate,
     ProductListResponse,
+    ProductMediaCreate,
+    ProductMediaListResponse,
+    ProductMediaResponse,
+    ProductMediaSetPrimary,
+    ProductMediaUpdate,
     ProductResponse,
     ProductUpdate,
     SellableItemCreate,
@@ -289,6 +294,140 @@ async def update_sellable_item(
     )
     _no_store(response)
     return SellableItemResponse.model_validate(item)
+
+
+@router.get("/product-media/{media_id}", response_model=ProductMediaResponse)
+async def get_product_media(
+    media_id: UUID,
+    response: Response,
+    _principal: Annotated[BrowserPrincipal, Depends(_require_commerce_manager)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ProductMediaResponse:
+    media = await _read_or_raise(catalog_service.get_media(db, media_id))
+    if media is None:
+        raise _map_error(catalog_service.CatalogNotFound())
+    _no_store(response)
+    return ProductMediaResponse.model_validate(media)
+
+
+@router.get(
+    "/products/{product_id}/media", response_model=ProductMediaListResponse
+)
+async def list_product_media(
+    product_id: UUID,
+    response: Response,
+    _principal: Annotated[BrowserPrincipal, Depends(_require_commerce_manager)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ProductMediaListResponse:
+    items = await _read_or_raise(
+        catalog_service.list_product_media(db, product_id, active_only=False)
+    )
+    _no_store(response)
+    return ProductMediaListResponse(
+        items=[ProductMediaResponse.model_validate(item) for item in items]
+    )
+
+
+@router.get(
+    "/sellable-items/{sellable_item_id}/media",
+    response_model=ProductMediaListResponse,
+)
+async def list_sellable_item_media(
+    sellable_item_id: UUID,
+    response: Response,
+    _principal: Annotated[BrowserPrincipal, Depends(_require_commerce_manager)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ProductMediaListResponse:
+    items = await _read_or_raise(
+        catalog_service.list_sellable_item_media(
+            db, sellable_item_id, active_only=False
+        )
+    )
+    _no_store(response)
+    return ProductMediaListResponse(
+        items=[ProductMediaResponse.model_validate(item) for item in items]
+    )
+
+
+@router.post(
+    "/product-media",
+    response_model=ProductMediaResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_product_media(
+    body: ProductMediaCreate,
+    request: Request,
+    response: Response,
+    principal: Annotated[BrowserPrincipal, Depends(_require_commerce_manager)],
+    _csrf: Annotated[BrowserPrincipal, Depends(require_csrf)],
+    _recent: Annotated[BrowserPrincipal, Depends(require_recent_reauthentication)],
+    settings: Annotated[Settings, Depends(get_browser_settings)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ProductMediaResponse:
+    _write_guard(request, settings)
+    media = await _commit_or_raise(
+        db,
+        catalog_service.create_product_media(
+            db,
+            **body.model_dump(),
+            administrator=_administrator(request, principal),
+        ),
+    )
+    _no_store(response)
+    return ProductMediaResponse.model_validate(media)
+
+
+@router.patch("/product-media/{media_id}", response_model=ProductMediaResponse)
+async def update_product_media(
+    media_id: UUID,
+    body: ProductMediaUpdate,
+    request: Request,
+    response: Response,
+    principal: Annotated[BrowserPrincipal, Depends(_require_commerce_manager)],
+    _csrf: Annotated[BrowserPrincipal, Depends(require_csrf)],
+    _recent: Annotated[BrowserPrincipal, Depends(require_recent_reauthentication)],
+    settings: Annotated[Settings, Depends(get_browser_settings)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ProductMediaResponse:
+    _write_guard(request, settings)
+    media = await _commit_or_raise(
+        db,
+        catalog_service.update_product_media(
+            db,
+            media_id=media_id,
+            administrator=_administrator(request, principal),
+            **body.model_dump(exclude_unset=True),
+        ),
+    )
+    _no_store(response)
+    return ProductMediaResponse.model_validate(media)
+
+
+@router.put(
+    "/product-media/{media_id}/primary", response_model=ProductMediaResponse
+)
+async def set_primary_product_media(
+    media_id: UUID,
+    _body: ProductMediaSetPrimary,
+    request: Request,
+    response: Response,
+    principal: Annotated[BrowserPrincipal, Depends(_require_commerce_manager)],
+    _csrf: Annotated[BrowserPrincipal, Depends(require_csrf)],
+    _recent: Annotated[BrowserPrincipal, Depends(require_recent_reauthentication)],
+    settings: Annotated[Settings, Depends(get_browser_settings)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ProductMediaResponse:
+    _write_guard(request, settings)
+    media = await _commit_or_raise(
+        db,
+        catalog_service.set_primary_media(
+            db,
+            media_id=media_id,
+            administrator=_administrator(request, principal),
+        ),
+    )
+    _no_store(response)
+    return ProductMediaResponse.model_validate(media)
 
 
 @router.get("/sellable-items/{sellable_item_id}/prices", response_model=PriceHistoryResponse)

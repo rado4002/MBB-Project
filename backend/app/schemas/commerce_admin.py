@@ -19,6 +19,11 @@ from pydantic import (
 )
 
 from app.models.catalog import (
+    MAX_MEDIA_ALT_TEXT_LENGTH,
+    MAX_MEDIA_ASSET_URL_LENGTH,
+    MAX_MEDIA_DISPLAY_ORDER,
+    normalize_media_alt_text,
+    normalize_media_asset_url,
     normalize_category_code,
     normalize_optional_label,
     normalize_required_text,
@@ -178,6 +183,87 @@ class SellableItemResponse(StrictCommerceModel):
 
 class SellableItemListResponse(StrictCommerceModel):
     items: list[SellableItemResponse]
+
+
+class ProductMediaCreate(StrictCommerceModel):
+    product_id: UUID | None = None
+    sellable_item_id: UUID | None = None
+    asset_url: str = Field(min_length=1, max_length=MAX_MEDIA_ASSET_URL_LENGTH)
+    alt_text: str | None = Field(default=None, max_length=MAX_MEDIA_ALT_TEXT_LENGTH)
+    is_primary: bool = False
+    display_order: int = Field(default=0, ge=0, le=MAX_MEDIA_DISPLAY_ORDER)
+    active: bool = True
+
+    @field_validator("asset_url")
+    @classmethod
+    def _asset_url(cls, value: str) -> str:
+        return normalize_media_asset_url(value)
+
+    @field_validator("alt_text")
+    @classmethod
+    def _alt_text(cls, value: str | None) -> str | None:
+        return normalize_media_alt_text(value)
+
+    @model_validator(mode="after")
+    def _exactly_one_owner(self) -> "ProductMediaCreate":
+        if (self.product_id is None) == (self.sellable_item_id is None):
+            raise ValueError("exactly one Product Media owner is required")
+        if self.is_primary and not self.active:
+            raise ValueError("primary media must be active")
+        return self
+
+
+class ProductMediaUpdate(StrictCommerceModel):
+    asset_url: str | None = Field(
+        default=None, min_length=1, max_length=MAX_MEDIA_ASSET_URL_LENGTH
+    )
+    alt_text: str | None = Field(default=None, max_length=MAX_MEDIA_ALT_TEXT_LENGTH)
+    display_order: int | None = Field(
+        default=None, ge=0, le=MAX_MEDIA_DISPLAY_ORDER
+    )
+    active: bool | None = None
+
+    @field_validator("asset_url")
+    @classmethod
+    def _asset_url(cls, value: str | None) -> str | None:
+        return None if value is None else normalize_media_asset_url(value)
+
+    @field_validator("alt_text")
+    @classmethod
+    def _alt_text(cls, value: str | None) -> str | None:
+        return normalize_media_alt_text(value)
+
+    @model_validator(mode="after")
+    def _provided_fields_are_valid(self) -> "ProductMediaUpdate":
+        for field in ("asset_url", "display_order", "active"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f"{field} cannot be null")
+        return self
+
+
+class ProductMediaSetPrimary(StrictCommerceModel):
+    pass
+
+
+class ProductMediaResponse(StrictCommerceModel):
+    model_config = ConfigDict(
+        extra="forbid", from_attributes=True, protected_namespaces=()
+    )
+
+    media_id: UUID
+    product_id: UUID | None
+    sellable_item_id: UUID | None
+    asset_url: str
+    alt_text: str | None
+    is_primary: bool
+    display_order: int
+    active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProductMediaListResponse(StrictCommerceModel):
+    items: list[ProductMediaResponse]
 
 
 def _reject_float(value: object) -> object:

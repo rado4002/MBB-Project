@@ -22,7 +22,8 @@ from app.api.browser_auth_errors import (
 from app.api.v1 import auth, commerce_admin
 from app.config import Settings
 from app.database import get_db
-from app.models.catalog import Product
+from app.models.catalog import Product, ProductMedia
+from app.models.operator_audit import OperatorAuditEvent
 from app.models.operator_account import OperatorAccount
 from app.operator_identity.browser_auth import SESSION_COOKIE_NAME
 from app.operator_identity.passwords import hash_password
@@ -233,3 +234,118 @@ async def test_disabled_browser_account_session_fails_closed(harness) -> None:
             await session.commit()
         response = await client.get("/api/v1/operator/commerce/products")
         assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_product_media_maintenance_is_administrator_only_and_audited(
+    harness,
+) -> None:
+    transport, factory, _administrator_id = harness
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as administrator:
+        csrf = await _login(administrator, "commerce.admin", ADMIN_PASSWORD)
+        product = await administrator.post(
+            "/api/v1/operator/commerce/products",
+            headers=_headers(csrf),
+            json={
+                "name": "Fictional Media Fryer",
+                "category_code": "air_fryer",
+                "description": "Fictional API media fixture.",
+            },
+        )
+        assert product.status_code == 201
+        product_id = product.json()["product_id"]
+        created = await administrator.post(
+            "/api/v1/operator/commerce/product-media",
+            headers=_headers(csrf),
+            json={
+                "product_id": product_id,
+                "asset_url": "https://example.invalid/product/admin.jpg",
+                "alt_text": "Fictional product front view",
+                "is_primary": True,
+                "display_order": 1,
+            },
+        )
+        assert created.status_code == 201
+        assert created.json()["is_primary"] is True
+        media_id = created.json()["media_id"]
+        listed = await administrator.get(
+            f"/api/v1/operator/commerce/products/{product_id}/media"
+        )
+        assert listed.status_code == 200
+        assert [item["media_id"] for item in listed.json()["items"]] == [media_id]
+        updated = await administrator.patch(
+            f"/api/v1/operator/commerce/product-media/{media_id}",
+            headers=_headers(csrf),
+            json={"alt_text": "Updated fictional product front view"},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["alt_text"] == "Updated fictional product front view"
+        primary = await administrator.put(
+            f"/api/v1/operator/commerce/product-media/{media_id}/primary",
+            headers=_headers(csrf),
+            json={},
+        )
+        assert primary.status_code == 200
+
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as operator:
+        operator_csrf = await _login(operator, "commerce.operator", OPERATOR_PASSWORD)
+        denied = await operator.patch(
+            f"/api/v1/operator/commerce/product-media/{media_id}",
+            headers=_headers(operator_csrf),
+            json={"active": False},
+        )
+        assert denied.status_code == 403
+
+    async with factory() as session:
+        media = await session.get(ProductMedia, uuid.UUID(media_id))
+        assert media is not None and media.active is True
+        actions = list(
+            (
+                await session.scalars(
+                    select(OperatorAuditEvent.action).where(
+                        OperatorAuditEvent.target_type == "product_media",
+                        OperatorAuditEvent.target_id == media_id,
+                    )
+                )
+            ).all()
+        )
+        assert actions == [
+            "commerce.product_media.created",
+            "commerce.product_media.updated",
+            "commerce.product_media.primary_changed",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_product_media_writes_keep_browser_and_payload_guards(harness) -> None:
+    transport, _factory, _administrator_id = harness
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        csrf = await _login(client, "commerce.admin", ADMIN_PASSWORD)
+        body = {
+            "product_id": str(uuid.uuid4()),
+            "asset_url": "https://example.invalid/product/admin.jpg",
+        }
+        no_csrf = await client.post(
+            "/api/v1/operator/commerce/product-media",
+            headers={"Origin": ORIGIN, "Content-Type": "application/json"},
+            json=body,
+        )
+        assert no_csrf.status_code == 403
+        bad_origin = await client.post(
+            "/api/v1/operator/commerce/product-media",
+            headers=_headers(csrf, origin="https://attacker.example"),
+            json=body,
+        )
+        assert bad_origin.status_code == 403
+        unsafe_url = await client.post(
+            "/api/v1/operator/commerce/product-media",
+            headers=_headers(csrf),
+            json={**body, "asset_url": "http://example.invalid/product/admin.jpg"},
+        )
+        assert unsafe_url.status_code == 422
+        unknown_field = await client.post(
+            "/api/v1/operator/commerce/product-media",
+            headers=_headers(csrf),
+            json={**body, "storage_bucket": "not-authorized"},
+        )
+        assert unknown_field.status_code == 422

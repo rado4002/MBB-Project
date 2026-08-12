@@ -23,7 +23,7 @@ from app.models.ai_turn_audit import AITurnAudit
 from app.models.operator_escalation_idempotency import (
     OperatorEscalationIdempotency,
 )
-from app.models.catalog import Product, SellableItem
+from app.models.catalog import Product, ProductMedia, SellableItem
 from app.models.pricing import ExchangeRate, SellableItemPrice
 from app.models.inventory import InventoryRecord
 
@@ -47,6 +47,7 @@ __all__ = [
     "AITurnAudit",
     "OperatorEscalationIdempotency",
     "Product",
+    "ProductMedia",
     "SellableItem",
     "SellableItemPrice",
     "ExchangeRate",

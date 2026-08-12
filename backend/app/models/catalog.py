@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import re
 import uuid
+from ipaddress import ip_address
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from sqlalchemy import (
     TIMESTAMP,
@@ -25,6 +27,10 @@ from app.database import Base
 MAX_ATTRIBUTE_KEYS = 20
 MAX_ATTRIBUTE_KEY_LENGTH = 40
 MAX_ATTRIBUTE_TEXT_LENGTH = 200
+MAX_PRODUCT_MEDIA_PER_OWNER = 10
+MAX_MEDIA_ASSET_URL_LENGTH = 2048
+MAX_MEDIA_ALT_TEXT_LENGTH = 500
+MAX_MEDIA_DISPLAY_ORDER = 999
 _CATEGORY_RE = re.compile(r"^[a-z][a-z0-9_]{0,49}$")
 _ATTRIBUTE_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 _SKU_RE = re.compile(r"^[A-Z0-9][A-Z0-9._-]{0,63}$")
@@ -93,6 +99,50 @@ def validate_sellable_attributes(value: Any) -> dict[str, str | int | bool]:
         else:
             raise ValueError("attribute values must be strings, integers, or booleans")
     return validated
+
+
+def normalize_media_asset_url(value: str) -> str:
+    normalized = value.strip()
+    if not normalized or len(normalized) > MAX_MEDIA_ASSET_URL_LENGTH:
+        raise ValueError(
+            f"asset_url must contain between 1 and {MAX_MEDIA_ASSET_URL_LENGTH} characters"
+        )
+    try:
+        parsed = urlsplit(normalized)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("asset_url must be a valid absolute HTTPS URL") from exc
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        raise ValueError("asset_url must be a valid absolute HTTPS URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("asset_url must not contain credentials")
+    if any(character.isspace() for character in normalized):
+        raise ValueError("asset_url must not contain whitespace")
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("asset_url has an invalid port")
+    hostname = parsed.hostname.rstrip(".").lower()
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        raise ValueError("asset_url must not reference localhost")
+    try:
+        address = ip_address(hostname)
+    except ValueError:
+        address = None
+    if address is not None and not address.is_global:
+        raise ValueError("asset_url must not reference a non-public IP address")
+    return normalized
+
+
+def normalize_media_alt_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if len(normalized) > MAX_MEDIA_ALT_TEXT_LENGTH:
+        raise ValueError(
+            f"alt_text must not exceed {MAX_MEDIA_ALT_TEXT_LENGTH} characters"
+        )
+    return normalized
 
 
 class Product(Base):
@@ -220,3 +270,115 @@ class SellableItem(Base):
         self, _key: str, value: Any
     ) -> dict[str, str | int | bool]:
         return validate_sellable_attributes(value)
+
+
+class ProductMedia(Base):
+    __tablename__ = "product_media"
+    __table_args__ = (
+        CheckConstraint(
+            "(product_id IS NOT NULL AND sellable_item_id IS NULL) OR "
+            "(product_id IS NULL AND sellable_item_id IS NOT NULL)",
+            name="chk_product_media_exactly_one_owner",
+        ),
+        CheckConstraint(
+            "char_length(asset_url) BETWEEN 1 AND 2048 "
+            "AND lower(asset_url) LIKE 'https://%'",
+            name="chk_product_media_asset_url",
+        ),
+        CheckConstraint(
+            "alt_text IS NULL OR char_length(btrim(alt_text)) BETWEEN 1 AND 500",
+            name="chk_product_media_alt_text_length",
+        ),
+        CheckConstraint(
+            "display_order BETWEEN 0 AND 999",
+            name="chk_product_media_display_order",
+        ),
+        CheckConstraint(
+            "NOT is_primary OR active",
+            name="chk_product_media_primary_active",
+        ),
+        Index(
+            "uq_product_media_active_primary_product",
+            "product_id",
+            unique=True,
+            postgresql_where=text(
+                "product_id IS NOT NULL AND active AND is_primary"
+            ),
+        ),
+        Index(
+            "uq_product_media_active_primary_sellable_item",
+            "sellable_item_id",
+            unique=True,
+            postgresql_where=text(
+                "sellable_item_id IS NOT NULL AND active AND is_primary"
+            ),
+        ),
+        Index(
+            "idx_product_media_product_active_order",
+            "product_id",
+            "active",
+            "display_order",
+        ),
+        Index(
+            "idx_product_media_sellable_item_active_order",
+            "sellable_item_id",
+            "active",
+            "display_order",
+        ),
+        {"schema": "mbb"},
+    )
+
+    media_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    product_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "mbb.products.product_id",
+            name="fk_product_media_product_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    sellable_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "mbb.sellable_items.sellable_item_id",
+            name="fk_product_media_sellable_item_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    asset_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    alt_text: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    is_primary: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("FALSE")
+    )
+    display_order: Mapped[int] = mapped_column(
+        nullable=False, server_default=text("0")
+    )
+    active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("TRUE")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+
+    @validates("asset_url")
+    def _validate_asset_url(self, _key: str, value: str) -> str:
+        return normalize_media_asset_url(value)
+
+    @validates("alt_text")
+    def _validate_alt_text(self, _key: str, value: str | None) -> str | None:
+        return normalize_media_alt_text(value)
+
+    @validates("display_order")
+    def _validate_display_order(self, _key: str, value: int) -> int:
+        if type(value) is not int or not 0 <= value <= MAX_MEDIA_DISPLAY_ORDER:
+            raise ValueError(
+                f"display_order must be between 0 and {MAX_MEDIA_DISPLAY_ORDER}"
+            )
+        return value

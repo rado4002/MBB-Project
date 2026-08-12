@@ -64,6 +64,14 @@ def _rate() -> SimpleNamespace:
     )
 
 
+def _media(*, suffix: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        media_id=uuid.uuid4(),
+        asset_url=f"https://example.invalid/product/{suffix}.jpg",
+        alt_text=f"Fictional {suffix} image",
+    )
+
+
 def _offer(
     *,
     product=None,
@@ -119,10 +127,26 @@ def test_offer_preserves_materially_different_commercial_states(
     reason: str,
 ) -> None:
     offer = _offer(product=product, item=item, price=price, inventory=inventory)
+    offer_with_media = _compose_offer(
+        ProductOfferRow(
+            product,
+            item,
+            price,
+            inventory,
+            None,
+            None,
+            _media(suffix="status-proof"),
+        ),
+        read_at=datetime(2026, 8, 13, 1, 2, 3, tzinfo=timezone.utc),
+    )
 
     assert offer.offer_status == status
     assert offer.reason_code == reason
     assert offer.is_sellable_now is False
+    assert offer_with_media.offer_status == offer.offer_status
+    assert offer_with_media.reason_code == offer.reason_code
+    assert offer_with_media.is_sellable_now == offer.is_sellable_now
+    assert offer_with_media.primary_media is not None
 
 
 def test_missing_fx_rate_does_not_create_cdf_price_authority() -> None:
@@ -148,6 +172,51 @@ def test_product_offer_contract_rejects_unknown_fields() -> None:
 
     with pytest.raises(ValidationError):
         ProductOfferResponse.model_validate(valid)
+
+
+def test_sellable_item_primary_media_overrides_product_media() -> None:
+    item_media = _media(suffix="model8l")
+    product_media = _media(suffix="product")
+    offer = _compose_offer(
+        ProductOfferRow(
+            _product(),
+            _item(),
+            _price(),
+            _inventory("available"),
+            _rate(),
+            item_media,
+            product_media,
+        ),
+        read_at=datetime(2026, 8, 13, 1, 2, 3, tzinfo=timezone.utc),
+    )
+
+    assert offer.primary_media is not None
+    assert offer.primary_media.media_id == item_media.media_id
+    assert offer.primary_media.source_scope == "sellable_item"
+    assert offer.offer_status == "sellable_now"
+
+
+def test_product_primary_media_is_fallback_and_does_not_change_status() -> None:
+    product_media = _media(suffix="product")
+    without_media = _offer(price=_price(), inventory=_inventory("out_of_stock"))
+    with_media = _compose_offer(
+        ProductOfferRow(
+            _product(),
+            _item(),
+            _price(),
+            _inventory("out_of_stock"),
+            None,
+            None,
+            product_media,
+        ),
+        read_at=datetime(2026, 8, 13, 1, 2, 3, tzinfo=timezone.utc),
+    )
+
+    assert without_media.primary_media is None
+    assert with_media.primary_media is not None
+    assert with_media.primary_media.source_scope == "product"
+    assert with_media.offer_status == without_media.offer_status == "out_of_stock"
+    assert with_media.is_sellable_now is without_media.is_sellable_now is False
 
 
 def test_search_input_helpers_preserve_bounded_deterministic_filters() -> None:

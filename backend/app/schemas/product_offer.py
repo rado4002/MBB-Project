@@ -33,6 +33,7 @@ CdfQuoteUnavailableReason = Literal[
     "current_usd_price_unavailable",
     "current_fx_unavailable",
 ]
+PrimaryMediaSourceScope = Literal["product", "sellable_item"]
 
 
 class StrictProductOfferModel(BaseModel):
@@ -47,6 +48,13 @@ class DerivedCdfQuoteResponse(StrictProductOfferModel):
     exchange_rate_effective_at: datetime
 
 
+class ProductOfferPrimaryMediaResponse(StrictProductOfferModel):
+    media_id: UUID
+    asset_url: str
+    alt_text: str | None
+    source_scope: PrimaryMediaSourceScope
+
+
 class ProductOfferResponse(StrictProductOfferModel):
     product_id: UUID
     sellable_item_id: UUID
@@ -57,6 +65,7 @@ class ProductOfferResponse(StrictProductOfferModel):
     description: str
     model_label: str | None
     attributes: dict[str, AttributeValue]
+    primary_media: ProductOfferPrimaryMediaResponse | None
 
     price_id: UUID | None
     current_usd_price: Decimal | None

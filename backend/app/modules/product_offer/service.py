@@ -9,8 +9,9 @@ from typing import NamedTuple
 
 from sqlalchemy import and_, case, desc, func, nulls_last, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
-from app.models.catalog import Product, SellableItem, normalize_category_code
+from app.models.catalog import Product, ProductMedia, SellableItem, normalize_category_code
 from app.models.inventory import InventoryRecord
 from app.models.pricing import ExchangeRate, SellableItemPrice
 from app.modules.pricing.service import CDF, USD, calculate_cdf_amount
@@ -19,6 +20,7 @@ from app.schemas.product_offer import (
     OfferReasonCode,
     OfferStatus,
     ProductOfferResponse,
+    ProductOfferPrimaryMediaResponse,
     ProductOfferSearchMode,
 )
 
@@ -40,6 +42,8 @@ class ProductOfferRow(NamedTuple):
     price: SellableItemPrice | None
     inventory: InventoryRecord | None
     exchange_rate: ExchangeRate | None
+    sellable_item_media: ProductMedia | None = None
+    product_media: ProductMedia | None = None
 
 
 def _utcnow() -> datetime:
@@ -92,7 +96,7 @@ def _offer_interpretation(
 
 
 def _compose_offer(row: ProductOfferRow, *, read_at: datetime) -> ProductOfferResponse:
-    product, item, price, inventory, rate = row
+    product, item, price, inventory, rate, item_media, product_media = row
     offer_status, is_sellable_now, reason_code = _offer_interpretation(
         product=product,
         sellable_item=item,
@@ -115,6 +119,16 @@ def _compose_offer(row: ProductOfferRow, *, read_at: datetime) -> ProductOfferRe
     elif price is not None:
         cdf_quote_unavailable_reason = "current_fx_unavailable"
 
+    effective_media = item_media or product_media
+    primary_media = None
+    if effective_media is not None:
+        primary_media = ProductOfferPrimaryMediaResponse(
+            media_id=effective_media.media_id,
+            asset_url=effective_media.asset_url,
+            alt_text=effective_media.alt_text,
+            source_scope=("sellable_item" if item_media is not None else "product"),
+        )
+
     return ProductOfferResponse(
         product_id=product.product_id,
         sellable_item_id=item.sellable_item_id,
@@ -124,6 +138,7 @@ def _compose_offer(row: ProductOfferRow, *, read_at: datetime) -> ProductOfferRe
         description=product.description,
         model_label=item.model_label,
         attributes=item.attributes,
+        primary_media=primary_media,
         price_id=None if price is None else price.price_id,
         current_usd_price=None if price is None else price.amount,
         price_effective_at=None if price is None else price.effective_at,
@@ -141,8 +156,18 @@ def _compose_offer(row: ProductOfferRow, *, read_at: datetime) -> ProductOfferRe
 
 
 def _current_offer_statement():
+    item_media = aliased(ProductMedia, name="item_primary_media")
+    product_media = aliased(ProductMedia, name="product_primary_media")
     return (
-        select(Product, SellableItem, SellableItemPrice, InventoryRecord, ExchangeRate)
+        select(
+            Product,
+            SellableItem,
+            SellableItemPrice,
+            InventoryRecord,
+            ExchangeRate,
+            item_media,
+            product_media,
+        )
         .join(Product, Product.product_id == SellableItem.product_id)
         .outerjoin(
             SellableItemPrice,
@@ -162,6 +187,22 @@ def _current_offer_statement():
                 ExchangeRate.base_currency == USD,
                 ExchangeRate.quote_currency == CDF,
                 ExchangeRate.ended_at.is_(None),
+            ),
+        )
+        .outerjoin(
+            item_media,
+            and_(
+                item_media.sellable_item_id == SellableItem.sellable_item_id,
+                item_media.active.is_(True),
+                item_media.is_primary.is_(True),
+            ),
+        )
+        .outerjoin(
+            product_media,
+            and_(
+                product_media.product_id == Product.product_id,
+                product_media.active.is_(True),
+                product_media.is_primary.is_(True),
             ),
         )
     )
