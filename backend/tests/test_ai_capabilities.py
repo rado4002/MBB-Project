@@ -264,16 +264,34 @@ def test_provider_neutral_specification_exposes_only_allowed_registered_tools():
     assert set(specifications[0].input_schema["properties"]) == {"text", "count"}
 
 
-def test_production_registry_contains_only_the_approved_handoff_capability():
-    assert len(AI_CAPABILITY_REGISTRY) == 1
+def test_production_registry_contains_only_approved_capabilities():
+    assert len(AI_CAPABILITY_REGISTRY) == 3
     assert AI_CAPABILITY_REGISTRY.specifications(set()) == ()
     specifications = AI_CAPABILITY_REGISTRY.specifications(
-        {"request_human_handoff"}
+        {
+            "get_product_details",
+            "request_human_handoff",
+            "search_products",
+        }
     )
-    assert len(specifications) == 1
-    assert specifications[0].name == "request_human_handoff"
+    assert [specification.name for specification in specifications] == [
+        "get_product_details",
+        "request_human_handoff",
+        "search_products",
+    ]
     assert set(specifications[0].input_schema["properties"]) == {
+        "sellable_item_id"
+    }
+    assert set(specifications[1].input_schema["properties"]) == {
         "reason_category"
+    }
+    assert set(specifications[2].input_schema["properties"]) == {
+        "query",
+        "category_code",
+        "max_budget",
+        "budget_currency",
+        "search_mode",
+        "limit",
     }
 
 
