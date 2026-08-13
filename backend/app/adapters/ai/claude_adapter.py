@@ -14,6 +14,12 @@ import anthropic
 import structlog
 
 from app.adapters.base import BaseAIAdapter
+from app.ai.provider_contract import (
+    ProviderFinishReason,
+    ProviderTurnRequest,
+    ProviderTurnResult,
+    ProviderUsage,
+)
 from app.config import get_settings
 
 log = structlog.get_logger(__name__)
@@ -66,6 +72,20 @@ class ClaudeAdapter(BaseAIAdapter):
         raise AIAdapterError("Claude circuit breaker open — too many consecutive failures")
 
     # ── BaseAIAdapter interface ───────────────────────────────────────────────
+
+    async def generate_turn(self, request: ProviderTurnRequest) -> ProviderTurnResult:
+        """Narrow legacy text-only bridge; no Claude tool modernization in AI-3B."""
+        prompt = "\n".join(message.content for message in request.messages)
+        text = await self.generate(
+            prompt=prompt,
+            system=request.system_instruction,
+            max_tokens=request.max_output_tokens,
+        )
+        return ProviderTurnResult(
+            text=text,
+            finish_reason=ProviderFinishReason.completed,
+            usage=ProviderUsage(),
+        )
 
     async def generate(self, prompt: str, system: str, max_tokens: int) -> str:
         """

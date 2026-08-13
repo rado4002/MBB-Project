@@ -10,6 +10,7 @@ from __future__ import annotations
 import structlog
 
 from app.adapters.base import BaseAIAdapter
+from app.ai.provider_contract import ProviderTurnRequest, ProviderTurnResult
 
 log = structlog.get_logger(__name__)
 
@@ -20,6 +21,14 @@ class AIAdapterDisabled(RuntimeError):
 
 class DisabledAIAdapter(BaseAIAdapter):
     """Explicit no-AI adapter used by AI_ADAPTER=disabled or AI_ADAPTER=local."""
+
+    async def generate_turn(self, request: ProviderTurnRequest) -> ProviderTurnResult:
+        log.info(
+            "ai.disabled.turn_fallback",
+            messages=len(request.messages),
+            max_tokens=request.max_output_tokens,
+        )
+        raise AIAdapterDisabled("AI adapter disabled; using local fallback response")
 
     async def generate(self, prompt: str, system: str, max_tokens: int) -> str:
         log.info("ai.disabled.local_fallback", chars=len(prompt), max_tokens=max_tokens)

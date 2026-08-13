@@ -8,11 +8,38 @@ Rule: All modules (M1–M9) call adapters only through these interfaces.
 from abc import ABC, abstractmethod
 from typing import Any
 
+from app.ai.provider_contract import (
+    ProviderErrorCategory,
+    ProviderMessage,
+    ProviderTurnError,
+    ProviderTurnRequest,
+    ProviderTurnResult,
+)
 
-class BaseAIAdapter(ABC):
+
+class ProviderTurnAdapter(ABC):
+    """Provider-neutral turn adapter boundary for future model integrations."""
+
     @abstractmethod
+    async def generate_turn(self, request: ProviderTurnRequest) -> ProviderTurnResult:
+        """Generate one provider-neutral AI turn result."""
+
+
+class BaseAIAdapter(ProviderTurnAdapter):
+    """Legacy AI adapter compatibility plus the provider-neutral turn boundary."""
+
     async def generate(self, prompt: str, system: str, max_tokens: int) -> str:
         """Generate a response from the AI model."""
+        result = await self.generate_turn(
+            ProviderTurnRequest(
+                messages=(ProviderMessage(role="user", content=prompt),),
+                system_instruction=system,
+                max_output_tokens=max_tokens,
+            )
+        )
+        if result.tool_calls or result.text is None:
+            raise ProviderTurnError(ProviderErrorCategory.malformed_response)
+        return result.text
 
     @abstractmethod
     async def detect_language(self, text: str) -> str:

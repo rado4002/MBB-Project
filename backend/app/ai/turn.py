@@ -5,8 +5,15 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Mapping, Sequence
 
-from app.adapters.base import BaseAIAdapter
+from app.adapters.base import ProviderTurnAdapter
 from app.ai.policy import get_system_policy
+from app.ai.provider_contract import (
+    ProviderErrorCategory,
+    ProviderMessage,
+    ProviderReasoningProfile,
+    ProviderTurnError,
+    ProviderTurnRequest,
+)
 
 _MAX_RESPONSE_TOKENS = 512
 _HISTORY_LIMIT = 6
@@ -30,23 +37,31 @@ class AITurn:
 class AITurnService:
     """Apply MBB policy and adapt an AI turn to the configured provider boundary."""
 
-    def __init__(self, adapter: BaseAIAdapter) -> None:
+    def __init__(self, adapter: ProviderTurnAdapter) -> None:
         self._adapter = adapter
 
     async def generate(self, turn: AITurn) -> str:
         policy = get_system_policy(turn.language)
-        return await self._adapter.generate(
-            prompt=_build_runtime_prompt(turn),
-            system=policy.text,
-            max_tokens=_MAX_RESPONSE_TOKENS,
+        result = await self._adapter.generate_turn(
+            ProviderTurnRequest(
+                messages=(
+                    ProviderMessage(role="user", content=_build_runtime_prompt(turn)),
+                ),
+                system_instruction=policy.text,
+                max_output_tokens=_MAX_RESPONSE_TOKENS,
+                reasoning_profile=ProviderReasoningProfile.default,
+            )
         )
+        if result.tool_calls or result.text is None:
+            raise ProviderTurnError(ProviderErrorCategory.malformed_response)
+        return result.text
 
 
 def get_ai_turn_service() -> AITurnService:
     """Build the service using the repository's existing adapter factory."""
-    from app.adapters import get_ai_adapter
+    from app.adapters import get_provider_turn_adapter
 
-    return AITurnService(get_ai_adapter())
+    return AITurnService(get_provider_turn_adapter())
 
 
 def _build_runtime_prompt(turn: AITurn) -> str:

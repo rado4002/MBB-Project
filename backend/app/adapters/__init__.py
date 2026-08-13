@@ -23,6 +23,7 @@ from app.adapters.base import (
     BaseInventoryAdapter,
     BaseMessagingAdapter,
     BasePaymentAdapter,
+    ProviderTurnAdapter,
 )
 from app.config import get_settings
 
@@ -39,9 +40,18 @@ def _build_ai_adapter(configured_name: str) -> BaseAIAdapter:
     raise ValueError(f"Unknown AI adapter: {configured_name}")
 
 
+def _build_provider_turn_adapter(configured_name: str) -> ProviderTurnAdapter:
+    return _build_ai_adapter(configured_name)
+
+
 @lru_cache()
 def get_ai_adapter() -> BaseAIAdapter:
     return _build_ai_adapter(settings.ai_adapter)
+
+
+@lru_cache()
+def get_provider_turn_adapter() -> ProviderTurnAdapter:
+    return _build_provider_turn_adapter(settings.ai_adapter)
 
 
 def ai_adapter_eligibility(
@@ -49,7 +59,7 @@ def ai_adapter_eligibility(
 ) -> Literal["eligible", "disabled", "unavailable"]:
     """Resolve local adapter usability without making a provider request."""
     try:
-        adapter = _build_ai_adapter(configured_name)
+        adapter = _build_provider_turn_adapter(configured_name)
     except (ValueError, ImportError, RuntimeError):
         return "unavailable"
 

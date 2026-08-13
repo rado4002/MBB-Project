@@ -3,6 +3,11 @@ import inspect
 import pytest
 
 from app.ai.policy import AI_SYSTEM_POLICY_VERSION, get_system_policy
+from app.ai.provider_contract import (
+    ProviderFinishReason,
+    ProviderMessage,
+    ProviderTurnResult,
+)
 from app.ai.turn import AITurn, AITurnService
 
 
@@ -12,11 +17,14 @@ class _RecordingAdapter:
         self.error = error
         self.calls = []
 
-    async def generate(self, **kwargs):
-        self.calls.append(kwargs)
+    async def generate_turn(self, request):
+        self.calls.append(request)
         if self.error is not None:
             raise self.error
-        return self.result
+        return ProviderTurnResult(
+            text=self.result,
+            finish_reason=ProviderFinishReason.completed,
+        )
 
     async def detect_language(self, _text):
         return "french"
@@ -44,14 +52,16 @@ async def test_turn_separates_policy_from_customer_runtime_content():
     assert result == "assistant response"
     assert len(adapter.calls) == 1
     request = adapter.calls[0]
-    assert "turn_id" not in request
-    assert "expected_ownership_version" not in request
-    assert request["system"] == get_system_policy("lingala").text
-    assert customer_text not in request["system"]
-    assert history_text not in request["system"]
-    assert customer_text in request["prompt"]
-    assert history_text in request["prompt"]
-    assert request["max_tokens"] == 512
+    serialized = request.model_dump(mode="json")
+    assert "turn_id" not in serialized
+    assert "expected_ownership_version" not in serialized
+    assert request.system_instruction == get_system_policy("lingala").text
+    assert customer_text not in request.system_instruction
+    assert history_text not in request.system_instruction
+    assert customer_text in request.messages[0].content
+    assert history_text in request.messages[0].content
+    assert request.max_output_tokens == 512
+    assert request.allowed_capabilities == ()
 
 
 @pytest.mark.asyncio
@@ -67,7 +77,9 @@ async def test_turn_without_history_preserves_existing_user_prompt_shape():
         )
     )
 
-    assert adapter.calls[0]["prompt"] == "Mbote"
+    assert adapter.calls[0].messages == (
+        ProviderMessage(role="user", content="Mbote"),
+    )
 
 
 @pytest.mark.asyncio
@@ -88,7 +100,7 @@ async def test_turn_preserves_existing_six_message_history_window():
         )
     )
 
-    prompt = adapter.calls[0]["prompt"]
+    prompt = adapter.calls[0].messages[0].content
     assert "history-0" not in prompt
     assert "history-1" not in prompt
     for index in range(2, 8):
@@ -187,4 +199,12 @@ def test_m1_business_seam_uses_turn_service_not_adapter_directly():
 
     source = inspect.getsource(m1._process)
     assert "get_ai_turn_service()" in source
+    assert "get_ai_adapter" not in source
+
+
+def test_turn_service_factory_uses_provider_turn_adapter_boundary():
+    import app.ai.turn as turn_module
+
+    source = inspect.getsource(turn_module.get_ai_turn_service)
+    assert "get_provider_turn_adapter()" in source
     assert "get_ai_adapter" not in source
