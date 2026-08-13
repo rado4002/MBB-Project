@@ -4,8 +4,11 @@ import pytest
 
 from app.ai.policy import AI_SYSTEM_POLICY_VERSION, get_system_policy
 from app.ai.provider_contract import (
+    ProviderErrorCategory,
     ProviderFinishReason,
     ProviderMessage,
+    ProviderToolCall,
+    ProviderTurnError,
     ProviderTurnResult,
 )
 from app.ai.turn import AITurn, AITurnService
@@ -137,6 +140,37 @@ async def test_disabled_adapter_preserves_safe_failure_without_network_client():
                 expected_ownership_version=2,
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_tool_call_result_remains_unexecutable_until_ai_3d():
+    adapter = _RecordingAdapter()
+    adapter.generate_turn = _tool_call_result  # type: ignore[method-assign]
+    service = AITurnService(adapter)
+
+    with pytest.raises(ProviderTurnError) as captured:
+        await service.generate(
+            AITurn(
+                user_content="Je cherche un air fryer",
+                language="french",
+                expected_ownership_version=2,
+            )
+        )
+
+    assert captured.value.category == ProviderErrorCategory.malformed_response
+
+
+async def _tool_call_result(_request):
+    return ProviderTurnResult(
+        tool_calls=(
+            ProviderToolCall(
+                call_id="call_1",
+                capability_name="search_products",
+                arguments={"query": "air fryer"},
+            ),
+        ),
+        finish_reason=ProviderFinishReason.tool_call,
+    )
 
 
 def test_turn_requires_a_positive_ownership_generation():

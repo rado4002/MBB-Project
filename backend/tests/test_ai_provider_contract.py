@@ -187,6 +187,24 @@ def test_continuation_state_is_opaque_and_excluded_from_normal_serialization():
     assert "continuation_state" not in result.model_dump(mode="json")
     assert "provider_cursor" not in str(result.model_dump(mode="json"))
     assert "continuation_state" not in next_request.model_dump(mode="json")
+    assert "provider_cursor" not in repr(continuation)
+    assert "provider_cursor" not in repr(result)
+    assert "provider_cursor" not in repr(next_request)
+
+
+def test_tool_result_message_requires_only_provider_correlation_metadata():
+    message = ProviderMessage(
+        role="tool_result",
+        tool_call_id="call_1",
+        content='{"status":"ok"}',
+    )
+
+    assert message.tool_call_id == "call_1"
+    assert set(message.model_fields) == {"role", "content", "tool_call_id"}
+    with pytest.raises(ValidationError, match="tool-call identifier"):
+        ProviderMessage(role="tool_result", content='{"status":"ok"}')
+    with pytest.raises(ValidationError, match="only valid for tool results"):
+        ProviderMessage(role="user", tool_call_id="call_1", content="Bonjour")
 
 
 @pytest.mark.asyncio

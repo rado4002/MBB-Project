@@ -89,6 +89,14 @@ class Settings(BaseSettings):
     claude_max_tokens: int = 1024
     claude_timeout_s: int = 25
 
+    # ── AI — DeepSeek ─────────────────────────────────────────────────────────
+    deepseek_api_key: str = Field(
+        default=_read_secret("deepseek_api_key", ""),
+        repr=False,
+    )
+    deepseek_model: str = "deepseek-v4-flash"
+    deepseek_timeout_s: int = Field(default=60, ge=1, le=120)
+
     # ── CRM — Airtable ────────────────────────────────────────────────────────
     airtable_api_key: str = _read_secret("airtable_api_key", "")
     airtable_base_id: str = ""

@@ -7,8 +7,9 @@ Usage:
     ai = get_ai_adapter()
     response = await ai.generate(prompt, system, max_tokens)
 
-Switch adapters by changing env vars — no module code changes required:
-    AI_ADAPTER=disabled | claude
+Switch provider-turn adapters by changing env vars — no module code changes required:
+    AI_ADAPTER=disabled | deepseek | claude
+Legacy get_ai_adapter callers remain limited to disabled | claude.
     CRM_ADAPTER=airtable | mbb_hub
     INVENTORY_ADAPTER=static | mbb_box
     PAYMENT_ADAPTER=mobile_money
@@ -41,6 +42,14 @@ def _build_ai_adapter(configured_name: str) -> BaseAIAdapter:
 
 
 def _build_provider_turn_adapter(configured_name: str) -> ProviderTurnAdapter:
+    if configured_name == "deepseek":
+        from app.adapters.ai.deepseek_adapter import DeepSeekAdapter
+
+        return DeepSeekAdapter(
+            api_key=settings.deepseek_api_key,
+            model=settings.deepseek_model,
+            timeout_s=settings.deepseek_timeout_s,
+        )
     return _build_ai_adapter(configured_name)
 
 

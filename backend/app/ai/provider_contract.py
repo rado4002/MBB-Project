@@ -134,6 +134,15 @@ class ProviderMessage(StrictProviderModel):
 
     role: Literal["user", "assistant", "tool_result"]
     content: str = Field(min_length=1, max_length=MAX_PROVIDER_MESSAGE_CHARS)
+    tool_call_id: SafeProviderIdentifier | None = None
+
+    @model_validator(mode="after")
+    def tool_result_has_provider_correlation(self) -> ProviderMessage:
+        if self.role == "tool_result" and self.tool_call_id is None:
+            raise ValueError("tool-result messages require a tool-call identifier")
+        if self.role != "tool_result" and self.tool_call_id is not None:
+            raise ValueError("tool-call identifiers are only valid for tool results")
+        return self
 
 
 class ProviderCapability(StrictProviderModel):
@@ -162,6 +171,7 @@ class ProviderContinuationState(StrictProviderModel):
         min_length=1,
         max_length=MAX_PROVIDER_CONTINUATION_FIELDS,
         exclude=True,
+        repr=False,
     )
 
 
@@ -182,6 +192,7 @@ class ProviderTurnRequest(StrictProviderModel):
     continuation_state: ProviderContinuationState | None = Field(
         default=None,
         exclude=True,
+        repr=False,
     )
 
     @model_validator(mode="after")
@@ -228,6 +239,7 @@ class ProviderTurnResult(StrictProviderModel):
     continuation_state: ProviderContinuationState | None = Field(
         default=None,
         exclude=True,
+        repr=False,
     )
 
     @model_validator(mode="after")
