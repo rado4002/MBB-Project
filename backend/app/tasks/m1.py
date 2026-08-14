@@ -25,6 +25,11 @@ log = structlog.get_logger(__name__)
 settings = get_settings()
 
 _INBOUND_WHATSAPP_UNIQUE_INDEX = "uq_messages_inbound_whatsapp_message_id"
+_M1_AI_CAPABILITIES = (
+    "get_product_details",
+    "request_human_handoff",
+    "search_products",
+)
 
 
 class _BaseTask(Task):
@@ -401,7 +406,9 @@ async def _process(
                     user_content=content,
                     language=language,
                     expected_ownership_version=expected_ownership_version,
+                    conversation_id=inbound.conversation_id,
                     history=history,
+                    allowed_capabilities=_M1_AI_CAPABILITIES,
                 )
             )
         except Exception as exc:

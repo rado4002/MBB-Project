@@ -48,13 +48,22 @@ class _Task:
 
 
 class _AI:
-    async def generate(self, **_kwargs):
+    async def generate(self, *_args, **_kwargs):
         return "outbound response"
 
 
 class _FailingAI:
-    async def generate(self, **_kwargs):
+    async def generate(self, *_args, **_kwargs):
         raise RuntimeError("AI unavailable")
+
+
+class _RecordingAI:
+    def __init__(self):
+        self.turns = []
+
+    async def generate(self, turn):
+        self.turns.append(turn)
+        return "outbound response"
 
 
 class _Messaging:
@@ -84,6 +93,7 @@ def _patch_normal_flow(
     ai=None,
 ):
     import app.adapters as adapters
+    import app.ai.turn as ai_turn
     import app.database as database
     import app.modules.m1_gateway.service as service
     import app.modules.m1_gateway.session_cache as session_cache
@@ -131,7 +141,7 @@ def _patch_normal_flow(
     monkeypatch.setattr(service, "persist_outbound", persist_outbound)
     monkeypatch.setattr(session_cache, "get_session", get_session)
     monkeypatch.setattr(session_cache, "save_session", save_session)
-    monkeypatch.setattr(adapters, "get_ai_adapter", lambda: ai or _AI())
+    monkeypatch.setattr(ai_turn, "get_ai_turn_service", lambda: ai or _AI())
     monkeypatch.setattr(adapters, "get_messaging_adapter", lambda: messaging)
     monkeypatch.setattr(
         conversation_engine,
@@ -189,6 +199,23 @@ def test_committed_outbound_uuid_reaches_send_safe_and_adapter(monkeypatch):
     assert result["send_status"] == "sent"
     assert result["provider_message_id"] == "provider-456"
     assert task.retry_calls == 0
+
+
+def test_m1_binds_trusted_context_and_explicit_capability_exposure(monkeypatch):
+    ai = _RecordingAI()
+    _events, _messaging = _patch_normal_flow(
+        monkeypatch,
+        outbound_id=uuid.uuid4(),
+        ai=ai,
+    )
+
+    result = _run(_process(_Task()))
+
+    assert len(ai.turns) == 1
+    turn = ai.turns[0]
+    assert str(turn.conversation_id) == result["conversation_id"]
+    assert turn.expected_ownership_version == 4
+    assert turn.allowed_capabilities == m1._M1_AI_CAPABILITIES
 
 
 def test_human_ownership_stops_generation_persistence_and_send(monkeypatch):

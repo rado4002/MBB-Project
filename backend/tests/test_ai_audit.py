@@ -33,6 +33,7 @@ def _minimal_record(**overrides) -> AITurnAuditRecord:
             user_content="test",
             language="french",
             expected_ownership_version=1,
+            conversation_id=uuid.uuid4(),
         ).turn_id,
         "conversation_id": uuid.uuid4(),
         "policy_version": AI_SYSTEM_POLICY_VERSION,
@@ -81,10 +82,16 @@ def test_stable_actor_is_application_owned_and_not_an_operator_account() -> None
 
 def test_turn_identity_is_unique_opaque_and_not_caller_overridable() -> None:
     first = AITurn(
-        user_content="first", language="french", expected_ownership_version=1
+        user_content="first",
+        language="french",
+        expected_ownership_version=1,
+        conversation_id=uuid.uuid4(),
     )
     second = AITurn(
-        user_content="second", language="lingala", expected_ownership_version=2
+        user_content="second",
+        language="lingala",
+        expected_ownership_version=2,
+        conversation_id=uuid.uuid4(),
     )
 
     assert isinstance(first.turn_id, uuid.UUID)
@@ -95,6 +102,7 @@ def test_turn_identity_is_unique_opaque_and_not_caller_overridable() -> None:
             user_content="provider content",
             language="french",
             expected_ownership_version=1,
+            conversation_id=uuid.uuid4(),
             turn_id=uuid.uuid4(),
         )
 

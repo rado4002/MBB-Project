@@ -115,6 +115,7 @@ async def test_migration_round_trip_references_and_existing_rows_are_preserved()
         user_content="test",
         language="french",
         expected_ownership_version=1,
+        conversation_id=uuid.uuid4(),
     ).turn_id
     record = AITurnAuditRecord(
         turn_id=turn_id,
@@ -163,6 +164,7 @@ async def test_migration_round_trip_references_and_existing_rows_are_preserved()
             user_content="test",
             language="french",
             expected_ownership_version=1,
+            conversation_id=uuid.uuid4(),
         ).turn_id,
         conversation_id=conversation_id,
         source_message_id=uuid.uuid4(),

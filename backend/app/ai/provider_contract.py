@@ -217,6 +217,39 @@ class ProviderToolCall(StrictProviderModel):
         return self
 
 
+class ProviderToolError(StrictProviderModel):
+    """Safe provider-neutral capability failure details."""
+
+    category: SafeProviderName
+    safe_code: SafeProviderName | None = None
+
+
+class ProviderToolResult(StrictProviderModel):
+    """Safe result returned to a provider for one requested capability."""
+
+    call_id: SafeProviderIdentifier
+    capability_name: SafeProviderName
+    status: Literal["success", "error"]
+    output: dict[str, JsonValue] | None = None
+    error: ProviderToolError | None = None
+
+    @model_validator(mode="after")
+    def status_matches_payload(self) -> ProviderToolResult:
+        if self.status == "success" and (self.output is None or self.error is not None):
+            raise ValueError("successful tool results require output only")
+        if self.status == "error" and (self.error is None or self.output is not None):
+            raise ValueError("failed tool results require error only")
+        return self
+
+    def as_message(self) -> ProviderMessage:
+        """Serialize only the validated safe envelope for provider continuation."""
+        return ProviderMessage(
+            role="tool_result",
+            tool_call_id=self.call_id,
+            content=self.model_dump_json(),
+        )
+
+
 class ProviderUsage(StrictProviderModel):
     """Minimal token usage metadata when a provider supplies it."""
 

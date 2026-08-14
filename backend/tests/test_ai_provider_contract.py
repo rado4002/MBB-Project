@@ -18,6 +18,8 @@ from app.ai.provider_contract import (
     ProviderMessage,
     ProviderReasoningProfile,
     ProviderToolCall,
+    ProviderToolError,
+    ProviderToolResult,
     ProviderTurnError,
     ProviderTurnRequest,
     ProviderTurnResult,
@@ -205,6 +207,38 @@ def test_tool_result_message_requires_only_provider_correlation_metadata():
         ProviderMessage(role="tool_result", content='{"status":"ok"}')
     with pytest.raises(ValidationError, match="only valid for tool results"):
         ProviderMessage(role="user", tool_call_id="call_1", content="Bonjour")
+
+
+def test_tool_result_envelope_is_strict_safe_and_serializes_for_continuation():
+    success = ProviderToolResult(
+        call_id="call_1",
+        capability_name="search_products",
+        status="success",
+        output={"items": []},
+    )
+    failure = ProviderToolResult(
+        call_id="call_2",
+        capability_name="search_products",
+        status="error",
+        error=ProviderToolError(
+            category="execution_failed",
+            safe_code="catalog_unavailable",
+        ),
+    )
+
+    message = success.as_message()
+    assert message.role == "tool_result"
+    assert message.tool_call_id == "call_1"
+    assert '"status":"success"' in message.content
+    assert "internal exception" not in failure.model_dump_json()
+    with pytest.raises(ValidationError, match="output only"):
+        ProviderToolResult(
+            call_id="call_3",
+            capability_name="search_products",
+            status="success",
+            output={"items": []},
+            error=ProviderToolError(category="execution_failed"),
+        )
 
 
 @pytest.mark.asyncio
