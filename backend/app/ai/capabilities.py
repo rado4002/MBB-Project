@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -21,6 +21,9 @@ from pydantic import (
 from app.models.catalog import normalize_category_code
 from app.schemas.commerce_admin import AttributeValue
 from app.schemas.product_offer import ProductOfferResponse
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 _CAPABILITY_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SAFE_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -72,6 +75,17 @@ CapabilityHandler = Callable[
     [TrustedCapabilityContext, StrictCapabilityModel],
     Awaitable[object],
 ]
+TransactionalCapabilityHandler = Callable[
+    ["AsyncSession", TrustedCapabilityContext, StrictCapabilityModel],
+    Awaitable[object],
+]
+
+
+@dataclass(frozen=True)
+class CapabilityExecutionRuntime:
+    """Server-only runtime dependency, never derived from model arguments."""
+
+    transaction_session: AsyncSession
 
 
 @dataclass(frozen=True)
@@ -80,7 +94,9 @@ class CapabilityDefinition:
     description: str
     input_model: type[StrictCapabilityModel]
     output_model: type[StrictCapabilityModel]
-    handler: CapabilityHandler
+    handler: CapabilityHandler | None
+    transactional_handler: TransactionalCapabilityHandler | None = None
+    terminal_on_success: bool = False
 
     def __post_init__(self) -> None:
         if not _CAPABILITY_NAME_PATTERN.fullmatch(self.name):
@@ -93,6 +109,10 @@ class CapabilityDefinition:
             raise TypeError("capability input model must be strict")
         if not issubclass(self.output_model, StrictCapabilityModel):
             raise TypeError("capability output model must be strict")
+        if (self.handler is None) == (self.transactional_handler is None):
+            raise ValueError("capability requires exactly one execution handler")
+        if self.terminal_on_success and self.transactional_handler is None:
+            raise ValueError("terminal capabilities require a transactional handler")
 
 
 @dataclass(frozen=True)
@@ -156,6 +176,10 @@ class SafeCapabilityError(Exception):
         self.safe_code = safe_code
 
 
+class CapabilityTransactionRetry(Exception):
+    """A trusted durable capability transaction may be retried once."""
+
+
 @dataclass(frozen=True)
 class CapabilitySuccess:
     capability_name: str
@@ -184,6 +208,7 @@ class CapabilityExecutor:
         model_arguments: object,
         allowed_capabilities: Iterable[str],
         context: TrustedCapabilityContext,
+        runtime: CapabilityExecutionRuntime | None = None,
     ) -> CapabilityExecutionResult:
         if not isinstance(requested_name, str):
             return CapabilityFailure(CapabilityErrorCategory.unknown_tool)
@@ -209,11 +234,26 @@ class CapabilityExecutor:
             return CapabilityFailure(CapabilityErrorCategory.invalid_arguments)
 
         try:
-            raw_output = await definition.handler(context, validated_input)
+            if definition.transactional_handler is not None:
+                if runtime is None:
+                    return CapabilityFailure(
+                        CapabilityErrorCategory.execution_failed,
+                        safe_code="transaction_required",
+                    )
+                raw_output = await definition.transactional_handler(
+                    runtime.transaction_session,
+                    context,
+                    validated_input,
+                )
+            else:
+                assert definition.handler is not None
+                raw_output = await definition.handler(context, validated_input)
             validated_output = definition.output_model.model_validate(
                 raw_output,
                 strict=True,
             )
+        except CapabilityTransactionRetry:
+            raise
         except SafeCapabilityError as exc:
             return CapabilityFailure(
                 CapabilityErrorCategory.execution_failed,
@@ -455,30 +495,36 @@ async def _get_product_details(
 
 
 async def _request_human_handoff(
+    session: AsyncSession,
     context: TrustedCapabilityContext,
     _arguments: StrictCapabilityModel,
 ) -> object:
-    from app.database import async_session_factory
     from app.modules.m4_conversation.ai_handoff import (
         AIHandoffConversationNotFound,
-        AIHandoffUnavailable,
         StaleAIAuthority,
-        request_human_handoff,
+        apply_human_handoff,
     )
+    from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-    async with async_session_factory() as session:
-        try:
-            result = await request_human_handoff(
-                session,
-                conversation_id=context.conversation_id,
-                expected_ownership_version=context.expected_ownership_version,
-            )
-        except AIHandoffConversationNotFound as exc:
-            raise SafeCapabilityError("conversation_not_found") from exc
-        except StaleAIAuthority as exc:
-            raise SafeCapabilityError("stale_ai_authority") from exc
-        except AIHandoffUnavailable as exc:
-            raise SafeCapabilityError("handoff_unavailable") from exc
+    try:
+        result = await apply_human_handoff(
+            session,
+            conversation_id=context.conversation_id,
+            expected_ownership_version=context.expected_ownership_version,
+        )
+    except AIHandoffConversationNotFound as exc:
+        raise SafeCapabilityError("conversation_not_found") from exc
+    except StaleAIAuthority as exc:
+        raise SafeCapabilityError("stale_ai_authority") from exc
+    except IntegrityError as exc:
+        raise CapabilityTransactionRetry from exc
+    except (SQLAlchemyError, OSError, ConnectionError, TimeoutError) as exc:
+        raise SafeCapabilityError("handoff_unavailable") from exc
+    if (
+        result.replayed
+        and result.ownership_version != context.expected_ownership_version
+    ):
+        raise SafeCapabilityError("stale_ai_authority")
 
     return {
         "state": "waiting_for_human",
@@ -505,7 +551,9 @@ AI_CAPABILITY_REGISTRY = CapabilityRegistry(
             description="Pause AI and request Human attention for this conversation.",
             input_model=RequestHumanHandoffInput,
             output_model=RequestHumanHandoffOutput,
-            handler=_request_human_handoff,
+            handler=None,
+            transactional_handler=_request_human_handoff,
+            terminal_on_success=True,
         ),
         CapabilityDefinition(
             name="search_products",

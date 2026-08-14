@@ -61,86 +61,97 @@ async def _active_ticket(
     )
 
 
+async def apply_human_handoff(
+    session: AsyncSession,
+    *,
+    conversation_id: uuid.UUID,
+    expected_ownership_version: int,
+) -> AIHandoffResult:
+    """Apply one AI handoff inside the caller's current transaction."""
+    conversation = await session.scalar(
+        select(Conversation)
+        .where(Conversation.conversation_id == conversation_id)
+        .with_for_update()
+    )
+    if conversation is None:
+        raise AIHandoffConversationNotFound
+
+    active_ticket = await _active_ticket(session, conversation_id)
+    already_waiting = (
+        conversation.owner_type == "ai"
+        and conversation.human_owner_account_id is None
+        and conversation.ai_execution_state == "paused"
+        and active_ticket is not None
+    )
+    if already_waiting:
+        return AIHandoffResult(
+            conversation_id=conversation_id,
+            ownership_version=conversation.ownership_version,
+            escalation_ticket_id=active_ticket.ticket_id,
+            escalation_source=active_ticket.source,
+            replayed=True,
+        )
+
+    has_active_ai_authority = (
+        conversation.owner_type == "ai"
+        and conversation.human_owner_account_id is None
+        and conversation.ai_execution_state == "eligible"
+    )
+    if (
+        not has_active_ai_authority
+        or conversation.ownership_version != expected_ownership_version
+    ):
+        raise StaleAIAuthority
+
+    now = _utcnow()
+    if active_ticket is None:
+        active_ticket = EscalationTicket(
+            conversation_id=conversation_id,
+            customer_id=conversation.customer_id,
+            priority="medium",
+            reason=_AI_HANDOFF_TYPE,
+            source=_AI_HANDOFF_SOURCE,
+            escalation_type=_AI_HANDOFF_TYPE,
+            operator_reason=None,
+            created_by_account_id=None,
+            status="open",
+            transcript_snapshot=[],
+            created_at=now,
+        )
+        session.add(active_ticket)
+
+    conversation.ai_execution_state = "paused"
+    conversation.ownership_version += 1
+    conversation.ownership_updated_at = now
+    conversation.updated_at = now
+    await session.flush()
+    return AIHandoffResult(
+        conversation_id=conversation_id,
+        ownership_version=conversation.ownership_version,
+        escalation_ticket_id=active_ticket.ticket_id,
+        escalation_source=active_ticket.source,
+        replayed=False,
+    )
+
+
 async def request_human_handoff(
     session: AsyncSession,
     *,
     conversation_id: uuid.UUID,
     expected_ownership_version: int,
 ) -> AIHandoffResult:
-    """Pause AI and ensure one visible Human-attention record atomically."""
+    """Pause AI and commit one visible Human-attention record."""
     for attempt in range(2):
         try:
-            conversation = await session.scalar(
-                select(Conversation)
-                .where(Conversation.conversation_id == conversation_id)
-                .with_for_update()
-            )
-            if conversation is None:
-                await session.rollback()
-                raise AIHandoffConversationNotFound
-
-            active_ticket = await _active_ticket(session, conversation_id)
-            already_waiting = (
-                conversation.owner_type == "ai"
-                and conversation.human_owner_account_id is None
-                and conversation.ai_execution_state == "paused"
-                and active_ticket is not None
-            )
-            if already_waiting:
-                result = AIHandoffResult(
-                    conversation_id=conversation_id,
-                    ownership_version=conversation.ownership_version,
-                    escalation_ticket_id=active_ticket.ticket_id,
-                    escalation_source=active_ticket.source,
-                    replayed=True,
-                )
-                await session.commit()
-                return result
-
-            has_active_ai_authority = (
-                conversation.owner_type == "ai"
-                and conversation.human_owner_account_id is None
-                and conversation.ai_execution_state == "eligible"
-            )
-            if (
-                not has_active_ai_authority
-                or conversation.ownership_version != expected_ownership_version
-            ):
-                await session.rollback()
-                raise StaleAIAuthority
-
-            now = _utcnow()
-            if active_ticket is None:
-                active_ticket = EscalationTicket(
-                    conversation_id=conversation_id,
-                    customer_id=conversation.customer_id,
-                    priority="medium",
-                    reason=_AI_HANDOFF_TYPE,
-                    source=_AI_HANDOFF_SOURCE,
-                    escalation_type=_AI_HANDOFF_TYPE,
-                    operator_reason=None,
-                    created_by_account_id=None,
-                    status="open",
-                    transcript_snapshot=[],
-                    created_at=now,
-                )
-                session.add(active_ticket)
-
-            conversation.ai_execution_state = "paused"
-            conversation.ownership_version += 1
-            conversation.ownership_updated_at = now
-            conversation.updated_at = now
-            await session.flush()
-            result = AIHandoffResult(
+            result = await apply_human_handoff(
+                session,
                 conversation_id=conversation_id,
-                ownership_version=conversation.ownership_version,
-                escalation_ticket_id=active_ticket.ticket_id,
-                escalation_source=active_ticket.source,
-                replayed=False,
+                expected_ownership_version=expected_ownership_version,
             )
             await session.commit()
             return result
         except (AIHandoffConversationNotFound, StaleAIAuthority):
+            await session.rollback()
             raise
         except IntegrityError as exc:
             await session.rollback()

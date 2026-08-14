@@ -321,9 +321,14 @@ async def test_append_builds_one_finalized_row_without_a_mutation_api() -> None:
     assert not hasattr(audit, "operator_account_id")
 
 
-def test_production_turn_path_is_not_activated_by_the_foundation() -> None:
+def test_production_turn_path_activates_one_finalized_audit_boundary() -> None:
     from app.tasks import m1
 
-    source = inspect.getsource(m1._process)
-    assert "append_ai_turn_audit" not in source
-    assert "AITurnAuditRecord" not in source
+    process_source = inspect.getsource(m1._process)
+    persistence_source = inspect.getsource(m1._persist_outbound)
+
+    assert "generate_finalized" in process_source
+    assert "append_ai_turn_audit" in persistence_source
+    assert persistence_source.index("persist_outbound(") < persistence_source.index(
+        "append_ai_turn_audit("
+    ) < persistence_source.index("session.commit()")

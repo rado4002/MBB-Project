@@ -3,16 +3,31 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from typing import Mapping, Sequence
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.adapters.base import ProviderTurnAdapter
+from app.ai.audit import (
+    AITurnAuditRecord,
+    AITurnOutcome,
+    CapabilityAuditDecision,
+    CapabilityAuditOutcome,
+    CapabilityAuditSummary,
+    append_ai_turn_audit,
+)
 from app.ai.capabilities import (
     AI_CAPABILITY_REGISTRY,
+    CapabilityErrorCategory,
+    CapabilityExecutionRuntime,
     CapabilityExecutionResult,
     CapabilityExecutor,
     CapabilityFailure,
     CapabilityRegistry,
+    CapabilitySuccess,
+    CapabilityTransactionRetry,
     TrustedCapabilityContext,
 )
 from app.ai.policy import get_system_policy
@@ -20,6 +35,7 @@ from app.ai.provider_contract import (
     ProviderCapability,
     ProviderErrorCategory,
     ProviderFinishReason,
+    ProviderIdentity,
     ProviderMessage,
     ProviderReasoningProfile,
     ProviderToolCall,
@@ -34,8 +50,11 @@ _HISTORY_LIMIT = 6
 _MAX_PROVIDER_CALLS = 3
 _MAX_TOOL_ROUNDS = 2
 _MAX_CAPABILITY_EXECUTIONS = 3
+_MAX_DURABLE_ACTION_ATTEMPTS = 2
 
 AuthorityChecker = Callable[[TrustedCapabilityContext], Awaitable[bool]]
+DurableSessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
+AuditAppender = Callable[[AsyncSession, AITurnAuditRecord], Awaitable[object]]
 
 
 class StaleAITurnAuthority(RuntimeError):
@@ -51,6 +70,26 @@ class AITurnBudgetExceeded(RuntimeError):
     def __init__(self, budget: str) -> None:
         self.budget = budget
         super().__init__(f"ai_turn_budget_exceeded:{budget}")
+
+
+class AITurnPersistenceError(RuntimeError):
+    """A terminal AI action could not commit with its required audit."""
+
+    def __init__(self) -> None:
+        super().__init__("ai_turn_persistence_failed")
+
+
+class AITurnExecutionError(RuntimeError):
+    """Safe runtime failure carrying minimized provenance for M1 fallback."""
+
+    def __init__(
+        self,
+        audit_record: AITurnAuditRecord,
+        original_error: Exception,
+    ) -> None:
+        self.audit_record = audit_record
+        self.original_error = original_error
+        super().__init__(f"ai_turn_failed:{audit_record.safe_code or 'unknown'}")
 
 
 @dataclass(frozen=True)
@@ -83,6 +122,7 @@ class AITurn:
     language: str
     expected_ownership_version: int
     conversation_id: uuid.UUID
+    source_message_id: uuid.UUID | None = None
     history: Sequence[Mapping[str, str]] = ()
     allowed_capabilities: tuple[str, ...] = ()
     turn_id: uuid.UUID = field(default_factory=uuid.uuid4, init=False)
@@ -92,8 +132,29 @@ class AITurn:
             raise ValueError("expected ownership version must be positive")
         if not isinstance(self.conversation_id, uuid.UUID):
             raise ValueError("conversation ID must be a UUID")
+        if self.source_message_id is not None and not isinstance(
+            self.source_message_id,
+            uuid.UUID,
+        ):
+            raise ValueError("source message ID must be a UUID")
         if len(self.allowed_capabilities) != len(set(self.allowed_capabilities)):
             raise ValueError("allowed capability names must be unique")
+
+
+@dataclass(frozen=True)
+class FinalizedAITurnResult:
+    """Customer text plus minimized, provider-neutral finalized provenance."""
+
+    text: str | None
+    audit_record: AITurnAuditRecord
+    audit_persisted: bool = False
+
+    def __post_init__(self) -> None:
+        is_handoff = self.audit_record.outcome == AITurnOutcome.handoff_requested
+        if is_handoff != (self.text is None):
+            raise ValueError("finalized turn text does not match its outcome")
+        if is_handoff != self.audit_persisted:
+            raise ValueError("only terminal handoff audit is pre-persisted")
 
 
 class AITurnService:
@@ -106,14 +167,36 @@ class AITurnService:
         capability_registry: CapabilityRegistry = AI_CAPABILITY_REGISTRY,
         authority_checker: AuthorityChecker | None = None,
         limits: AITurnLimits = AITurnLimits(),
+        durable_session_factory: DurableSessionFactory | None = None,
+        audit_appender: AuditAppender | None = None,
+        provider_identity: ProviderIdentity | None = None,
     ) -> None:
         self._adapter = adapter
         self._capability_registry = capability_registry
         self._capability_executor = CapabilityExecutor(capability_registry)
         self._authority_checker = authority_checker
         self._limits = limits
+        self._durable_session_factory = durable_session_factory
+        self._audit_appender = audit_appender or append_ai_turn_audit
+        configured_identity = provider_identity
+        if configured_identity is None:
+            candidate = getattr(adapter, "provider_identity", None)
+            if isinstance(candidate, ProviderIdentity):
+                configured_identity = candidate
+        self._provider_identity = configured_identity
 
     async def generate(self, turn: AITurn) -> str:
+        """Compatibility text result for existing provider-turn callers."""
+        try:
+            finalized = await self.generate_finalized(turn)
+        except AITurnExecutionError as exc:
+            raise exc.original_error from None
+        if finalized.text is None:
+            raise StaleAITurnAuthority
+        return finalized.text
+
+    async def generate_finalized(self, turn: AITurn) -> FinalizedAITurnResult:
+        """Run one bounded turn and finalize only minimized safe provenance."""
         policy = get_system_policy(turn.language)
         context = TrustedCapabilityContext(
             conversation_id=turn.conversation_id,
@@ -133,70 +216,228 @@ class AITurnService:
             ProviderMessage(role="user", content=_build_runtime_prompt(turn)),
         )
         tool_result_messages: list[ProviderMessage] = []
+        capability_activity: list[CapabilityAuditSummary] = []
         seen_call_ids: set[str] = set()
         continuation_state = None
         provider_calls = 0
         tool_rounds = 0
         capability_executions = 0
 
-        while True:
-            if provider_calls >= self._limits.provider_calls:
-                raise AITurnBudgetExceeded("provider_calls")
-            await self._require_current_authority(context)
-            result = await self._adapter.generate_turn(
-                ProviderTurnRequest(
-                    messages=base_messages + tuple(tool_result_messages),
-                    system_instruction=policy.text,
-                    allowed_capabilities=allowed_capabilities,
-                    max_output_tokens=_MAX_RESPONSE_TOKENS,
-                    reasoning_profile=ProviderReasoningProfile.default,
-                    continuation_state=continuation_state,
+        try:
+            while True:
+                if provider_calls >= self._limits.provider_calls:
+                    raise AITurnBudgetExceeded("provider_calls")
+                await self._require_current_authority(context)
+                result = await self._adapter.generate_turn(
+                    ProviderTurnRequest(
+                        messages=base_messages + tuple(tool_result_messages),
+                        system_instruction=policy.text,
+                        allowed_capabilities=allowed_capabilities,
+                        max_output_tokens=_MAX_RESPONSE_TOKENS,
+                        reasoning_profile=ProviderReasoningProfile.default,
+                        continuation_state=continuation_state,
+                    )
                 )
-            )
-            provider_calls += 1
+                provider_calls += 1
 
-            if not result.tool_calls:
+                if not result.tool_calls:
+                    if (
+                        result.text is None
+                        or result.finish_reason == ProviderFinishReason.tool_call
+                    ):
+                        raise ProviderTurnError(
+                            ProviderErrorCategory.malformed_response
+                        )
+                    await self._require_current_authority(context)
+                    return FinalizedAITurnResult(
+                        text=result.text,
+                        audit_record=self._audit_record(
+                            turn=turn,
+                            policy_version=policy.version,
+                            exposed_capabilities=allowed_capabilities,
+                            capability_activity=capability_activity,
+                            outcome=AITurnOutcome.response_generated,
+                        ),
+                    )
+
+                if result.finish_reason != ProviderFinishReason.tool_call:
+                    raise ProviderTurnError(ProviderErrorCategory.malformed_response)
+                if tool_rounds >= self._limits.tool_rounds:
+                    raise AITurnBudgetExceeded("tool_rounds")
+                tool_rounds += 1
+
+                round_call_ids = {call.call_id for call in result.tool_calls}
                 if (
-                    result.text is None
-                    or result.finish_reason == ProviderFinishReason.tool_call
+                    len(round_call_ids) != len(result.tool_calls)
+                    or round_call_ids.intersection(seen_call_ids)
                 ):
                     raise ProviderTurnError(ProviderErrorCategory.malformed_response)
-                await self._require_current_authority(context)
-                return result.text
+                seen_call_ids.update(round_call_ids)
 
-            if result.finish_reason != ProviderFinishReason.tool_call:
-                raise ProviderTurnError(ProviderErrorCategory.malformed_response)
-            if tool_rounds >= self._limits.tool_rounds:
-                raise AITurnBudgetExceeded("tool_rounds")
-            tool_rounds += 1
+                if (
+                    capability_executions + len(result.tool_calls)
+                    > self._limits.capability_executions
+                ):
+                    raise AITurnBudgetExceeded("capability_executions")
+                for index, tool_call in enumerate(result.tool_calls):
+                    await self._require_current_authority(context)
+                    capability_executions += 1
+                    definition = self._capability_registry.resolve(
+                        tool_call.capability_name
+                    )
+                    if definition is not None and definition.terminal_on_success:
+                        execution_result, terminal_result = (
+                            await self._execute_terminal_capability(
+                                tool_call=tool_call,
+                                remaining_calls=result.tool_calls[index + 1 :],
+                                turn=turn,
+                                context=context,
+                                policy_version=policy.version,
+                                exposed_capabilities=allowed_capabilities,
+                                prior_activity=capability_activity,
+                            )
+                        )
+                        if terminal_result is not None:
+                            return terminal_result
+                    else:
+                        execution_result = await self._capability_executor.execute(
+                            requested_name=tool_call.capability_name,
+                            model_arguments=tool_call.arguments,
+                            allowed_capabilities=turn.allowed_capabilities,
+                            context=context,
+                        )
+                    capability_activity.append(
+                        _capability_audit_summary(tool_call, execution_result)
+                    )
+                    tool_result_messages.append(
+                        _provider_tool_result(tool_call, execution_result).as_message()
+                    )
 
-            round_call_ids = {call.call_id for call in result.tool_calls}
-            if (
-                len(round_call_ids) != len(result.tool_calls)
-                or round_call_ids.intersection(seen_call_ids)
-            ):
-                raise ProviderTurnError(ProviderErrorCategory.malformed_response)
-            seen_call_ids.update(round_call_ids)
+                continuation_state = result.continuation_state
+        except AITurnPersistenceError:
+            raise
+        except Exception as exc:
+            raise AITurnExecutionError(
+                self._audit_record(
+                    turn=turn,
+                    policy_version=policy.version,
+                    exposed_capabilities=allowed_capabilities,
+                    capability_activity=capability_activity,
+                    outcome=AITurnOutcome.failed,
+                    safe_code=_turn_failure_safe_code(exc),
+                ),
+                exc,
+            ) from None
 
-            if (
-                capability_executions + len(result.tool_calls)
-                > self._limits.capability_executions
-            ):
-                raise AITurnBudgetExceeded("capability_executions")
-            for tool_call in result.tool_calls:
-                await self._require_current_authority(context)
-                capability_executions += 1
-                execution_result = await self._capability_executor.execute(
-                    requested_name=tool_call.capability_name,
-                    model_arguments=tool_call.arguments,
-                    allowed_capabilities=turn.allowed_capabilities,
-                    context=context,
+    async def _execute_terminal_capability(
+        self,
+        *,
+        tool_call: ProviderToolCall,
+        remaining_calls: Sequence[ProviderToolCall],
+        turn: AITurn,
+        context: TrustedCapabilityContext,
+        policy_version: str,
+        exposed_capabilities: Sequence[ProviderCapability],
+        prior_activity: Sequence[CapabilityAuditSummary],
+    ) -> tuple[CapabilityExecutionResult, FinalizedAITurnResult | None]:
+        if self._durable_session_factory is None:
+            return (
+                CapabilityFailure(
+                    CapabilityErrorCategory.execution_failed,
+                    safe_code="transaction_required",
+                ),
+                None,
+            )
+
+        for attempt in range(_MAX_DURABLE_ACTION_ATTEMPTS):
+            async with self._durable_session_factory() as session:
+                try:
+                    execution_result = await self._capability_executor.execute(
+                        requested_name=tool_call.capability_name,
+                        model_arguments=tool_call.arguments,
+                        allowed_capabilities=turn.allowed_capabilities,
+                        context=context,
+                        runtime=CapabilityExecutionRuntime(
+                            transaction_session=session
+                        ),
+                    )
+                except CapabilityTransactionRetry:
+                    await session.rollback()
+                    if attempt + 1 < _MAX_DURABLE_ACTION_ATTEMPTS:
+                        continue
+                    return (
+                        CapabilityFailure(
+                            CapabilityErrorCategory.execution_failed,
+                            safe_code="handoff_unavailable",
+                        ),
+                        None,
+                    )
+
+                if isinstance(execution_result, CapabilityFailure):
+                    await session.rollback()
+                    return execution_result, None
+
+                activity = (
+                    *prior_activity,
+                    _capability_audit_summary(tool_call, execution_result),
+                    *(
+                        CapabilityAuditSummary(
+                            capability_name=remaining.capability_name,
+                            decision=CapabilityAuditDecision.requested,
+                            outcome=CapabilityAuditOutcome.not_executed,
+                        )
+                        for remaining in remaining_calls
+                    ),
                 )
-                tool_result_messages.append(
-                    _provider_tool_result(tool_call, execution_result).as_message()
+                audit_record = self._audit_record(
+                    turn=turn,
+                    policy_version=policy_version,
+                    exposed_capabilities=exposed_capabilities,
+                    capability_activity=activity,
+                    outcome=AITurnOutcome.handoff_requested,
+                )
+                try:
+                    await self._audit_appender(session, audit_record)
+                    await session.commit()
+                except Exception:
+                    await _rollback_quietly(session)
+                    raise AITurnPersistenceError from None
+                return (
+                    execution_result,
+                    FinalizedAITurnResult(
+                        text=None,
+                        audit_record=audit_record,
+                        audit_persisted=True,
+                    ),
                 )
 
-            continuation_state = result.continuation_state
+        raise AssertionError("durable action retry loop did not terminate")
+
+    def _audit_record(
+        self,
+        *,
+        turn: AITurn,
+        policy_version: str,
+        exposed_capabilities: Sequence[ProviderCapability],
+        capability_activity: Sequence[CapabilityAuditSummary],
+        outcome: AITurnOutcome,
+        safe_code: str | None = None,
+    ) -> AITurnAuditRecord:
+        identity = self._provider_identity
+        return AITurnAuditRecord(
+            turn_id=turn.turn_id,
+            conversation_id=turn.conversation_id,
+            source_message_id=turn.source_message_id,
+            policy_version=policy_version,
+            provider=identity.provider if identity is not None else None,
+            model=identity.model if identity is not None else None,
+            exposed_capabilities=tuple(
+                capability.name for capability in exposed_capabilities
+            ),
+            capability_activity=tuple(capability_activity),
+            outcome=outcome,
+            safe_code=safe_code,
+        )
 
     async def _require_current_authority(
         self,
@@ -215,10 +456,12 @@ class AITurnService:
 def get_ai_turn_service() -> AITurnService:
     """Build the service using the repository's existing adapter factory."""
     from app.adapters import get_provider_turn_adapter
+    from app.database import async_session_factory
 
     return AITurnService(
         get_provider_turn_adapter(),
         authority_checker=_ai_authority_is_current,
+        durable_session_factory=async_session_factory,
     )
 
 
@@ -233,6 +476,48 @@ async def _ai_authority_is_current(context: TrustedCapabilityContext) -> bool:
             context.conversation_id,
             expected_ownership_version=context.expected_ownership_version,
         )
+
+
+async def _rollback_quietly(session: AsyncSession) -> None:
+    try:
+        await session.rollback()
+    except Exception:
+        return
+
+
+def _capability_audit_summary(
+    tool_call: ProviderToolCall,
+    result: CapabilityExecutionResult,
+) -> CapabilityAuditSummary:
+    if isinstance(result, CapabilitySuccess):
+        return CapabilityAuditSummary(
+            capability_name=tool_call.capability_name,
+            decision=CapabilityAuditDecision.executed,
+            outcome=CapabilityAuditOutcome.success,
+        )
+    if result.error == CapabilityErrorCategory.execution_failed:
+        return CapabilityAuditSummary(
+            capability_name=tool_call.capability_name,
+            decision=CapabilityAuditDecision.executed,
+            outcome=CapabilityAuditOutcome.failed,
+            safe_code=result.safe_code or result.error.value,
+        )
+    return CapabilityAuditSummary(
+        capability_name=tool_call.capability_name,
+        decision=CapabilityAuditDecision.denied,
+        outcome=CapabilityAuditOutcome.denied,
+        safe_code=result.safe_code or result.error.value,
+    )
+
+
+def _turn_failure_safe_code(error: Exception) -> str:
+    if isinstance(error, ProviderTurnError):
+        return error.safe_code
+    if isinstance(error, StaleAITurnAuthority):
+        return "stale_ai_authority"
+    if isinstance(error, AITurnBudgetExceeded):
+        return "budget_exceeded"
+    return "provider_failure"
 
 
 def _provider_tool_result(

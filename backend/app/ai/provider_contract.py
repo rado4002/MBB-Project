@@ -63,6 +63,15 @@ SafeProviderIdentifier = Annotated[
         pattern=_SAFE_IDENTIFIER_PATTERN,
     ),
 ]
+SafeProviderMetadataIdentifier = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=100,
+        pattern=_SAFE_IDENTIFIER_PATTERN,
+    ),
+]
 
 
 class StrictProviderModel(BaseModel):
@@ -74,6 +83,13 @@ class StrictProviderModel(BaseModel):
         protected_namespaces=(),
         strict=True,
     )
+
+
+class ProviderIdentity(StrictProviderModel):
+    """Safe configured provider/model identity for provider-neutral provenance."""
+
+    provider: SafeProviderMetadataIdentifier
+    model: SafeProviderMetadataIdentifier | None = None
 
 
 class ProviderReasoningProfile(str, Enum):

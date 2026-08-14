@@ -7,10 +7,12 @@ __all__ = [
     "AISystemPolicy",
     "AITurn",
     "AITurnService",
+    "FinalizedAITurnResult",
     "ProviderCapability",
     "ProviderContinuationState",
     "ProviderErrorCategory",
     "ProviderFinishReason",
+    "ProviderIdentity",
     "ProviderMessage",
     "ProviderReasoningProfile",
     "ProviderToolCall",
@@ -33,6 +35,7 @@ def __getattr__(name: str) -> Any:
         "ProviderContinuationState",
         "ProviderErrorCategory",
         "ProviderFinishReason",
+        "ProviderIdentity",
         "ProviderMessage",
         "ProviderReasoningProfile",
         "ProviderToolCall",
@@ -44,7 +47,12 @@ def __getattr__(name: str) -> Any:
         from app.ai import provider_contract
 
         return getattr(provider_contract, name)
-    if name in {"AITurn", "AITurnService", "get_ai_turn_service"}:
+    if name in {
+        "AITurn",
+        "AITurnService",
+        "FinalizedAITurnResult",
+        "get_ai_turn_service",
+    }:
         from app.ai import turn
 
         return getattr(turn, name)

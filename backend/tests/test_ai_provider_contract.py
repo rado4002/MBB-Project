@@ -15,6 +15,7 @@ from app.ai.provider_contract import (
     ProviderContinuationState,
     ProviderErrorCategory,
     ProviderFinishReason,
+    ProviderIdentity,
     ProviderMessage,
     ProviderReasoningProfile,
     ProviderToolCall,
@@ -35,6 +36,23 @@ def _request(**overrides) -> ProviderTurnRequest:
     }
     values.update(overrides)
     return ProviderTurnRequest(**values)
+
+
+def test_provider_identity_is_strict_minimized_and_audit_bounded():
+    identity = ProviderIdentity(provider="scripted", model="offline-fixture")
+
+    assert identity.model_dump(mode="json") == {
+        "provider": "scripted",
+        "model": "offline-fixture",
+    }
+    with pytest.raises(ValidationError):
+        ProviderIdentity(provider="scripted", model="x" * 101)
+    with pytest.raises(ValidationError):
+        ProviderIdentity(
+            provider="scripted",
+            model="offline-fixture",
+            raw_response={"secret": True},
+        )
 
 
 def test_request_contract_is_strict_bounded_and_provider_neutral():

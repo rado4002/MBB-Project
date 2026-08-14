@@ -12,8 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 
 from app.ai.capabilities import (
     AI_CAPABILITY_REGISTRY,
+    CapabilityErrorCategory,
     CapabilityExecutor,
-    CapabilitySuccess,
+    CapabilityFailure,
     TrustedCapabilityContext,
 )
 from app.models.conversation import Conversation
@@ -484,7 +485,7 @@ async def test_stale_ai_generation_cannot_persist_or_send_after_complete_cycle(
 
 
 @pytest.mark.asyncio
-async def test_registered_capability_executes_with_only_trusted_authority_scope(
+async def test_registered_handoff_requires_caller_owned_transaction_runtime(
     engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -504,12 +505,17 @@ async def test_registered_capability_executes_with_only_trusted_authority_scope(
         ),
     )
 
-    assert isinstance(result, CapabilitySuccess)
-    assert result.output.state == "waiting_for_human"
-    assert result.output.ownership_version == 2
+    assert result == CapabilityFailure(
+        CapabilityErrorCategory.execution_failed,
+        safe_code="transaction_required",
+    )
     async with factory() as session:
         persisted = await session.get(Conversation, conversation.conversation_id)
         assert persisted is not None
         assert persisted.owner_type == "ai"
         assert persisted.human_owner_account_id is None
-        assert persisted.ai_execution_state == "paused"
+        assert persisted.ai_execution_state == "eligible"
+        assert persisted.ownership_version == 1
+        assert await session.scalar(
+            select(func.count()).select_from(EscalationTicket)
+        ) == 0

@@ -17,6 +17,7 @@ import structlog
 from celery import Task
 from sqlalchemy.exc import IntegrityError
 
+from app.ai.audit import AITurnAuditRecord, AITurnOutcome, append_ai_turn_audit
 from app.config import get_settings
 from app.i18n.messages import t
 from app.tasks.celery_app import celery_app, run_async
@@ -135,8 +136,10 @@ async def _persist_outbound(
     language: str,
     processing_time_ms: int,
     expected_ownership_version: int,
+    source_message_id: uuid.UUID | None = None,
+    audit_record: AITurnAuditRecord | None = None,
 ) -> uuid.UUID | None:
-    """Persist and commit the response identity before any outbound attempt."""
+    """Commit one response and its optional AI audit before any send attempt."""
     from app.database import async_session_factory
     from app.modules.m1_gateway.service import persist_outbound
 
@@ -162,6 +165,18 @@ async def _persist_outbound(
                 language=language,
                 processing_time_ms=processing_time_ms,
             )
+            if audit_record is not None:
+                if source_message_id is None:
+                    raise ValueError("AI audit requires an authoritative source message")
+                audit_values = audit_record.model_dump()
+                audit_values.update(
+                    source_message_id=source_message_id,
+                    outbound_message_id=outbound_id,
+                )
+                await append_ai_turn_audit(
+                    session,
+                    AITurnAuditRecord.model_validate(audit_values, strict=True),
+                )
             await session.commit()
             return outbound_id
         except Exception as exc:
@@ -396,24 +411,58 @@ async def _process(
         else:
             history = session_state.history
 
+        # End ownership/history reads before any provider inference begins.
+        await session.rollback()
+
         # ── Step 6: Generate response or use local fallback ───────────────────
-        from app.ai.turn import AITurn, get_ai_turn_service
+        from app.ai.turn import (
+            AITurn,
+            AITurnExecutionError,
+            AITurnPersistenceError,
+            get_ai_turn_service,
+        )
 
         ai_turn_service = get_ai_turn_service()
+        ai_turn = AITurn(
+            user_content=content,
+            language=language,
+            expected_ownership_version=expected_ownership_version,
+            conversation_id=inbound.conversation_id,
+            source_message_id=inbound.message_id,
+            history=history,
+            allowed_capabilities=_M1_AI_CAPABILITIES,
+        )
+        audit_record = None
         try:
-            ai_response = await ai_turn_service.generate(
-                AITurn(
-                    user_content=content,
-                    language=language,
-                    expected_ownership_version=expected_ownership_version,
-                    conversation_id=inbound.conversation_id,
-                    history=history,
-                    allowed_capabilities=_M1_AI_CAPABILITIES,
-                )
-            )
-        except Exception as exc:
+            finalized_turn = await ai_turn_service.generate_finalized(ai_turn)
+        except AITurnPersistenceError:
+            log.error("m1.ai_action.failed_closed", conv_id=conv_id)
+            return _persistence_failure_result(conv_id)
+        except AITurnExecutionError as exc:
             log.warning("m1.ai_fallback.used", conv_id=conv_id, error=str(exc))
             ai_response = t("error_fallback", language)
+            audit_values = exc.audit_record.model_dump()
+            audit_values["outcome"] = AITurnOutcome.fallback_used
+            audit_record = AITurnAuditRecord.model_validate(
+                audit_values,
+                strict=True,
+            )
+        except Exception as exc:
+            log.error(
+                "m1.ai_turn.unfinalized_failed_closed",
+                conv_id=conv_id,
+                error_type=type(exc).__name__,
+            )
+            return _persistence_failure_result(conv_id)
+        else:
+            if finalized_turn.text is None:
+                return {
+                    "status": "waiting_for_human",
+                    "conversation_id": conv_id,
+                    "send_status": "skipped",
+                }
+            ai_response = finalized_turn.text
+            audit_record = finalized_turn.audit_record
 
         processing_ms = int((time.monotonic() - t0) * 1000)
 
@@ -424,6 +473,8 @@ async def _process(
             language=language,
             processing_time_ms=processing_ms,
             expected_ownership_version=expected_ownership_version,
+            source_message_id=inbound.message_id,
+            audit_record=audit_record,
         )
         if out_msg_id is None:
             return _persistence_failure_result(conv_id)

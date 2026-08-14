@@ -10,6 +10,7 @@ from typing import Any
 
 from app.ai.provider_contract import (
     ProviderErrorCategory,
+    ProviderIdentity,
     ProviderMessage,
     ProviderTurnError,
     ProviderTurnRequest,
@@ -19,6 +20,16 @@ from app.ai.provider_contract import (
 
 class ProviderTurnAdapter(ABC):
     """Provider-neutral turn adapter boundary for future model integrations."""
+
+    provider_name: str | None = None
+    model: str | None = None
+
+    @property
+    def provider_identity(self) -> ProviderIdentity | None:
+        """Return safe configured identity metadata without provider payload data."""
+        if self.provider_name is None:
+            return None
+        return ProviderIdentity(provider=self.provider_name, model=self.model)
 
     @abstractmethod
     async def generate_turn(self, request: ProviderTurnRequest) -> ProviderTurnResult:

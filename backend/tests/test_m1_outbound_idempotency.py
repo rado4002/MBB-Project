@@ -4,6 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.ai.audit import AITurnAuditRecord, AITurnOutcome
+from app.ai.policy import AI_SYSTEM_POLICY_VERSION
+from app.ai.turn import AITurnExecutionError, FinalizedAITurnResult
 from app.modules.m1_gateway.service import ProcessedInbound
 from app.modules.m1_gateway.session_cache import SessionState
 from app.tasks import m1
@@ -47,23 +50,55 @@ class _Task:
         raise AssertionError("Celery retry called")
 
 
+def _audit_record(turn, *, outcome=AITurnOutcome.response_generated, safe_code=None):
+    return AITurnAuditRecord(
+        turn_id=turn.turn_id,
+        conversation_id=turn.conversation_id,
+        source_message_id=turn.source_message_id,
+        policy_version=AI_SYSTEM_POLICY_VERSION,
+        provider="scripted",
+        model="offline-fixture",
+        exposed_capabilities=tuple(sorted(turn.allowed_capabilities)),
+        outcome=outcome,
+        safe_code=safe_code,
+    )
+
+
 class _AI:
-    async def generate(self, *_args, **_kwargs):
-        return "outbound response"
+    async def generate_finalized(self, turn):
+        return FinalizedAITurnResult(
+            text="outbound response",
+            audit_record=_audit_record(turn),
+        )
 
 
 class _FailingAI:
-    async def generate(self, *_args, **_kwargs):
-        raise RuntimeError("AI unavailable")
+    async def generate_finalized(self, turn):
+        raise AITurnExecutionError(
+            _audit_record(
+                turn,
+                outcome=AITurnOutcome.failed,
+                safe_code="provider_failure",
+            ),
+            RuntimeError("AI unavailable"),
+        )
+
+
+class _UnfinalizedFailingAI:
+    async def generate_finalized(self, _turn):
+        raise RuntimeError("unexpected service contract failure")
 
 
 class _RecordingAI:
     def __init__(self):
         self.turns = []
 
-    async def generate(self, turn):
+    async def generate_finalized(self, turn):
         self.turns.append(turn)
-        return "outbound response"
+        return FinalizedAITurnResult(
+            text="outbound response",
+            audit_record=_audit_record(turn),
+        )
 
 
 class _Messaging:
@@ -71,6 +106,7 @@ class _Messaging:
         self.events = events
         self.error = error
         self.calls = []
+        self.audits = []
 
     async def send_message(self, phone, text, *, idempotency_key=None):
         self.events.append("adapter")
@@ -90,6 +126,7 @@ def _patch_normal_flow(
     outbound_id,
     outbound_commit_error=None,
     messaging_error=None,
+    audit_error=None,
     ai=None,
 ):
     import app.adapters as adapters
@@ -108,7 +145,7 @@ def _patch_normal_flow(
     inbound = ProcessedInbound(
         customer_phone="+243812345678",
         conversation_id=conversation_id,
-        message_id=uuid.uuid4(),
+        message_id=uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
         language="french",
     )
     messaging = _Messaging(events, error=messaging_error)
@@ -120,6 +157,13 @@ def _patch_normal_flow(
     async def persist_outbound(**_kwargs):
         events.append("persist")
         return outbound_id
+
+    async def append_audit(_session, record):
+        events.append("audit")
+        if audit_error is not None:
+            raise audit_error
+        messaging.audits.append(record)
+        return SimpleNamespace(turn_id=record.turn_id)
 
     async def get_session(_conversation_id):
         return SessionState(
@@ -139,6 +183,7 @@ def _patch_normal_flow(
     )
     monkeypatch.setattr(service, "process_inbound", process_inbound)
     monkeypatch.setattr(service, "persist_outbound", persist_outbound)
+    monkeypatch.setattr(m1, "append_ai_turn_audit", append_audit)
     monkeypatch.setattr(session_cache, "get_session", get_session)
     monkeypatch.setattr(session_cache, "save_session", save_session)
     monkeypatch.setattr(ai_turn, "get_ai_turn_service", lambda: ai or _AI())
@@ -194,7 +239,11 @@ def test_committed_outbound_uuid_reaches_send_safe_and_adapter(monkeypatch):
     assert messaging.calls == [
         ("+243812345678", "outbound response", str(outbound_id))
     ]
-    assert events.index("persist") < events.index("commit", 2) < events.index("adapter")
+    persisted_at = events.index("persist")
+    assert events[persisted_at : persisted_at + 3] == ["persist", "audit", "commit"]
+    assert persisted_at < events.index("adapter")
+    assert len(messaging.audits) == 1
+    assert messaging.audits[0].outbound_message_id == outbound_id
     assert result["outbound_message_id"] == str(outbound_id)
     assert result["send_status"] == "sent"
     assert result["provider_message_id"] == "provider-456"
@@ -216,6 +265,9 @@ def test_m1_binds_trusted_context_and_explicit_capability_exposure(monkeypatch):
     assert str(turn.conversation_id) == result["conversation_id"]
     assert turn.expected_ownership_version == 4
     assert turn.allowed_capabilities == m1._M1_AI_CAPABILITIES
+    assert turn.source_message_id == uuid.UUID(
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    )
 
 
 def test_human_ownership_stops_generation_persistence_and_send(monkeypatch):
@@ -290,9 +342,27 @@ def test_ai_failure_preserves_localized_fallback_and_outbound_path(monkeypatch):
     assert messaging.calls == [
         ("+243812345678", fallback, str(outbound_id))
     ]
-    assert events.index("persist") < events.index("commit", 2) < events.index("adapter")
+    persisted_at = events.index("persist")
+    assert events[persisted_at : persisted_at + 3] == ["persist", "audit", "commit"]
+    assert messaging.audits[0].outcome == AITurnOutcome.fallback_used.value
     assert result["status"] == "processed"
     assert result["outbound_message_id"] == str(outbound_id)
+
+
+def test_unfinalized_ai_failure_cannot_persist_unaudited_fallback(monkeypatch):
+    events, messaging = _patch_normal_flow(
+        monkeypatch,
+        outbound_id=uuid.uuid4(),
+        ai=_UnfinalizedFailingAI(),
+    )
+
+    result = _run(_process(_Task()))
+
+    assert result["status"] == "persistence_failed"
+    assert result["send_status"] == "unknown_or_failed"
+    assert events == ["inbound", "commit", "rollback"]
+    assert messaging.audits == []
+    assert messaging.calls == []
 
 
 def test_outbound_commit_failure_is_fail_closed_without_fallback_uuid(monkeypatch):
@@ -317,6 +387,27 @@ def test_outbound_commit_failure_is_fail_closed_without_fallback_uuid(monkeypatc
     assert "adapter" not in events
     assert "rollback" in events
     assert task.retry_calls == 0
+
+
+def test_audit_failure_rolls_back_outbound_and_prevents_send(monkeypatch):
+    events, messaging = _patch_normal_flow(
+        monkeypatch,
+        outbound_id=uuid.uuid4(),
+        audit_error=RuntimeError("fictional audit failure"),
+    )
+
+    result = _run(_process(_Task()))
+
+    assert result["status"] == "persistence_failed"
+    assert messaging.calls == []
+    assert "adapter" not in events
+    assert events.count("commit") == 1
+    persisted_at = events.index("persist")
+    assert events[persisted_at : persisted_at + 3] == [
+        "persist",
+        "audit",
+        "rollback",
+    ]
 
 
 def test_send_exception_is_unknown_without_celery_retry(monkeypatch):

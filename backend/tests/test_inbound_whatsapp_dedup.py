@@ -339,7 +339,7 @@ class DuplicateM1Tests(unittest.IsolatedAsyncioTestCase):
         duplicate_position = source.index("if inbound.is_duplicate")
         for downstream_marker in (
             "get_session(conv_id)",
-            "ai_turn_service.generate(",
+            "ai_turn_service.generate_finalized(",
             "persist_outbound(",
             "_dispatch_maps_fanout(",
             "detect_qualification_signals",

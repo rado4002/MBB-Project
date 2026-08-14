@@ -110,6 +110,21 @@ def _tool_call(
     }
 
 
+def test_adapter_exposes_only_safe_provider_identity_metadata() -> None:
+    adapter = DeepSeekAdapter(
+        api_key="fictional-key",
+        model=DEEPSEEK_DEFAULT_MODEL,
+        transport=_FakeTransport(_response()),
+    )
+
+    assert adapter.provider_identity is not None
+    assert adapter.provider_identity.model_dump(mode="json") == {
+        "provider": DEEPSEEK_PROVIDER_NAME,
+        "model": DEEPSEEK_DEFAULT_MODEL,
+    }
+    assert "fictional-key" not in adapter.provider_identity.model_dump_json()
+
+
 @pytest.mark.asyncio
 async def test_http_transport_uses_fixed_endpoint_bearer_auth_and_one_offline_attempt() -> None:
     attempts: list[httpx.Request] = []

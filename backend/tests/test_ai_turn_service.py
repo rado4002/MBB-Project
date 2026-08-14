@@ -4,6 +4,11 @@ import uuid
 
 import pytest
 
+from app.ai.audit import (
+    AITurnOutcome,
+    CapabilityAuditDecision,
+    CapabilityAuditOutcome,
+)
 from app.ai.capabilities import (
     CapabilityDefinition,
     CapabilityRegistry,
@@ -11,8 +16,10 @@ from app.ai.capabilities import (
 )
 from app.ai.policy import AI_SYSTEM_POLICY_VERSION, get_system_policy
 from app.ai.provider_contract import (
+    ProviderContinuationState,
     ProviderErrorCategory,
     ProviderFinishReason,
+    ProviderIdentity,
     ProviderMessage,
     ProviderToolCall,
     ProviderTurnError,
@@ -22,6 +29,7 @@ from app.ai.turn import (
     AITurn,
     AITurnBudgetExceeded,
     AITurnLimits,
+    AITurnPersistenceError,
     AITurnService,
     StaleAITurnAuthority,
 )
@@ -50,6 +58,46 @@ def _echo_registry(handler) -> CapabilityRegistry:
             ),
         )
     )
+
+
+def _terminal_registry(handler) -> CapabilityRegistry:
+    return CapabilityRegistry(
+        (
+            CapabilityDefinition(
+                name="terminal_action",
+                description="Apply one fictional terminal action.",
+                input_model=_EchoInput,
+                output_model=_EchoOutput,
+                handler=None,
+                transactional_handler=handler,
+                terminal_on_success=True,
+            ),
+        )
+    )
+
+
+class _TransactionSession:
+    def __init__(self) -> None:
+        self.events = []
+        self.mutated = False
+
+    async def commit(self):
+        self.events.append("commit")
+
+    async def rollback(self):
+        self.events.append("rollback")
+        self.mutated = False
+
+
+class _TransactionContext:
+    def __init__(self, session):
+        self.session = session
+
+    async def __aenter__(self):
+        return self.session
+
+    async def __aexit__(self, *_args):
+        return False
 
 
 class _SequenceAdapter:
@@ -255,11 +303,17 @@ async def test_exposed_capability_executes_and_returns_safe_continuation_result(
         authority_checker=_authority_allowed,
     )
 
-    result = await service.generate(
+    finalized = await service.generate_finalized(
         _turn(allowed_capabilities=("echo_value",))
     )
 
-    assert result == "Authoritative result used."
+    assert finalized.text == "Authoritative result used."
+    assert finalized.audit_record.capability_activity[0].capability_name == (
+        "echo_value"
+    )
+    assert finalized.audit_record.capability_activity[0].outcome == (
+        CapabilityAuditOutcome.success
+    )
     assert len(adapter.calls) == 2
     assert [item.name for item in adapter.calls[0].allowed_capabilities] == [
         "echo_value"
@@ -567,9 +621,19 @@ async def test_capability_exception_returns_only_safe_normalized_error():
         authority_checker=_authority_allowed,
     )
 
-    assert await service.generate(
+    finalized = await service.generate_finalized(
         _turn(allowed_capabilities=("echo_value",))
-    ) == "Safe fallback"
+    )
+    assert finalized.text == "Safe fallback"
+    assert finalized.audit_record.capability_activity[0].decision == (
+        CapabilityAuditDecision.executed
+    )
+    assert finalized.audit_record.capability_activity[0].outcome == (
+        CapabilityAuditOutcome.failed
+    )
+    assert finalized.audit_record.capability_activity[0].safe_code == (
+        "execution_failed"
+    )
     returned_content = adapter.calls[1].messages[-1].content
     assert "password" not in returned_content
     assert "stack" not in returned_content
@@ -577,6 +641,129 @@ async def test_capability_exception_returns_only_safe_normalized_error():
         "category": "execution_failed",
         "safe_code": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_finalized_result_preserves_safe_provider_and_policy_metadata():
+    source_message_id = uuid.uuid4()
+    service = AITurnService(
+        _RecordingAdapter(),
+        provider_identity=ProviderIdentity(
+            provider="scripted",
+            model="offline-fixture",
+        ),
+    )
+
+    finalized = await service.generate_finalized(
+        _turn(source_message_id=source_message_id)
+    )
+
+    assert finalized.text == "assistant response"
+    assert finalized.audit_persisted is False
+    assert finalized.audit_record.source_message_id == source_message_id
+    assert finalized.audit_record.policy_version == AI_SYSTEM_POLICY_VERSION
+    assert finalized.audit_record.provider == "scripted"
+    assert finalized.audit_record.model == "offline-fixture"
+    assert finalized.audit_record.outcome == AITurnOutcome.response_generated
+
+
+@pytest.mark.asyncio
+async def test_terminal_capability_commits_audit_and_never_continues_provider():
+    sentinel = "DO_NOT_PERSIST_REASONING_SENTINEL"
+    session = _TransactionSession()
+    persisted = []
+
+    async def handler(runtime_session, context, arguments):
+        assert runtime_session is session
+        runtime_session.mutated = True
+        return {
+            "value": arguments.value,
+            "trusted_conversation_id": context.conversation_id,
+        }
+
+    async def append_audit(runtime_session, record):
+        assert runtime_session.mutated
+        runtime_session.events.append("audit")
+        persisted.append(record)
+        return object()
+
+    adapter = _SequenceAdapter(
+        ProviderTurnResult(
+            tool_calls=(
+                _tool_call(name="terminal_action"),
+                _tool_call("later_call", name="terminal_action"),
+            ),
+            finish_reason=ProviderFinishReason.tool_call,
+            continuation_state=ProviderContinuationState(
+                value={"opaque_reasoning": sentinel}
+            ),
+        ),
+        ProviderTurnResult(
+            text="must not be reached",
+            finish_reason=ProviderFinishReason.completed,
+        ),
+    )
+    service = AITurnService(
+        adapter,
+        capability_registry=_terminal_registry(handler),
+        authority_checker=_authority_allowed,
+        durable_session_factory=lambda: _TransactionContext(session),
+        audit_appender=append_audit,
+    )
+
+    finalized = await service.generate_finalized(
+        _turn(allowed_capabilities=("terminal_action",))
+    )
+
+    assert finalized.text is None
+    assert finalized.audit_persisted is True
+    assert finalized.audit_record.outcome == AITurnOutcome.handoff_requested
+    assert len(adapter.calls) == 1
+    assert session.events == ["audit", "commit"]
+    assert [item.outcome for item in persisted[0].capability_activity] == [
+        CapabilityAuditOutcome.success,
+        CapabilityAuditOutcome.not_executed,
+    ]
+    assert sentinel not in persisted[0].model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_terminal_audit_failure_rolls_back_action_without_continuation():
+    session = _TransactionSession()
+
+    async def handler(runtime_session, context, arguments):
+        runtime_session.mutated = True
+        return {
+            "value": arguments.value,
+            "trusted_conversation_id": context.conversation_id,
+        }
+
+    async def fail_audit(_session, _record):
+        raise RuntimeError("private database detail")
+
+    adapter = _SequenceAdapter(
+        _tool_result(_tool_call(name="terminal_action")),
+        ProviderTurnResult(
+            text="must not be reached",
+            finish_reason=ProviderFinishReason.completed,
+        ),
+    )
+    service = AITurnService(
+        adapter,
+        capability_registry=_terminal_registry(handler),
+        authority_checker=_authority_allowed,
+        durable_session_factory=lambda: _TransactionContext(session),
+        audit_appender=fail_audit,
+    )
+
+    with pytest.raises(AITurnPersistenceError, match="ai_turn_persistence_failed"):
+        await service.generate_finalized(
+            _turn(allowed_capabilities=("terminal_action",))
+        )
+
+    assert session.mutated is False
+    assert session.events == ["rollback"]
+    assert len(adapter.calls) == 1
 
 
 @pytest.mark.asyncio

@@ -322,6 +322,26 @@ async def test_handoff_rejects_model_supplied_authority(authority_argument):
     assert result == CapabilityFailure(CapabilityErrorCategory.invalid_arguments)
 
 
+@pytest.mark.asyncio
+async def test_handoff_requires_separate_server_transaction_runtime():
+    result = await CapabilityExecutor(AI_CAPABILITY_REGISTRY).execute(
+        requested_name="request_human_handoff",
+        model_arguments={"reason_category": "customer_requested_human"},
+        allowed_capabilities={"request_human_handoff"},
+        context=_context(),
+    )
+
+    assert result == CapabilityFailure(
+        CapabilityErrorCategory.execution_failed,
+        safe_code="transaction_required",
+    )
+    assert set(TrustedCapabilityContext.__dataclass_fields__) == {
+        "conversation_id",
+        "turn_id",
+        "expected_ownership_version",
+    }
+
+
 def test_core_source_is_provider_neutral_and_has_no_dynamic_discovery():
     import app.ai.capabilities as capability_module
 
