@@ -7,6 +7,8 @@ import uuid
 from pathlib import Path
 
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -57,6 +59,17 @@ def _migrate(database_url: str, command: str, revision: str) -> None:
         capture_output=True,
         text=True,
     )
+
+
+def _repository_head_revision() -> str:
+    config = Config()
+    config.set_main_option(
+        "script_location",
+        str(Path(__file__).resolve().parents[1] / "alembic"),
+    )
+    revision = ScriptDirectory.from_config(config).get_current_head()
+    assert revision is not None
+    return revision
 
 
 @pytest.mark.asyncio
@@ -214,9 +227,7 @@ async def test_migration_round_trip_references_and_existing_rows_are_preserved()
             text("SELECT to_regclass('mbb.ai_turn_audits') IS NOT NULL")
         )
         assert await connection.scalar(
-            text(
-                "SELECT version_num = 'a7b8c9d0e1f2' FROM mbb.alembic_version"
-            )
-        )
+            text("SELECT version_num FROM mbb.alembic_version")
+        ) == _repository_head_revision()
         assert await connection.scalar(text("SELECT COUNT(*) FROM mbb.customers")) == 1
     await engine.dispose()

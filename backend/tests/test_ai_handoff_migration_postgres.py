@@ -7,6 +7,8 @@ import uuid
 from pathlib import Path
 
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
@@ -14,7 +16,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 DATABASE_URL = os.environ.get("AI1E_MIGRATION_DATABASE_URL")
 PREVIOUS_REVISION = "f6a7b8c9d0e1"
-AI1E_REVISION = "a7b8c9d0e1f2"
 
 pytestmark = pytest.mark.skipif(
     not DATABASE_URL,
@@ -45,6 +46,17 @@ def _migrate(database_url: str, command: str, revision: str) -> None:
         capture_output=True,
         text=True,
     )
+
+
+def _repository_head_revision() -> str:
+    config = Config()
+    config.set_main_option(
+        "script_location",
+        str(Path(__file__).resolve().parents[1] / "alembic"),
+    )
+    revision = ScriptDirectory.from_config(config).get_current_head()
+    assert revision is not None
+    return revision
 
 
 async def _invalid_update(engine, statement: str, parameters: dict) -> None:
@@ -248,11 +260,8 @@ async def test_ai_handoff_migration_round_trip_and_constraints() -> None:
     engine = create_async_engine(DATABASE_URL)
     async with engine.connect() as connection:
         assert await connection.scalar(
-            text(
-                f"SELECT version_num = '{AI1E_REVISION}' "
-                "FROM mbb.alembic_version"
-            )
-        )
+            text("SELECT version_num FROM mbb.alembic_version")
+        ) == _repository_head_revision()
         assert await connection.scalar(
             text("SELECT COUNT(*) FROM mbb.conversations")
         ) == 3
