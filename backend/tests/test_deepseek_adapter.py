@@ -646,12 +646,14 @@ async def test_provider_errors_are_normalized_without_raw_details(
 def test_configuration_defaults_and_missing_key_fail_closed_without_transport() -> None:
     settings = Settings(
         ai_adapter="disabled",
+        ai_turn_provider="disabled",
         deepseek_api_key="",
         deepseek_model=DEEPSEEK_DEFAULT_MODEL,
         deepseek_timeout_s=60,
     )
 
     assert settings.ai_adapter == "disabled"
+    assert settings.ai_turn_provider == "disabled"
     assert settings.deepseek_model == DEEPSEEK_DEFAULT_MODEL
     assert settings.deepseek_timeout_s == 60
     assert not hasattr(settings, "deepseek_base_url")

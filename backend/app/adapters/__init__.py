@@ -8,8 +8,8 @@ Usage:
     response = await ai.generate(prompt, system, max_tokens)
 
 Switch provider-turn adapters by changing env vars — no module code changes required:
-    AI_ADAPTER=disabled | deepseek | claude
-Legacy get_ai_adapter callers remain limited to disabled | claude.
+    AI_TURN_PROVIDER=disabled | deepseek | claude
+Legacy get_ai_adapter callers remain controlled by AI_ADAPTER=disabled | claude.
     CRM_ADAPTER=airtable | mbb_hub
     INVENTORY_ADAPTER=static | mbb_box
     PAYMENT_ADAPTER=mobile_money
@@ -60,7 +60,7 @@ def get_ai_adapter() -> BaseAIAdapter:
 
 @lru_cache()
 def get_provider_turn_adapter() -> ProviderTurnAdapter:
-    return _build_provider_turn_adapter(settings.ai_adapter)
+    return _build_provider_turn_adapter(settings.ai_turn_provider)
 
 
 def ai_adapter_eligibility(

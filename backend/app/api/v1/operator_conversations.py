@@ -744,7 +744,7 @@ async def change_operator_conversation_ownership(
             idempotency_key=idempotency_key,
             idempotency_secret=settings.browser_idempotency_hmac_secret,
             request_id=request_id,
-            ai_adapter=settings.ai_adapter,
+            ai_adapter=settings.ai_turn_provider,
             source_network_fingerprint=(
                 principal.session.record.ip_prefix_fingerprint
             ),

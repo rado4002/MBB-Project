@@ -125,6 +125,7 @@ class AITurn:
     source_message_id: uuid.UUID | None = None
     history: Sequence[Mapping[str, str]] = ()
     allowed_capabilities: tuple[str, ...] = ()
+    reasoning_profile: ProviderReasoningProfile = ProviderReasoningProfile.default
     turn_id: uuid.UUID = field(default_factory=uuid.uuid4, init=False)
 
     def __post_init__(self) -> None:
@@ -139,6 +140,8 @@ class AITurn:
             raise ValueError("source message ID must be a UUID")
         if len(self.allowed_capabilities) != len(set(self.allowed_capabilities)):
             raise ValueError("allowed capability names must be unique")
+        if not isinstance(self.reasoning_profile, ProviderReasoningProfile):
+            raise ValueError("reasoning profile must be provider-neutral and typed")
 
 
 @dataclass(frozen=True)
@@ -234,7 +237,7 @@ class AITurnService:
                         system_instruction=policy.text,
                         allowed_capabilities=allowed_capabilities,
                         max_output_tokens=_MAX_RESPONSE_TOKENS,
-                        reasoning_profile=ProviderReasoningProfile.default,
+                        reasoning_profile=turn.reasoning_profile,
                         continuation_state=continuation_state,
                     )
                 )

@@ -33,6 +33,7 @@ class Settings(BaseSettings):
 
     # ── Adapters ──────────────────────────────────────────────────────────────
     ai_adapter: str = "disabled"
+    ai_turn_provider: str = "disabled"
     crm_adapter: str = "airtable"
     inventory_adapter: str = "static"
     payment_adapter: str = "mobile_money"

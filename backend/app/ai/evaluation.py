@@ -466,6 +466,9 @@ class EvaluationRunner:
         if corpus.version != self._metadata.corpus_version:
             raise ValueError("evaluation corpus version does not match run metadata")
         selected = _select_cases(corpus, case_ids)
+        prepare_run = getattr(self._source, "prepare_run", None)
+        if callable(prepare_run):
+            prepare_run(selected)
         results = []
         for case in selected:
             observation = await self._source.observe(case)
