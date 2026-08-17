@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import io
 import inspect
 import json
 import uuid
@@ -15,7 +16,14 @@ from app.api.v1 import operator_conversations
 from app.adapters.ai.deepseek_adapter import DeepSeekAdapter
 from app.adapters.ai.disabled_adapter import DisabledAIAdapter
 from app.adapters.base import ProviderTurnAdapter
-from app.ai.evaluation import EvaluationOutcomeClass, EvaluationRunner
+from app.ai.evaluation import (
+    EvaluationObservation,
+    EvaluationOutcomeClass,
+    EvaluationReplay,
+    EvaluationRunMetadata,
+    EvaluationRunner,
+    RecordedProviderCall,
+)
 from app.ai.evaluation_corpus import get_mbb_evaluation_corpus
 from app.ai.live_evaluation import (
     FIRST_LIVE_CANARY_CASE_IDS,
@@ -41,6 +49,11 @@ from app.schemas.common import Language
 from scripts import run_ai_evaluation
 
 _FAKE_SECRET_SENTINEL = "DO_NOT_PERSIST_DEEPSEEK_SECRET_SENTINEL"
+_MULTILINGUAL_REPORT_TEXT = (
+    "Bonjour, c\u2019est disponible ?\n"
+    "Ndeko, ezali disponible ?\n"
+    "L\u2019occasion \U0001F600"
+)
 
 
 class _ScriptedAdapter(ProviderTurnAdapter):
@@ -74,6 +87,38 @@ def _text_result(text: str = "Réponse fictive.") -> ProviderTurnResult:
     return ProviderTurnResult(
         text=text,
         finish_reason=ProviderFinishReason.completed,
+    )
+
+
+def _replay_with_final_text(text: str) -> EvaluationReplay:
+    return EvaluationReplay(
+        metadata=EvaluationRunMetadata(
+            corpus_version="mbb-ai-eval-v1",
+            provider="offline",
+            model="offline-fixture",
+            reasoning_profile=ProviderReasoningProfile.minimal,
+            policy_version="mbb-ai-policy-v1",
+        ),
+        observations=(
+            EvaluationObservation(
+                case_id="product.discovery.vague_need",
+                provider_calls=(
+                    RecordedProviderCall(result=_text_result(text)),
+                ),
+                final_outcome=EvaluationOutcomeClass.answer,
+            ),
+        ),
+    )
+
+
+def _replay_args(replay_path, *, pretty: bool) -> argparse.Namespace:
+    return argparse.Namespace(
+        replay=replay_path,
+        live=False,
+        profiles=None,
+        case_ids=["product.discovery.vague_need"],
+        output=None,
+        pretty=pretty,
     )
 
 
@@ -451,7 +496,7 @@ async def test_external_effect_gate_failure_precedes_adapter_construction() -> N
 @pytest.mark.asyncio
 async def test_live_matrix_never_serializes_or_logs_ephemeral_secret(caplog) -> None:
     adapter = _ScriptedAdapter(
-        [_text_result() for _ in FIRST_LIVE_CANARY_CASE_IDS],
+        [_text_result(_MULTILINGUAL_REPORT_TEXT) for _ in FIRST_LIVE_CANARY_CASE_IDS],
         secret=_FAKE_SECRET_SENTINEL,
     )
     output = await run_ai_evaluation._run_live(
@@ -463,6 +508,10 @@ async def test_live_matrix_never_serializes_or_logs_ephemeral_secret(caplog) -> 
 
     assert _FAKE_SECRET_SENTINEL not in output
     assert _FAKE_SECRET_SENTINEL not in caplog.text
+    assert output.isascii()
+    assert json.loads(output)["reports"][0]["case_results"][0]["final_text"] == (
+        _MULTILINGUAL_REPORT_TEXT
+    )
     assert len(adapter.requests) == len(FIRST_LIVE_CANARY_CASE_IDS)
 
 
@@ -497,6 +546,83 @@ async def test_live_matrix_binds_all_four_profiles_to_actual_requests() -> None:
         assert {
             request.reasoning_profile for request in adapter.requests[start:stop]
         } == {profile}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pretty", (False, True))
+async def test_replay_report_serialization_preserves_multilingual_content(
+    tmp_path,
+    pretty: bool,
+) -> None:
+    replay_path = tmp_path / "unicode-replay.json"
+    replay_path.write_text(
+        _replay_with_final_text(_MULTILINGUAL_REPORT_TEXT).model_dump_json(),
+        encoding="utf-8",
+    )
+
+    output = await run_ai_evaluation._run_replay(
+        _replay_args(replay_path, pretty=pretty)
+    )
+
+    assert output.isascii()
+    assert ("\n" in output) is pretty
+    assert json.loads(output)["case_results"][0]["final_text"] == (
+        _MULTILINGUAL_REPORT_TEXT
+    )
+
+
+@pytest.mark.parametrize("pretty", (False, True))
+def test_cli_emits_multilingual_replay_to_cp1252_stream(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    pretty: bool,
+) -> None:
+    replay_path = tmp_path / "unicode-replay.json"
+    replay_path.write_text(
+        _replay_with_final_text(_MULTILINGUAL_REPORT_TEXT).model_dump_json(),
+        encoding="utf-8",
+    )
+    output_bytes = io.BytesIO()
+    output_stream = io.TextIOWrapper(
+        output_bytes,
+        encoding="cp1252",
+        errors="strict",
+    )
+
+    monkeypatch.setattr(
+        run_ai_evaluation,
+        "build_parser",
+        lambda: type("Parser", (), {"parse_args": lambda _self: _replay_args(
+            replay_path,
+            pretty=pretty,
+        )})(),
+    )
+    monkeypatch.setattr(run_ai_evaluation.sys, "stdout", output_stream)
+
+    assert run_ai_evaluation.main() == 0
+    output_stream.flush()
+    emitted = output_bytes.getvalue().decode("cp1252")
+    assert emitted.isascii()
+    assert json.loads(emitted)["case_results"][0]["final_text"] == (
+        _MULTILINGUAL_REPORT_TEXT
+    )
+
+
+def test_replay_report_serialization_preserves_ascii_output(tmp_path) -> None:
+    replay_path = tmp_path / "ascii-replay.json"
+    replay_path.write_text(
+        _replay_with_final_text("ASCII evaluation response.").model_dump_json(),
+        encoding="utf-8",
+    )
+
+    output = asyncio.run(
+        run_ai_evaluation._run_replay(_replay_args(replay_path, pretty=False))
+    )
+
+    assert "\\u" not in output
+    assert json.loads(output)["case_results"][0]["final_text"] == (
+        "ASCII evaluation response."
+    )
 
 
 def test_cli_error_reporting_redacts_arbitrary_exception_text(

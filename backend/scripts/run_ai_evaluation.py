@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -103,7 +105,7 @@ async def _run_replay(args: argparse.Namespace) -> str:
         get_mbb_evaluation_corpus(),
         case_ids=args.case_ids,
     )
-    return report.model_dump_json(indent=2 if args.pretty else None)
+    return _serialize_report(report, pretty=args.pretty)
 
 
 async def _run_live(
@@ -157,7 +159,16 @@ async def _run_live(
         budget=run_budget,
         reports=tuple(reports),
     )
-    return matrix.model_dump_json(indent=2 if args.pretty else None)
+    return _serialize_report(matrix, pretty=args.pretty)
+
+
+def _serialize_report(report: BaseModel, *, pretty: bool) -> str:
+    return json.dumps(
+        report.model_dump(mode="json"),
+        ensure_ascii=True,
+        indent=2 if pretty else None,
+        separators=None if pretty else (",", ":"),
+    )
 
 
 def _profiles(values: Sequence[str] | None) -> tuple[ProviderReasoningProfile, ...]:
