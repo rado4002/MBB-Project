@@ -838,7 +838,7 @@ def test_turn_requires_a_positive_ownership_generation():
 def test_policy_is_explicitly_versioned_and_contains_authority_limits():
     policy = get_system_policy("french")
 
-    assert AI_SYSTEM_POLICY_VERSION == "mbb-ai-policy-v1"
+    assert AI_SYSTEM_POLICY_VERSION == "mbb-ai-policy-v2"
     assert policy.version == AI_SYSTEM_POLICY_VERSION
     assert "MBB AI Assistant" in policy.text
     for prohibited_fact in (
@@ -853,6 +853,9 @@ def test_policy_is_explicitly_versioned_and_contains_authority_limits():
     ):
         assert prohibited_fact in policy.text
     assert "Human operators remain authoritative" in policy.text
+    assert "matching\napproved capability is available for the current turn" in policy.text
+    assert "reserve, hold, notify, contact later, book, change delivery" in policy.text
+    assert "Je vais vérifier et je reviens vers toi" not in policy.text
 
 
 def test_new_ai_modules_are_provider_neutral():

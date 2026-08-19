@@ -97,7 +97,7 @@ def _replay_with_final_text(text: str) -> EvaluationReplay:
             provider="offline",
             model="offline-fixture",
             reasoning_profile=ProviderReasoningProfile.minimal,
-            policy_version="mbb-ai-policy-v1",
+            policy_version="mbb-ai-policy-v2",
         ),
         observations=(
             EvaluationObservation(
@@ -270,6 +270,7 @@ async def test_live_source_terminal_handoff_fixture_stops_continuation() -> None
     assert observation.final_outcome == EvaluationOutcomeClass.handoff
     assert len(adapter.requests) == 1
     assert observation.tool_results[0].status == "success"
+    assert observation.provider_calls[-1].result.text is None
 
 
 @pytest.mark.asyncio
@@ -384,7 +385,7 @@ async def test_case_budget_preflight_stops_before_partial_runner_activity() -> N
         provider="scripted",
         model="offline-fixture",
         reasoning_profile=ProviderReasoningProfile.default,
-        policy_version="mbb-ai-policy-v1",
+        policy_version="mbb-ai-policy-v2",
     )
 
     with pytest.raises(LiveEvaluationBudgetExceeded, match="case_executions"):
