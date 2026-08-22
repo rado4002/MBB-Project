@@ -30,6 +30,12 @@ from app.ai.capabilities import (
     CapabilityTransactionRetry,
     TrustedCapabilityContext,
 )
+from app.ai.commercial_response import (
+    CommercialResponseError,
+    commercial_response_fallback,
+    commercial_response_mode,
+    validate_and_render_commercial_response,
+)
 from app.ai.policy import get_system_policy
 from app.ai.provider_contract import (
     ProviderCapability,
@@ -200,7 +206,6 @@ class AITurnService:
 
     async def generate_finalized(self, turn: AITurn) -> FinalizedAITurnResult:
         """Run one bounded turn and finalize only minimized safe provenance."""
-        policy = get_system_policy(turn.language)
         context = TrustedCapabilityContext(
             conversation_id=turn.conversation_id,
             turn_id=turn.turn_id,
@@ -215,10 +220,20 @@ class AITurnService:
                 turn.allowed_capabilities
             )
         )
+        exposed_capability_names = tuple(
+            capability.name for capability in allowed_capabilities
+        )
+        structured_commercial = commercial_response_mode(exposed_capability_names)
+        policy = get_system_policy(
+            turn.language,
+            structured_commercial=structured_commercial,
+        )
         base_messages = (
             ProviderMessage(role="user", content=_build_runtime_prompt(turn)),
         )
         tool_result_messages: list[ProviderMessage] = []
+        executed_tool_calls: list[ProviderToolCall] = []
+        provider_tool_results: list[ProviderToolResult] = []
         capability_activity: list[CapabilityAuditSummary] = []
         seen_call_ids: set[str] = set()
         continuation_state = None
@@ -252,14 +267,31 @@ class AITurnService:
                             ProviderErrorCategory.malformed_response
                         )
                     await self._require_current_authority(context)
+                    final_text = result.text
+                    outcome = AITurnOutcome.response_generated
+                    safe_code = None
+                    if structured_commercial:
+                        try:
+                            final_text = validate_and_render_commercial_response(
+                                result.text,
+                                language=turn.language,
+                                exposed_capabilities=exposed_capability_names,
+                                tool_calls=executed_tool_calls,
+                                tool_results=provider_tool_results,
+                            )
+                        except CommercialResponseError as exc:
+                            final_text = commercial_response_fallback(turn.language)
+                            outcome = AITurnOutcome.fallback_used
+                            safe_code = exc.safe_code
                     return FinalizedAITurnResult(
-                        text=result.text,
+                        text=final_text,
                         audit_record=self._audit_record(
                             turn=turn,
                             policy_version=policy.version,
                             exposed_capabilities=allowed_capabilities,
                             capability_activity=capability_activity,
-                            outcome=AITurnOutcome.response_generated,
+                            outcome=outcome,
+                            safe_code=safe_code,
                         ),
                     )
 
@@ -312,9 +344,13 @@ class AITurnService:
                     capability_activity.append(
                         _capability_audit_summary(tool_call, execution_result)
                     )
-                    tool_result_messages.append(
-                        _provider_tool_result(tool_call, execution_result).as_message()
+                    provider_tool_result = _provider_tool_result(
+                        tool_call,
+                        execution_result,
                     )
+                    executed_tool_calls.append(tool_call)
+                    provider_tool_results.append(provider_tool_result)
+                    tool_result_messages.append(provider_tool_result.as_message())
 
                 continuation_state = result.continuation_state
         except AITurnPersistenceError:
