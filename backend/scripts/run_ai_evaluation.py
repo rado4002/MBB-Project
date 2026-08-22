@@ -37,6 +37,8 @@ from app.ai.live_evaluation import (  # noqa: E402
     LiveEvaluationConfigurationError,
     LiveEvaluationFailureReport,
     LiveEvaluationMatrixReport,
+    LiveEvaluationProviderFailure,
+    LiveEvaluationProviderFailureReport,
     LiveEvaluationRunBudget,
     LiveEvaluationSource,
 )
@@ -284,6 +286,17 @@ def main() -> int:
                 print(failure_output)
             else:
                 _write_output(args.output, failure_output)
+        print(f"Evaluation failed: {exc}", file=sys.stderr)
+        return 1
+    except LiveEvaluationProviderFailure as exc:
+        failure_output = _serialize_report(
+            LiveEvaluationProviderFailureReport(failure=exc.evidence),
+            pretty=args.pretty,
+        )
+        if args.output is None:
+            print(failure_output)
+        else:
+            _write_output(args.output, failure_output)
         print(f"Evaluation failed: {exc}", file=sys.stderr)
         return 1
     except LiveEvaluationConfigurationError as exc:

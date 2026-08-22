@@ -32,6 +32,7 @@ from app.ai.live_evaluation import (
     LiveEvaluationBudgetState,
     LiveEvaluationConfigurationError,
     LiveEvaluationFailureReport,
+    LiveEvaluationProviderFailure,
     LiveEvaluationRunBudget,
     LiveEvaluationSource,
 )
@@ -39,7 +40,9 @@ from app.ai.provider_contract import (
     ProviderFinishReason,
     ProviderIdentity,
     ProviderReasoningProfile,
+    ProviderErrorCategory,
     ProviderToolCall,
+    ProviderTurnError,
     ProviderTurnRequest,
     ProviderTurnResult,
 )
@@ -452,6 +455,49 @@ async def test_http_timeout_cancels_without_retry() -> None:
     assert evidence.configured_limit == 1
     assert evidence.observed_value >= 1
     assert evidence.completed_provider_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_preserves_only_sanitized_evaluation_evidence() -> None:
+    now = 10.0
+
+    def _clock() -> float:
+        return now
+
+    class _FailingAdapter(ProviderTurnAdapter):
+        provider_name = "scripted"
+        model = "offline-fixture"
+
+        async def generate_turn(
+            self, _request: ProviderTurnRequest
+        ) -> ProviderTurnResult:
+            nonlocal now
+            now = 12.25
+            raise ProviderTurnError(
+                ProviderErrorCategory.authentication,
+                provider_request_id="safe-request-id",
+            ) from RuntimeError(_FAKE_SECRET_SENTINEL)
+
+    with pytest.raises(LiveEvaluationProviderFailure) as captured:
+        await _source(_FailingAdapter(), clock=_clock).observe(
+            _case("product.discovery.budget_usd")
+        )
+
+    evidence = captured.value.evidence
+    assert evidence.case_id == "product.discovery.budget_usd"
+    assert evidence.provider_call_index == 1
+    assert evidence.elapsed_seconds == 2.25
+    assert evidence.error_category == "authentication"
+    assert evidence.http_status_code is None
+    assert evidence.completed_provider_calls == 0
+    assert evidence.completed_tool_rounds == 0
+    assert evidence.completed_capability_executions == 0
+    serialized = run_ai_evaluation._serialize_report(
+        run_ai_evaluation.LiveEvaluationProviderFailureReport(failure=evidence),
+        pretty=True,
+    )
+    assert _FAKE_SECRET_SENTINEL not in serialized
+    assert "safe-request-id" not in serialized
 
 
 @pytest.mark.asyncio

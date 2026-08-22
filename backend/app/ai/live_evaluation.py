@@ -31,6 +31,7 @@ from app.ai.provider_contract import (
     ProviderToolCall,
     ProviderToolError,
     ProviderToolResult,
+    ProviderTurnError,
     ProviderTurnRequest,
 )
 
@@ -91,6 +92,34 @@ class LiveEvaluationFailureEvidence(StrictEvaluationModel):
 class LiveEvaluationFailureReport(StrictEvaluationModel):
     status: Literal["failed"] = "failed"
     failure: LiveEvaluationFailureEvidence
+
+
+class LiveEvaluationProviderFailureEvidence(StrictEvaluationModel):
+    """Sanitized context retained when a provider turn fails."""
+
+    case_id: EvaluationIdentifier
+    provider_call_index: int = Field(ge=1)
+    elapsed_seconds: float = Field(ge=0)
+    error_category: EvaluationIdentifier
+    http_status_code: int | None = Field(default=None, ge=100, le=599)
+    completed_provider_calls: int = Field(ge=0)
+    completed_tool_rounds: int = Field(ge=0)
+    completed_capability_executions: int = Field(ge=0)
+    provider_call_evidence: tuple[RecordedProviderCall, ...] = ()
+    tool_result_evidence: tuple[ProviderToolResult, ...] = ()
+
+
+class LiveEvaluationProviderFailureReport(StrictEvaluationModel):
+    status: Literal["failed"] = "failed"
+    failure: LiveEvaluationProviderFailureEvidence
+
+
+class LiveEvaluationProviderFailure(RuntimeError):
+    """Safe evaluation-only wrapper for a normalized provider failure."""
+
+    def __init__(self, evidence: LiveEvaluationProviderFailureEvidence) -> None:
+        self.evidence = evidence
+        super().__init__(f"live_evaluation_provider_failure:{evidence.error_category}")
 
 
 class LiveEvaluationBudgetExceeded(RuntimeError):
@@ -358,6 +387,25 @@ class LiveEvaluationSource:
                     self._adapter.generate_turn(request),
                     timeout=timeout_seconds,
                 )
+            except ProviderTurnError as exc:
+                raise LiveEvaluationProviderFailure(
+                    LiveEvaluationProviderFailureEvidence(
+                        case_id=case.case_id,
+                        provider_call_index=case_budget.provider_calls,
+                        elapsed_seconds=max(
+                            0.0,
+                            self._budget_state.clock() - started_at,
+                        ),
+                        error_category=exc.safe_code,
+                        completed_provider_calls=len(recorded_calls),
+                        completed_tool_rounds=case_budget.tool_rounds,
+                        completed_capability_executions=(
+                            case_budget.capability_executions
+                        ),
+                        provider_call_evidence=tuple(recorded_calls),
+                        tool_result_evidence=tuple(tool_results),
+                    )
+                ) from None
             except TimeoutError:
                 try:
                     self._budget_state.require_time(case.case_id, case_budget)
