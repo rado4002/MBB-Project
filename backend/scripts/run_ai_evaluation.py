@@ -275,14 +275,15 @@ def main() -> int:
         else:
             _write_output(args.output, output)
     except LiveEvaluationBudgetExceeded as exc:
-        if args.output is not None and exc.evidence is not None:
-            _write_output(
-                args.output,
-                _serialize_report(
-                    LiveEvaluationFailureReport(failure=exc.evidence),
-                    pretty=args.pretty,
-                ),
+        if exc.evidence is not None:
+            failure_output = _serialize_report(
+                LiveEvaluationFailureReport(failure=exc.evidence),
+                pretty=args.pretty,
             )
+            if args.output is None:
+                print(failure_output)
+            else:
+                _write_output(args.output, failure_output)
         print(f"Evaluation failed: {exc}", file=sys.stderr)
         return 1
     except LiveEvaluationConfigurationError as exc:

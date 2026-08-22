@@ -281,9 +281,25 @@ async def test_total_provider_budget_stops_before_another_case_call() -> None:
     case = _case("product.discovery.vague_need")
 
     await source.observe(case)
-    with pytest.raises(LiveEvaluationBudgetExceeded, match="total_provider_calls"):
+    with pytest.raises(
+        LiveEvaluationBudgetExceeded, match="total_provider_calls"
+    ) as captured:
         await source.observe(case)
     assert len(adapter.requests) == 1
+    assert captured.value.evidence is not None
+    assert captured.value.evidence.model_dump(exclude={"provider_call_evidence"}) == {
+        "case_id": "product.discovery.vague_need",
+        "exceeded_budget": "total_provider_calls",
+        "configured_limit": 1,
+        "observed_value": 2,
+        "completed_provider_calls": 0,
+        "completed_tool_rounds": 0,
+        "completed_capability_executions": 0,
+        "tool_result_evidence": (),
+        "first_tool_call": None,
+        "first_tool_result": None,
+        "rejected_tool_calls": (),
+    }
 
 
 @pytest.mark.asyncio
@@ -291,9 +307,19 @@ async def test_per_case_provider_budget_stops_before_continuation() -> None:
     adapter = _ScriptedAdapter([_tool_result("call_search")])
     source = _source(adapter, budget=_budget(max_provider_calls_per_case=1))
 
-    with pytest.raises(LiveEvaluationBudgetExceeded, match="provider_calls_per_case"):
+    with pytest.raises(
+        LiveEvaluationBudgetExceeded, match="provider_calls_per_case"
+    ) as captured:
         await source.observe(_case("product.discovery.budget_usd"))
     assert len(adapter.requests) == 1
+    evidence = captured.value.evidence
+    assert evidence is not None
+    assert evidence.case_id == "product.discovery.budget_usd"
+    assert evidence.configured_limit == 1
+    assert evidence.observed_value == 2
+    assert evidence.completed_provider_calls == 1
+    assert len(evidence.provider_call_evidence) == 1
+    assert len(evidence.tool_result_evidence) == 1
 
 
 @pytest.mark.asyncio
@@ -326,6 +352,9 @@ async def test_tool_round_budget_stops_before_second_round_execution() -> None:
     assert evidence.rejected_tool_calls[0].arguments == {"query": "air fryer"}
     assert evidence.exceeded_budget == "tool_rounds_per_case"
     assert evidence.configured_limit == 1
+    assert evidence.observed_value == 2
+    assert len(evidence.provider_call_evidence) == 2
+    assert len(evidence.tool_result_evidence) == 1
 
     serialized = run_ai_evaluation._serialize_report(
         LiveEvaluationFailureReport(failure=evidence),
@@ -359,9 +388,16 @@ async def test_capability_budget_stops_before_any_fixture_execution() -> None:
     with pytest.raises(
         LiveEvaluationBudgetExceeded,
         match="capability_executions_per_case",
-    ):
+    ) as captured:
         await _source(adapter).observe(_case("product.discovery.budget_usd"))
     assert len(adapter.requests) == 1
+    evidence = captured.value.evidence
+    assert evidence is not None
+    assert evidence.configured_limit == 1
+    assert evidence.observed_value == 2
+    assert evidence.completed_provider_calls == 1
+    assert len(evidence.provider_call_evidence) == 1
+    assert len(evidence.rejected_tool_calls) == 2
 
 
 @pytest.mark.asyncio
@@ -375,9 +411,15 @@ async def test_wall_clock_budget_stops_before_transport() -> None:
     source = _source(adapter, clock=_clock)
     now = 2701.0
 
-    with pytest.raises(LiveEvaluationBudgetExceeded, match="wall_clock"):
+    with pytest.raises(LiveEvaluationBudgetExceeded, match="wall_clock") as captured:
         await source.observe(_case("product.discovery.vague_need"))
     assert adapter.requests == []
+    evidence = captured.value.evidence
+    assert evidence is not None
+    assert evidence.case_id == "product.discovery.vague_need"
+    assert evidence.configured_limit == 2700
+    assert evidence.observed_value == 2701.0
+    assert evidence.completed_provider_calls == 0
 
 
 @pytest.mark.asyncio
@@ -398,12 +440,18 @@ async def test_http_timeout_cancels_without_retry() -> None:
             raise AssertionError("timeout did not cancel provider call")
 
     adapter = _BlockingAdapter()
-    with pytest.raises(LiveEvaluationBudgetExceeded, match="http_timeout"):
+    with pytest.raises(LiveEvaluationBudgetExceeded, match="http_timeout") as captured:
         await _source(
             adapter,
             budget=_budget(http_timeout_seconds=1),
         ).observe(_case("product.discovery.vague_need"))
     assert adapter.calls == 1
+    evidence = captured.value.evidence
+    assert evidence is not None
+    assert evidence.case_id == "product.discovery.vague_need"
+    assert evidence.configured_limit == 1
+    assert evidence.observed_value >= 1
+    assert evidence.completed_provider_calls == 0
 
 
 @pytest.mark.asyncio
@@ -419,12 +467,20 @@ async def test_case_budget_preflight_stops_before_partial_runner_activity() -> N
         policy_version="mbb-ai-policy-v2",
     )
 
-    with pytest.raises(LiveEvaluationBudgetExceeded, match="case_executions"):
+    with pytest.raises(
+        LiveEvaluationBudgetExceeded, match="case_executions"
+    ) as captured:
         await EvaluationRunner(source, metadata).run(
             get_mbb_evaluation_corpus(),
             case_ids=("product.discovery.vague_need", "evidence.contradictory_price"),
         )
     assert adapter.requests == []
+    evidence = captured.value.evidence
+    assert evidence is not None
+    assert evidence.case_id == "evidence.contradictory_price"
+    assert evidence.configured_limit == 1
+    assert evidence.observed_value == 2
+    assert evidence.completed_provider_calls == 0
 
 
 def _live_args(*profiles: str) -> argparse.Namespace:
@@ -707,7 +763,12 @@ def test_cli_writes_partial_failure_report_before_returning_error(
     report = json.loads(report_text)
     assert report["status"] == "failed"
     assert report["failure"]["case_id"] == "product.discovery.budget_usd"
+    assert report["failure"]["exceeded_budget"] == "tool_rounds_per_case"
+    assert report["failure"]["configured_limit"] == 1
+    assert report["failure"]["observed_value"] == 2
     assert report["failure"]["completed_provider_calls"] == 2
+    assert len(report["failure"]["provider_call_evidence"]) == 2
+    assert len(report["failure"]["tool_result_evidence"]) == 1
     assert report["failure"]["rejected_tool_calls"][0]["call_id"] == "call_2"
     assert _FAKE_SECRET_SENTINEL not in report_text
     assert "tool_rounds_per_case" in capsys.readouterr().err
