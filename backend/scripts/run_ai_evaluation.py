@@ -15,6 +15,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.adapters import get_provider_turn_adapter  # noqa: E402
 from app.adapters.base import ProviderTurnAdapter  # noqa: E402
+from app.ai.commercial_evaluation import (  # noqa: E402
+    COMMERCIAL_EVALUATION_VERSION,
+    CommercialEvaluationRunner,
+    get_commercial_evaluation_corpus,
+)
 from app.ai.evaluation import (  # noqa: E402
     EvaluationReplay,
     EvaluationRunMetadata,
@@ -57,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Explicitly activate the isolated provider evaluation source.",
     )
+    mode.add_argument(
+        "--commercial-live",
+        action="store_true",
+        help="Run the isolated policy-v3 CommercialResponsePlan canary.",
+    )
     parser.add_argument(
         "--profile",
         action="append",
@@ -90,6 +100,8 @@ async def _run(args: argparse.Namespace) -> str:
         return await _run_replay(args)
     if args.case_ids:
         raise LiveEvaluationConfigurationError("live_case_selection_is_frozen")
+    if getattr(args, "commercial_live", False):
+        return await _run_commercial_live(args)
     return await _run_live(args)
 
 
@@ -105,6 +117,49 @@ async def _run_replay(args: argparse.Namespace) -> str:
         get_mbb_evaluation_corpus(),
         case_ids=args.case_ids,
     )
+    return _serialize_report(report, pretty=args.pretty)
+
+
+async def _run_commercial_live(
+    args: argparse.Namespace,
+    *,
+    configured_settings: Settings | None = None,
+    adapter_factory: AdapterFactory | None = None,
+    budget: LiveEvaluationRunBudget | None = None,
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    profiles = _profiles(args.profiles)
+    if len(profiles) != 1:
+        raise LiveEvaluationConfigurationError("commercial_profile_must_be_single")
+    settings = configured_settings or get_settings()
+    _validate_live_settings(
+        settings,
+        os.environ if environment is None else environment,
+    )
+    adapter = (adapter_factory or get_provider_turn_adapter)()
+    identity = adapter.provider_identity
+    if not isinstance(identity, ProviderIdentity) or identity.model is None:
+        raise LiveEvaluationConfigurationError("provider_identity_unavailable")
+    run_budget = budget or LiveEvaluationRunBudget(
+        max_case_executions=9,
+        max_total_provider_calls=18,
+    )
+    metadata = EvaluationRunMetadata(
+        corpus_version=COMMERCIAL_EVALUATION_VERSION,
+        provider=identity.provider,
+        model=identity.model,
+        reasoning_profile=profiles[0],
+        policy_version=AI_SYSTEM_POLICY_VERSION,
+    )
+    report = await CommercialEvaluationRunner(
+        LiveEvaluationSource(
+            adapter,
+            reasoning_profile=profiles[0],
+            budget_state=LiveEvaluationBudgetState(run_budget),
+            structured_commercial=True,
+        ),
+        metadata,
+    ).run(get_commercial_evaluation_corpus())
     return _serialize_report(report, pretty=args.pretty)
 
 
@@ -211,6 +266,8 @@ def main() -> int:
         if args.output is None:
             print(output)
         else:
+            if args.output.exists():
+                raise LiveEvaluationConfigurationError("output_already_exists")
             args.output.write_text(f"{output}\n", encoding="utf-8")
     except (LiveEvaluationBudgetExceeded, LiveEvaluationConfigurationError) as exc:
         print(f"Evaluation failed: {exc}", file=sys.stderr)
