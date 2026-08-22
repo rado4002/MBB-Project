@@ -183,6 +183,8 @@ def test_search_result_is_sufficient_for_grounded_comparison_and_policy_says_so(
     assert "return the final JSON plan immediately" in instruction
     assert "Do not call get_product_details for facts already returned" in instruction
     assert "use it only for a genuinely required missing approved detail" in instruction
+    assert "issue only one search_products call" in instruction
+    assert "Do not issue overlapping specific and broad searches" in instruction
 
 
 def test_valid_details_render_only_successful_detail_output() -> None:

@@ -189,7 +189,10 @@ def commercial_plan_instruction() -> str:
         "Never include copied prices, stock values, free-text explanations, or actions."
         " If successful tool output contains the needed facts, return the final JSON "
         "plan immediately. Do not call get_product_details for facts already returned "
-        "by search_products; use it only for a genuinely required missing approved detail."
+        "by search_products; use it only for a genuinely required missing approved detail. "
+        "When one product search can answer the customer's request, issue only one "
+        "search_products call. Do not issue overlapping specific and broad searches "
+        "in the same turn."
     )
 
 
