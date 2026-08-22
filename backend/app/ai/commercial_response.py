@@ -187,6 +187,9 @@ def commercial_plan_instruction() -> str:
         "ASK_PRODUCT_TYPE|ASK_BUDGET|ASK_MODEL|NONE; tone=WARM|CONCISE. "
         "Use sellable_item_id references only from successful MBB tool output. "
         "Never include copied prices, stock values, free-text explanations, or actions."
+        " If successful tool output contains the needed facts, return the final JSON "
+        "plan immediately. Do not call get_product_details for facts already returned "
+        "by search_products; use it only for a genuinely required missing approved detail."
     )
 
 

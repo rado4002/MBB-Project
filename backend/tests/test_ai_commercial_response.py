@@ -7,6 +7,7 @@ import pytest
 
 from app.ai.commercial_response import (
     CommercialResponseError,
+    commercial_plan_instruction,
     commercial_response_fallback,
     commercial_response_mode,
     parse_commercial_response_plan,
@@ -160,6 +161,28 @@ def test_valid_product_list_and_comparison_render_authoritative_values() -> None
         assert "MBB Air Fryer 4L — 45 USD, available now" in text
         assert "MBB Air Fryer 6L — 55 USD, available now" in text
         assert "compare these products" in text
+
+
+def test_search_result_is_sufficient_for_grounded_comparison_and_policy_says_so() -> None:
+    text = _render(
+        _plan(
+            response_kind="COMPARISON",
+            fact_fields=[
+                "NAME",
+                "MODEL",
+                "CURRENT_PRICE",
+                "CURRENT_AVAILABILITY",
+                "CURRENT_SELLABILITY",
+            ],
+        )
+    )
+    instruction = commercial_plan_instruction()
+
+    assert "MBB Air Fryer 4L — 45 USD, available now, sellable now" in text
+    assert "MBB Air Fryer 6L — 55 USD, available now, sellable now" in text
+    assert "return the final JSON plan immediately" in instruction
+    assert "Do not call get_product_details for facts already returned" in instruction
+    assert "use it only for a genuinely required missing approved detail" in instruction
 
 
 def test_valid_details_render_only_successful_detail_output() -> None:
