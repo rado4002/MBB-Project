@@ -35,6 +35,7 @@ from app.ai.live_evaluation import (  # noqa: E402
     LiveEvaluationBudgetExceeded,
     LiveEvaluationBudgetState,
     LiveEvaluationConfigurationError,
+    LiveEvaluationFailureReport,
     LiveEvaluationMatrixReport,
     LiveEvaluationRunBudget,
     LiveEvaluationSource,
@@ -226,6 +227,12 @@ def _serialize_report(report: BaseModel, *, pretty: bool) -> str:
     )
 
 
+def _write_output(path: Path, output: str) -> None:
+    if path.exists():
+        raise LiveEvaluationConfigurationError("output_already_exists")
+    path.write_text(f"{output}\n", encoding="utf-8")
+
+
 def _profiles(values: Sequence[str] | None) -> tuple[ProviderReasoningProfile, ...]:
     if not values:
         raise LiveEvaluationConfigurationError("reasoning_profile_required")
@@ -266,10 +273,19 @@ def main() -> int:
         if args.output is None:
             print(output)
         else:
-            if args.output.exists():
-                raise LiveEvaluationConfigurationError("output_already_exists")
-            args.output.write_text(f"{output}\n", encoding="utf-8")
-    except (LiveEvaluationBudgetExceeded, LiveEvaluationConfigurationError) as exc:
+            _write_output(args.output, output)
+    except LiveEvaluationBudgetExceeded as exc:
+        if args.output is not None and exc.evidence is not None:
+            _write_output(
+                args.output,
+                _serialize_report(
+                    LiveEvaluationFailureReport(failure=exc.evidence),
+                    pretty=args.pretty,
+                ),
+            )
+        print(f"Evaluation failed: {exc}", file=sys.stderr)
+        return 1
+    except LiveEvaluationConfigurationError as exc:
         print(f"Evaluation failed: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:  # Never include replay, provider, or credential data.

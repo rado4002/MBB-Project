@@ -31,6 +31,7 @@ from app.ai.live_evaluation import (
     LiveEvaluationBudgetExceeded,
     LiveEvaluationBudgetState,
     LiveEvaluationConfigurationError,
+    LiveEvaluationFailureReport,
     LiveEvaluationRunBudget,
     LiveEvaluationSource,
 )
@@ -298,12 +299,42 @@ async def test_per_case_provider_budget_stops_before_continuation() -> None:
 @pytest.mark.asyncio
 async def test_tool_round_budget_stops_before_second_round_execution() -> None:
     adapter = _ScriptedAdapter(
-        [_tool_result("call_1"), _tool_result("call_2")]
+        [_tool_result("call_1"), _tool_result("call_2")],
+        secret=_FAKE_SECRET_SENTINEL,
     )
 
-    with pytest.raises(LiveEvaluationBudgetExceeded, match="tool_rounds_per_case"):
+    with pytest.raises(
+        LiveEvaluationBudgetExceeded,
+        match="tool_rounds_per_case",
+    ) as captured:
         await _source(adapter).observe(_case("product.discovery.budget_usd"))
     assert len(adapter.requests) == 2
+    evidence = captured.value.evidence
+    assert evidence is not None
+    assert evidence.case_id == "product.discovery.budget_usd"
+    assert evidence.completed_provider_calls == 2
+    assert evidence.completed_tool_rounds == 1
+    assert evidence.completed_capability_executions == 1
+    assert evidence.first_tool_call is not None
+    assert evidence.first_tool_call.capability_name == "search_products"
+    assert evidence.first_tool_call.arguments == {"query": "air fryer"}
+    assert evidence.first_tool_result is not None
+    assert evidence.first_tool_result.status == "success"
+    assert evidence.first_tool_result.output is not None
+    assert evidence.first_tool_result.output["items"][0]["current_usd_price"] == "55.00"
+    assert evidence.rejected_tool_calls[0].capability_name == "search_products"
+    assert evidence.rejected_tool_calls[0].arguments == {"query": "air fryer"}
+    assert evidence.exceeded_budget == "tool_rounds_per_case"
+    assert evidence.configured_limit == 1
+
+    serialized = run_ai_evaluation._serialize_report(
+        LiveEvaluationFailureReport(failure=evidence),
+        pretty=True,
+    )
+    report = json.loads(serialized)
+    assert report["status"] == "failed"
+    assert report["failure"]["case_id"] == "product.discovery.budget_usd"
+    assert _FAKE_SECRET_SENTINEL not in serialized
 
 
 @pytest.mark.asyncio
@@ -645,6 +676,41 @@ def test_cli_error_reporting_redacts_arbitrary_exception_text(
     assert _FAKE_SECRET_SENTINEL not in captured.out
     assert _FAKE_SECRET_SENTINEL not in captured.err
     assert "RuntimeError" in captured.err
+
+
+def test_cli_writes_partial_failure_report_before_returning_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path,
+) -> None:
+    output_path = tmp_path / "partial-failure.json"
+    args = _live_args("default")
+    args.output = output_path
+    args.pretty = True
+
+    class _Parser:
+        def parse_args(self):
+            return args
+
+    async def _fail(_args):
+        adapter = _ScriptedAdapter(
+            [_tool_result("call_1"), _tool_result("call_2")],
+            secret=_FAKE_SECRET_SENTINEL,
+        )
+        await _source(adapter).observe(_case("product.discovery.budget_usd"))
+
+    monkeypatch.setattr(run_ai_evaluation, "build_parser", lambda: _Parser())
+    monkeypatch.setattr(run_ai_evaluation, "_run", _fail)
+
+    assert run_ai_evaluation.main() == 1
+    report_text = output_path.read_text(encoding="utf-8")
+    report = json.loads(report_text)
+    assert report["status"] == "failed"
+    assert report["failure"]["case_id"] == "product.discovery.budget_usd"
+    assert report["failure"]["completed_provider_calls"] == 2
+    assert report["failure"]["rejected_tool_calls"][0]["call_id"] == "call_2"
+    assert _FAKE_SECRET_SENTINEL not in report_text
+    assert "tool_rounds_per_case" in capsys.readouterr().err
 
 
 def test_default_cli_requires_explicit_replay_or_live_mode() -> None:

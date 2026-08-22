@@ -71,11 +71,36 @@ class LiveEvaluationRunBudget(StrictEvaluationModel):
     transport_retries: Literal[0] = 0
 
 
+class LiveEvaluationFailureEvidence(StrictEvaluationModel):
+    """Bounded partial evidence retained when a tool budget rejects a round."""
+
+    case_id: EvaluationIdentifier
+    completed_provider_calls: int = Field(ge=1)
+    completed_tool_rounds: int = Field(ge=0)
+    completed_capability_executions: int = Field(ge=0)
+    first_tool_call: ProviderToolCall | None = None
+    first_tool_result: ProviderToolResult | None = None
+    rejected_tool_calls: tuple[ProviderToolCall, ...]
+    exceeded_budget: EvaluationIdentifier
+    configured_limit: int = Field(ge=1)
+
+
+class LiveEvaluationFailureReport(StrictEvaluationModel):
+    status: Literal["failed"] = "failed"
+    failure: LiveEvaluationFailureEvidence
+
+
 class LiveEvaluationBudgetExceeded(RuntimeError):
     """Safe deterministic stop raised before activity can exceed a limit."""
 
-    def __init__(self, budget: str) -> None:
+    def __init__(
+        self,
+        budget: str,
+        *,
+        evidence: LiveEvaluationFailureEvidence | None = None,
+    ) -> None:
         self.budget = budget
+        self.evidence = evidence
         super().__init__(f"live_evaluation_budget_exceeded:{budget}")
 
 
@@ -275,10 +300,46 @@ class LiveEvaluationSource:
                     final_outcome=final_outcome,
                 )
 
-            self._budget_state.reserve_tool_activity(
-                case_budget,
-                capability_calls=len(result.tool_calls),
-            )
+            try:
+                self._budget_state.reserve_tool_activity(
+                    case_budget,
+                    capability_calls=len(result.tool_calls),
+                )
+            except LiveEvaluationBudgetExceeded as exc:
+                if exc.budget not in {
+                    "tool_rounds_per_case",
+                    "capability_executions_per_case",
+                }:
+                    raise
+                first_call = next(
+                    (
+                        call
+                        for recorded in recorded_calls[:-1]
+                        for call in recorded.result.tool_calls
+                    ),
+                    None,
+                )
+                raise LiveEvaluationBudgetExceeded(
+                    exc.budget,
+                    evidence=LiveEvaluationFailureEvidence(
+                        case_id=case.case_id,
+                        completed_provider_calls=case_budget.provider_calls,
+                        completed_tool_rounds=case_budget.tool_rounds,
+                        completed_capability_executions=(
+                            case_budget.capability_executions
+                        ),
+                        first_tool_call=first_call,
+                        first_tool_result=(tool_results[0] if tool_results else None),
+                        rejected_tool_calls=result.tool_calls,
+                        exceeded_budget=exc.budget,
+                        configured_limit=(
+                            self._budget_state.budget.max_tool_rounds_per_case
+                            if exc.budget == "tool_rounds_per_case"
+                            else self._budget_state.budget
+                            .max_capability_executions_per_case
+                        ),
+                    ),
+                ) from None
             round_results = tuple(
                 self._fixture_result(case, call, fixture_by_name)
                 for call in result.tool_calls
