@@ -415,7 +415,7 @@ def _render(
         return _with_action(lead, plan.next_action, french)
     if plan.response_kind == ResponseKind.unsupported_commercial_request:
         lead = (
-            "Cette demande commerciale n'est pas prise en charge ici."
+            "Je ne peux pas traiter cette demande ici."
             if french
             else "That commercial request is not supported here."
         )
@@ -472,7 +472,7 @@ def _render_product(
             if item.is_sellable_now and french
             else "available now"
             if item.is_sellable_now
-            else "stock signalé disponible, mais non vendable actuellement"
+            else "indiqué en stock, mais pas disponible à la vente actuellement"
             if french
             else "stock reported available, but not currently sellable"
         )
@@ -484,8 +484,8 @@ def _render_product(
         facts.append(availability[item.availability])
     if FactField.current_sellability in fields:
         facts.append(
-            "vendable maintenant" if french and item.is_sellable_now
-            else "non vendable actuellement" if french
+            "disponible à la vente maintenant" if french and item.is_sellable_now
+            else "pas disponible à la vente actuellement" if french
             else "sellable now" if item.is_sellable_now
             else "not currently sellable"
         )
@@ -498,12 +498,12 @@ def _render_product(
 def _with_action(text: str, action: NextAction, french: bool) -> str:
     actions = {
         NextAction.search_more: (
-            "Je peux chercher d'autres options actuelles."
+            "Je peux chercher d'autres options."
             if french
             else "I can search for more current options."
         ),
         NextAction.show_details: (
-            "Je peux afficher les détails vérifiés."
+            "Je peux te montrer les détails vérifiés."
             if french
             else "I can show the verified details."
         ),
@@ -513,7 +513,7 @@ def _with_action(text: str, action: NextAction, french: bool) -> str:
             else "I can compare these products."
         ),
         NextAction.request_human_handoff: (
-            "Je peux demander à un conseiller humain de prendre le relais."
+            "Je peux demander l'aide d'un conseiller humain."
             if french
             else "I can ask a human adviser to take over."
         ),

@@ -410,6 +410,39 @@ def test_french_renderer_uses_authoritative_values() -> None:
     assert "détails vérifiés" in text
 
 
+def test_french_renderer_keeps_denial_sellability_and_actions_natural() -> None:
+    calls, results = _search_evidence(
+        _item(PRODUCT_6L, "6L", "55", availability="available", sellable=False),
+        budget=None,
+    )
+    product_text = _render(
+        _plan(
+            product_refs=[str(PRODUCT_6L)],
+            fact_fields=["NAME", "CURRENT_AVAILABILITY"],
+            next_action="SEARCH_MORE",
+        ),
+        language="french",
+        calls=calls,
+        results=results,
+    )
+    unsupported = _render(
+        _plan(
+            response_kind="UNSUPPORTED_COMMERCIAL_REQUEST",
+            product_refs=[],
+            fact_fields=[],
+            next_action="REQUEST_HUMAN_HANDOFF",
+        ),
+        language="french",
+    )
+
+    assert "indiqué en stock, mais pas disponible à la vente actuellement" in product_text
+    assert product_text.endswith("Je peux chercher d'autres options.")
+    assert unsupported == (
+        "Je ne peux pas traiter cette demande ici. "
+        "Je peux demander l'aide d'un conseiller humain."
+    )
+
+
 def test_lingala_uses_existing_safe_fallback_until_native_review() -> None:
     with pytest.raises(
         CommercialResponseError,
