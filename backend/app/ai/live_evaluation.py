@@ -320,7 +320,6 @@ class LiveEvaluationSource:
         reasoning_profile: ProviderReasoningProfile,
         budget_state: LiveEvaluationBudgetState,
         capability_registry: CapabilityRegistry = AI_CAPABILITY_REGISTRY,
-        structured_commercial: bool = False,
     ) -> None:
         if not isinstance(reasoning_profile, ProviderReasoningProfile):
             raise LiveEvaluationConfigurationError("reasoning_profile_invalid")
@@ -328,17 +327,13 @@ class LiveEvaluationSource:
         self._reasoning_profile = reasoning_profile
         self._budget_state = budget_state
         self._capability_registry = capability_registry
-        self._structured_commercial = structured_commercial
 
     def prepare_run(self, cases: Sequence[EvaluationCase]) -> None:
         self._budget_state.prepare_run(cases)
 
     async def observe(self, case: EvaluationCase) -> EvaluationObservation:
         case_budget = self._budget_state.start_case(case.case_id)
-        policy = get_system_policy(
-            _POLICY_LANGUAGE_BY_PATTERN[case.language_pattern],
-            structured_commercial=self._structured_commercial,
-        )
+        policy = get_system_policy(_POLICY_LANGUAGE_BY_PATTERN[case.language_pattern])
         specifications = self._capability_registry.specifications(
             case.exposed_capabilities
         )
