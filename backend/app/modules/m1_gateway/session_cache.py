@@ -20,6 +20,7 @@ score           str     "0"–"10"  (stringified — Redis hashes are strings)
 last_msg_time   str     ISO-8601 UTC
 msg_count       str     stringified int
 price_discussed str     "true" | "false"
+ownership_version str   conversation authority version represented by history
 products        str     JSON array of product slugs shown in this session
 history         str     JSON array of {"direction","content","language"} dicts
                         capped at 20 entries (~10 exchanges)
@@ -57,6 +58,7 @@ class SessionState:
     last_msg_time: str = ""
     msg_count: int = 0
     price_discussed: bool = False
+    ownership_version: int = 0
     products: list[str] = field(default_factory=list)
     history: list[dict] = field(default_factory=list)
 
@@ -72,6 +74,7 @@ class SessionState:
             last_msg_time=h.get("last_msg_time", ""),
             msg_count=int(h.get("msg_count", "0") or "0"),
             price_discussed=h.get("price_discussed", "false") == "true",
+            ownership_version=int(h.get("ownership_version", "0") or "0"),
             products=json.loads(h.get("products", "[]") or "[]"),
             history=json.loads(h.get("history", "[]") or "[]"),
         )
@@ -87,6 +90,7 @@ class SessionState:
             "last_msg_time": self.last_msg_time,
             "msg_count": str(self.msg_count),
             "price_discussed": "true" if self.price_discussed else "false",
+            "ownership_version": str(self.ownership_version),
             "products": json.dumps(self.products),
             "history": json.dumps(self.history[-_MAX_HISTORY:]),
         }

@@ -386,14 +386,22 @@ async def _process(
 
         # ── Step 5: Load Redis session cache ──────────────────────────────────
         session_state = await get_session(conv_id)
+        if (
+            session_state is not None
+            and session_state.ownership_version != expected_ownership_version
+        ):
+            session_state = None
 
-        # Load recent DB history if cache is cold
+        # Load recent DB history if cache is cold or belongs to another owner period.
         history: list[dict] = []
         if session_state is None:
             from app.models.message import Message
             msg_result = await session.execute(
                 select(Message)
-                .where(Message.conversation_id == inbound.conversation_id)
+                .where(
+                    Message.conversation_id == inbound.conversation_id,
+                    Message.message_id != inbound.message_id,
+                )
                 .order_by(Message.timestamp.desc())
                 .limit(10)
             )
@@ -406,6 +414,7 @@ async def _process(
             session_state = SessionState(
                 customer_id=customer_phone,
                 language=language,
+                ownership_version=expected_ownership_version,
                 history=history,
             )
         else:
@@ -429,7 +438,7 @@ async def _process(
             expected_ownership_version=expected_ownership_version,
             conversation_id=inbound.conversation_id,
             source_message_id=inbound.message_id,
-            history=history,
+            history=tuple(history),
             allowed_capabilities=_M1_AI_CAPABILITIES,
         )
         audit_record = None
@@ -525,6 +534,7 @@ async def _process(
 
         # ── Step 9: Update Redis session cache ────────────────────────────────
         session_state.language = language
+        session_state.ownership_version = expected_ownership_version
         session_state.last_msg_time = datetime.now(timezone.utc).isoformat()
         session_state.msg_count += 1
         session_state.history.append(

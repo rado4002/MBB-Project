@@ -100,6 +100,8 @@ class ManualReviewDimension(str, Enum):
     natural_tone = "natural_tone"
     language_correctness = "language_correctness"
     code_switch_handling = "code_switch_handling"
+    recommendation_quality = "recommendation_quality"
+    tradeoff_quality = "tradeoff_quality"
 
 
 class EvaluationDimension(str, Enum):
@@ -110,6 +112,8 @@ class EvaluationDimension(str, Enum):
     capability_truth = "capability_truth"
     human_handoff = "human_handoff"
     clarification = "clarification"
+    unnecessary_clarification = "unnecessary_clarification"
+    redundant_tool_use = "redundant_tool_use"
     final_outcome = "final_outcome"
 
 
@@ -233,6 +237,8 @@ class EvaluationExpectations(StrictEvaluationModel):
     forbidden_capabilities: tuple[EvaluationName, ...] = ()
     minimum_capability_calls: int | None = Field(default=None, ge=0, le=16)
     maximum_capability_calls: int | None = Field(default=None, ge=0, le=16)
+    maximum_research_calls: int | None = Field(default=None, ge=0, le=16)
+    clarification_forbidden: bool = False
     capability_arguments: tuple[ExpectedCapabilityArguments, ...] = ()
     handoff: HandoffExpectation = HandoffExpectation.optional
     expected_outcomes: tuple[EvaluationOutcomeClass, ...] = ()
@@ -573,6 +579,20 @@ def score_evaluation_case(
         tool_findings.append("unnecessary_capability_calls")
     dimensions.append(_dimension(EvaluationDimension.tool_selection, tool_findings))
 
+    if expectations.maximum_research_calls is not None:
+        research_calls = sum(
+            name in {"search_products", "get_product_details"}
+            for name in observed_names
+        )
+        research_findings = (
+            ["unnecessary_research", "redundant_tool_use"]
+            if research_calls > expectations.maximum_research_calls
+            else []
+        )
+        dimensions.append(
+            _dimension(EvaluationDimension.redundant_tool_use, research_findings)
+        )
+
     argument_findings: list[str] = []
     argument_expectations = expectations.capability_arguments
     for expected in argument_expectations:
@@ -671,6 +691,19 @@ def score_evaluation_case(
             else EvaluationDimension.final_outcome
         )
         dimensions.append(_dimension(outcome_dimension, outcome_findings))
+
+    if expectations.clarification_forbidden:
+        clarification_findings = (
+            ["unnecessary_clarification"]
+            if observation.final_outcome == EvaluationOutcomeClass.clarification
+            else []
+        )
+        dimensions.append(
+            _dimension(
+                EvaluationDimension.unnecessary_clarification,
+                clarification_findings,
+            )
+        )
 
     for tool_result in observation.tool_results:
         if (

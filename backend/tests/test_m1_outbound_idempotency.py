@@ -11,11 +11,26 @@ from app.modules.m1_gateway.service import ProcessedInbound
 from app.modules.m1_gateway.session_cache import SessionState
 from app.tasks import m1
 
+_DEFAULT_CACHED_SESSION = object()
+
+
+class _ScalarResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._rows
+
 
 class _Session:
-    def __init__(self, events, *, commit_error=None):
+    def __init__(self, events, *, commit_error=None, query_rows=None):
         self.events = events
         self.commit_error = commit_error
+        self.query_rows = query_rows
+        self.statements = []
 
     async def commit(self):
         self.events.append("commit")
@@ -25,8 +40,11 @@ class _Session:
     async def rollback(self):
         self.events.append("rollback")
 
-    async def execute(self, _statement):
-        raise AssertionError("unexpected database query")
+    async def execute(self, statement):
+        self.statements.append(statement)
+        if self.query_rows is None:
+            raise AssertionError("unexpected database query")
+        return _ScalarResult(self.query_rows)
 
 
 class _SessionContext:
@@ -107,6 +125,8 @@ class _Messaging:
         self.error = error
         self.calls = []
         self.audits = []
+        self.saved_session_states = []
+        self.inbound_session = None
 
     async def send_message(self, phone, text, *, idempotency_key=None):
         self.events.append("adapter")
@@ -128,6 +148,8 @@ def _patch_normal_flow(
     messaging_error=None,
     audit_error=None,
     ai=None,
+    cached_session=_DEFAULT_CACHED_SESSION,
+    database_history=(),
 ):
     import app.adapters as adapters
     import app.ai.turn as ai_turn
@@ -137,7 +159,7 @@ def _patch_normal_flow(
     import app.modules.m4_conversation.engine as conversation_engine
 
     events = []
-    inbound_session = _Session(events)
+    inbound_session = _Session(events, query_rows=database_history)
     outbound_session = _Session(events, commit_error=outbound_commit_error)
     send_session = _Session(events)
     sessions = iter((inbound_session, outbound_session, send_session))
@@ -149,6 +171,7 @@ def _patch_normal_flow(
         language="french",
     )
     messaging = _Messaging(events, error=messaging_error)
+    messaging.inbound_session = inbound_session
 
     async def process_inbound(**_kwargs):
         events.append("inbound")
@@ -166,14 +189,18 @@ def _patch_normal_flow(
         return SimpleNamespace(turn_id=record.turn_id)
 
     async def get_session(_conversation_id):
+        if cached_session is not _DEFAULT_CACHED_SESSION:
+            return cached_session
         return SessionState(
             customer_id="+243812345678",
             language="french",
             stage="active",
+            ownership_version=4,
         )
 
-    async def save_session(_conversation_id, _state):
+    async def save_session(_conversation_id, state):
         events.append("cache")
+        messaging.saved_session_states.append(state)
         return True
 
     monkeypatch.setattr(
@@ -268,6 +295,78 @@ def test_m1_binds_trusted_context_and_explicit_capability_exposure(monkeypatch):
     assert turn.source_message_id == uuid.UUID(
         "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     )
+
+
+def test_cold_history_excludes_the_current_inbound_from_ai_context(monkeypatch):
+    ai = _RecordingAI()
+    prior_messages = (
+        SimpleNamespace(
+            direction="outbound",
+            content="Ancienne réponse",
+            language="french",
+        ),
+        SimpleNamespace(
+            direction="inbound",
+            content="Ancienne question",
+            language="french",
+        ),
+    )
+    _events, messaging = _patch_normal_flow(
+        monkeypatch,
+        outbound_id=uuid.uuid4(),
+        ai=ai,
+        cached_session=None,
+        database_history=prior_messages,
+    )
+
+    _run(_process(_Task()))
+
+    assert ai.turns[0].user_content == "inbound content"
+    assert [item["content"] for item in ai.turns[0].history] == [
+        "Ancienne question",
+        "Ancienne réponse",
+    ]
+    assert "inbound content" not in {
+        item["content"] for item in ai.turns[0].history
+    }
+    assert "messages.message_id !=" in str(
+        messaging.inbound_session.statements[0]
+    )
+
+
+def test_cache_from_an_older_ownership_period_is_rebuilt_from_db(monkeypatch):
+    ai = _RecordingAI()
+    stale_cache = SessionState(
+        ownership_version=3,
+        history=[
+            {
+                "direction": "outbound",
+                "content": "stale cached AI history",
+                "language": "french",
+            }
+        ],
+    )
+    human_period_messages = (
+        SimpleNamespace(
+            direction="inbound",
+            content="Réponse après le contrôle humain",
+            language="french",
+        ),
+    )
+    _events, messaging = _patch_normal_flow(
+        monkeypatch,
+        outbound_id=uuid.uuid4(),
+        ai=ai,
+        cached_session=stale_cache,
+        database_history=human_period_messages,
+    )
+
+    _run(_process(_Task()))
+
+    assert [item["content"] for item in ai.turns[0].history] == [
+        "Réponse après le contrôle humain"
+    ]
+    assert messaging.saved_session_states[0].ownership_version == 4
 
 
 def test_human_ownership_stops_generation_persistence_and_send(monkeypatch):
