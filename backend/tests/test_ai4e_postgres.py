@@ -37,6 +37,7 @@ from app.models.inventory import InventoryRecord
 from app.models.message import Message
 from app.models.operator_account import OperatorAccount
 from app.models.pricing import SellableItemPrice
+from app.modules.m1_gateway.service import process_inbound
 from app.modules.m4_conversation.ownership import transition_ownership
 
 DATABASE_URL = os.environ.get("AI4E_TEST_DATABASE_URL")
@@ -483,6 +484,46 @@ async def test_duplicate_terminal_result_is_stale_and_creates_no_second_ack(
             select(func.count()).select_from(Message).where(Message.direction == "outbound")
         ) == 1
         assert await session.scalar(select(func.count()).select_from(AITurnAudit)) == 1
+
+
+@pytest.mark.asyncio
+async def test_change_of_mind_persists_while_ai_and_handoff_remain_paused(
+    engine: AsyncEngine,
+) -> None:
+    factory, conversation, item, inbound, _operator = await _seed(engine)
+    await _service(
+        factory,
+        _SequenceAdapter(
+            _handoff_result(
+                reason="qualified_purchase_intent",
+                item_id=item.sellable_item_id,
+                purchase_intent="ready",
+            )
+        ),
+    ).generate_finalized(_turn(conversation, inbound))
+
+    change_message_id = uuid.uuid4()
+    async with factory() as session:
+        persisted_inbound = await process_inbound(
+            session=session,
+            customer_phone=conversation.customer_id,
+            content="Actually never mind.",
+            content_type="text",
+            timestamp=datetime.now(timezone.utc),
+            whatsapp_message_id=f"ai4e-change-{uuid.uuid4()}",
+            message_id=change_message_id,
+        )
+        await session.commit()
+    assert persisted_inbound.message_id == change_message_id
+
+    async with factory() as session:
+        persisted = await session.get(Conversation, conversation.conversation_id)
+        newest = await session.get(Message, change_message_id)
+        ticket = await session.scalar(select(EscalationTicket))
+        assert persisted is not None and persisted.ai_execution_state == "paused"
+        assert persisted.owner_type == "ai" and persisted.human_owner_account_id is None
+        assert newest is not None and newest.content == "Actually never mind."
+        assert ticket is not None and ticket.status == "open"
 
 
 @pytest.mark.asyncio
