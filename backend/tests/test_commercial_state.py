@@ -15,6 +15,7 @@ from app.ai.commercial_state import (
     CommercialConcernKind,
     CommercialState,
     CommercialStateInvalid,
+    CommercialStateProposal,
     CommercialStateRevisionConflict,
     CommercialStateSchemaUnsupported,
     CommercialStateUpdate,
@@ -23,6 +24,7 @@ from app.ai.commercial_state import (
     NextObjective,
     PurchaseIntent,
     apply_commercial_state_update,
+    commercial_state_projection,
     commercial_state_from_context,
     update_commercial_state,
 )
@@ -55,7 +57,7 @@ def test_generic_context_contract_rejects_reserved_commercial_state_namespace():
 def test_schema_and_data_bounds_reject_unsupported_or_excessive_state():
     with pytest.raises(CommercialStateSchemaUnsupported):
         commercial_state_from_context(
-            {"commercial_state": {"schema_version": 2, "revision": 0}}
+            {"commercial_state": {"schema_version": 3, "revision": 0}}
         )
     with pytest.raises(ValidationError):
         CommercialState(current_goal="x" * (MAX_GOAL_LENGTH + 1))
@@ -101,7 +103,6 @@ def test_updates_replace_clear_and_reverse_customer_position():
                 kind=CommercialConcernKind.price,
                 detail="Customer considers the first option expensive",
             ),
-            purchase_intent=PurchaseIntent.considering,
             next_objective=NextObjective.clarify_requirement,
         ),
     )
@@ -117,7 +118,6 @@ def test_updates_replace_clear_and_reverse_customer_position():
                 DecisionConstraint(kind=DecisionConstraintKind.budget, value="around $35")
             ],
             open_questions=None,
-            purchase_intent=PurchaseIntent.ready,
             next_objective=NextObjective.clarify_choice,
         ),
     )
@@ -126,7 +126,7 @@ def test_updates_replace_clear_and_reverse_customer_position():
     assert state.expressed_needs == ["works with two devices"]
     assert [item.value for item in state.decision_constraints] == ["around $35"]
     assert state.open_questions == []
-    assert state.purchase_intent is PurchaseIntent.ready
+    assert state.purchase_intent is PurchaseIntent.none
 
     state = apply_commercial_state_update(
         state,
@@ -135,7 +135,6 @@ def test_updates_replace_clear_and_reverse_customer_position():
             expressed_needs=None,
             decision_constraints=None,
             current_concern=None,
-            purchase_intent=PurchaseIntent.considering,
             next_objective=NextObjective.answer_concern,
         ),
     )
@@ -144,7 +143,7 @@ def test_updates_replace_clear_and_reverse_customer_position():
     assert state.expressed_needs == []
     assert state.decision_constraints == []
     assert state.current_concern is None
-    assert state.purchase_intent is PurchaseIntent.considering
+    assert state.purchase_intent is PurchaseIntent.none
     assert state.next_objective is NextObjective.answer_concern
 
 
@@ -176,7 +175,7 @@ def test_stale_writer_cannot_overwrite_newer_state():
     newer = apply_commercial_state_update(
         first,
         expected_revision=1,
-        state_update=CommercialStateUpdate(purchase_intent=PurchaseIntent.ready),
+        state_update=CommercialStateUpdate(expressed_needs=["easy to carry"]),
     )
     assert newer is not None
 
@@ -188,6 +187,159 @@ def test_stale_writer_cannot_overwrite_newer_state():
         )
     assert captured.value.current_revision == 2
     assert newer.current_goal == "find a portable option"
+
+
+def test_legacy_v1_normalizes_without_exposing_or_changing_purchase_intent():
+    legacy = {
+        "schema_version": 1,
+        "revision": 4,
+        "current_goal": "find an air fryer",
+        "expressed_needs": ["serves five people"],
+        "decision_constraints": [{"kind": "budget", "value": "maximum $70"}],
+        "open_questions": [],
+        "current_concern": None,
+        "purchase_intent": "ready",
+        "next_objective": "retrieve_options",
+    }
+
+    state = commercial_state_from_context({"commercial_state": legacy})
+
+    assert state is not None
+    assert state.schema_version == 2
+    assert state.revision == 4
+    assert state.updated_at is None
+    assert state.purchase_intent is PurchaseIntent.ready
+    projection = commercial_state_projection(state)
+    assert "purchase_intent" not in projection
+    assert "schema_version" not in projection
+    assert "revision" not in projection
+    assert "updated_at" not in projection
+
+
+def test_proposal_rejects_unknown_business_facts_and_purchase_intent():
+    for update in (
+        {"price": 55},
+        {"stock": "available"},
+        {"purchase_intent": "ready"},
+        {"confidence": 0.9},
+    ):
+        with pytest.raises(ValidationError):
+            CommercialStateProposal.model_validate(
+                {"response_text": "Safe response", "state_update": update}
+            )
+
+
+def test_selected_ids_are_canonical_unique_and_limited_to_three():
+    ids = [str(uuid.uuid4()) for _ in range(4)]
+    valid = CommercialStateUpdate(selected_sellable_item_ids=ids[:3])
+    assert valid.selected_sellable_item_ids == [uuid.UUID(item) for item in ids[:3]]
+    with pytest.raises(ValidationError):
+        CommercialStateUpdate(selected_sellable_item_ids=ids)
+    with pytest.raises(ValidationError):
+        CommercialStateUpdate(selected_sellable_item_ids=[ids[0], ids[0]])
+    with pytest.raises(ValidationError):
+        CommercialStateUpdate(selected_sellable_item_ids=[ids[0].upper()])
+
+
+def test_budget_replacement_additive_need_vague_concern_and_selection_removal():
+    selected_id = uuid.uuid4()
+    before = CommercialState(
+        revision=5,
+        current_goal="find an air fryer",
+        expressed_needs=["serves five people"],
+        decision_constraints=[DecisionConstraint(kind="budget", value="maximum $70")],
+        selected_sellable_item_ids=[selected_id],
+    )
+    changed = apply_commercial_state_update(
+        before,
+        expected_revision=5,
+        state_update=CommercialStateUpdate(
+            expressed_needs=["serves five people", "easy to clean"],
+            decision_constraints=[
+                DecisionConstraint(kind="budget", value="maximum $50")
+            ],
+            selected_sellable_item_ids=[],
+            current_concern=CommercialConcern(
+                kind="price",
+                detail="$55 is a little expensive",
+            ),
+        ),
+    )
+    assert changed is not None
+    assert [item.value for item in changed.decision_constraints] == ["maximum $50"]
+    assert changed.expressed_needs == ["serves five people", "easy to clean"]
+    assert changed.selected_sellable_item_ids == []
+    assert changed.current_concern is not None
+    assert changed.current_concern.kind is CommercialConcernKind.price
+
+
+def test_selection_replacement_keeps_only_the_latest_explicit_choice():
+    old_id = uuid.uuid4()
+    new_id = uuid.uuid4()
+    before = CommercialState(
+        revision=2,
+        current_goal="find an air fryer",
+        selected_sellable_item_ids=[old_id],
+    )
+    after = apply_commercial_state_update(
+        before,
+        expected_revision=2,
+        state_update=CommercialStateUpdate(
+            selected_sellable_item_ids=[str(new_id)]
+        ),
+    )
+    assert after is not None
+    assert after.selected_sellable_item_ids == [new_id]
+
+
+def test_unrelated_goal_change_clears_incompatible_journey_fields():
+    before = CommercialState(
+        revision=2,
+        current_goal="find an air fryer",
+        expressed_needs=["8L capacity"],
+        decision_constraints=[DecisionConstraint(kind="budget", value="$60")],
+        open_questions=["Which fryer capacity?"],
+        current_concern=CommercialConcern(kind="price"),
+        next_objective=NextObjective.clarify_choice,
+        selected_sellable_item_ids=[uuid.uuid4()],
+    )
+    after = apply_commercial_state_update(
+        before,
+        expected_revision=2,
+        state_update=CommercialStateUpdate(current_goal="find a smart lock"),
+    )
+    assert after is not None
+    assert after.current_goal == "find a smart lock"
+    assert after.expressed_needs == []
+    assert after.decision_constraints == []
+    assert after.open_questions == []
+    assert after.current_concern is None
+    assert after.next_objective is None
+    assert after.selected_sellable_item_ids == []
+
+
+def test_no_op_preserves_updated_at_and_meaningful_change_sets_utc_time():
+    timestamp = datetime(2026, 8, 29, 1, 2, tzinfo=timezone.utc)
+    current = CommercialState(
+        revision=3,
+        current_goal="find an air fryer",
+        updated_at=timestamp,
+    )
+    no_op = apply_commercial_state_update(
+        current,
+        expected_revision=3,
+        state_update=CommercialStateUpdate(current_goal="find an air fryer"),
+    )
+    assert no_op is current
+    changed = apply_commercial_state_update(
+        current,
+        expected_revision=3,
+        state_update=CommercialStateUpdate(expressed_needs=["easy to clean"]),
+        changed_at=datetime(2026, 8, 29, 2, 3, tzinfo=timezone.utc),
+    )
+    assert changed is not None
+    assert changed.revision == 4
+    assert changed.updated_at == datetime(2026, 8, 29, 2, 3, tzinfo=timezone.utc)
 
 
 class _Result:

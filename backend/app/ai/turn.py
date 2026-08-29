@@ -1,6 +1,7 @@
 """Provider-neutral MBB AI turn contract and service."""
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
@@ -30,6 +31,14 @@ from app.ai.capabilities import (
     CapabilityTransactionRetry,
     TrustedCapabilityContext,
 )
+from app.ai.commercial_state import (
+    COMMERCIAL_STATE_FINALIZER,
+    CommercialState,
+    CommercialStateProposal,
+    CommercialStateUpdate,
+    commercial_state_projection,
+    read_commercial_state,
+)
 from app.ai.policy import get_system_policy
 from app.ai.provider_contract import (
     ProviderCapability,
@@ -55,6 +64,7 @@ _MAX_DURABLE_ACTION_ATTEMPTS = 2
 AuthorityChecker = Callable[[TrustedCapabilityContext], Awaitable[bool]]
 DurableSessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
 AuditAppender = Callable[[AsyncSession, AITurnAuditRecord], Awaitable[object]]
+CommercialStateLoader = Callable[[uuid.UUID], Awaitable[CommercialState | None]]
 
 
 class StaleAITurnAuthority(RuntimeError):
@@ -151,6 +161,8 @@ class FinalizedAITurnResult:
     text: str | None
     audit_record: AITurnAuditRecord
     audit_persisted: bool = False
+    commercial_state_snapshot_revision: int = 0
+    commercial_state_update: CommercialStateUpdate | None = None
 
     def __post_init__(self) -> None:
         is_handoff = self.audit_record.outcome == AITurnOutcome.handoff_requested
@@ -158,6 +170,10 @@ class FinalizedAITurnResult:
             raise ValueError("finalized turn text does not match its outcome")
         if is_handoff != self.audit_persisted:
             raise ValueError("only terminal handoff audit is pre-persisted")
+        if self.commercial_state_snapshot_revision < 0:
+            raise ValueError("commercial-state snapshot revision cannot be negative")
+        if is_handoff and self.commercial_state_update is not None:
+            raise ValueError("terminal handoff cannot carry a commercial-state update")
 
 
 class AITurnService:
@@ -173,6 +189,7 @@ class AITurnService:
         durable_session_factory: DurableSessionFactory | None = None,
         audit_appender: AuditAppender | None = None,
         provider_identity: ProviderIdentity | None = None,
+        commercial_state_loader: CommercialStateLoader | None = None,
     ) -> None:
         self._adapter = adapter
         self._capability_registry = capability_registry
@@ -181,6 +198,7 @@ class AITurnService:
         self._limits = limits
         self._durable_session_factory = durable_session_factory
         self._audit_appender = audit_appender or append_ai_turn_audit
+        self._commercial_state_loader = commercial_state_loader
         configured_identity = provider_identity
         if configured_identity is None:
             candidate = getattr(adapter, "provider_identity", None)
@@ -215,9 +233,14 @@ class AITurnService:
                 turn.allowed_capabilities
             )
         )
-        base_messages = (
-            ProviderMessage(role="user", content=_build_runtime_prompt(turn)),
-        )
+        if self._capability_registry.resolve(COMMERCIAL_STATE_FINALIZER) is not None:
+            raise ProviderTurnError(ProviderErrorCategory.configuration)
+        provider_capabilities = allowed_capabilities
+        if self._commercial_state_loader is not None:
+            provider_capabilities = (
+                *allowed_capabilities,
+                _commercial_state_finalizer_capability(),
+            )
         tool_result_messages: list[ProviderMessage] = []
         capability_activity: list[CapabilityAuditSummary] = []
         seen_call_ids: set[str] = set()
@@ -225,8 +248,23 @@ class AITurnService:
         provider_calls = 0
         tool_rounds = 0
         capability_executions = 0
+        commercial_state: CommercialState | None = None
+        commercial_state_revision = 0
 
         try:
+            if self._commercial_state_loader is not None:
+                commercial_state = await self._commercial_state_loader(
+                    turn.conversation_id
+                )
+                commercial_state_revision = (
+                    commercial_state.revision if commercial_state is not None else 0
+                )
+            base_messages = (
+                ProviderMessage(
+                    role="user",
+                    content=_build_runtime_prompt(turn, commercial_state),
+                ),
+            )
             while True:
                 if provider_calls >= self._limits.provider_calls:
                     raise AITurnBudgetExceeded("provider_calls")
@@ -235,13 +273,51 @@ class AITurnService:
                     ProviderTurnRequest(
                         messages=base_messages + tuple(tool_result_messages),
                         system_instruction=policy.text,
-                        allowed_capabilities=allowed_capabilities,
+                        allowed_capabilities=provider_capabilities,
                         max_output_tokens=_MAX_RESPONSE_TOKENS,
                         reasoning_profile=turn.reasoning_profile,
                         continuation_state=continuation_state,
                     )
                 )
                 provider_calls += 1
+
+                finalizer_calls = tuple(
+                    call
+                    for call in result.tool_calls
+                    if call.capability_name == COMMERCIAL_STATE_FINALIZER
+                )
+                if finalizer_calls:
+                    if (
+                        len(finalizer_calls) != 1
+                        or len(result.tool_calls) != 1
+                        or result.text is not None
+                        or result.finish_reason != ProviderFinishReason.tool_call
+                    ):
+                        raise ProviderTurnError(
+                            ProviderErrorCategory.malformed_response
+                        )
+                    try:
+                        proposal = CommercialStateProposal.model_validate(
+                            finalizer_calls[0].arguments
+                        )
+                    except Exception:
+                        raise ProviderTurnError(
+                            ProviderErrorCategory.malformed_response
+                        ) from None
+                    await self._require_current_authority(context)
+                    return FinalizedAITurnResult(
+                        text=proposal.response_text,
+                        audit_record=self._audit_record(
+                            turn=turn,
+                            policy_version=policy.version,
+                            exposed_capabilities=allowed_capabilities,
+                            capability_activity=capability_activity,
+                            outcome=AITurnOutcome.response_generated,
+                            commercial_state_revision=commercial_state_revision,
+                        ),
+                        commercial_state_snapshot_revision=commercial_state_revision,
+                        commercial_state_update=proposal.state_update,
+                    )
 
                 if not result.tool_calls:
                     if (
@@ -260,7 +336,9 @@ class AITurnService:
                             exposed_capabilities=allowed_capabilities,
                             capability_activity=capability_activity,
                             outcome=AITurnOutcome.response_generated,
+                            commercial_state_revision=commercial_state_revision,
                         ),
+                        commercial_state_snapshot_revision=commercial_state_revision,
                     )
 
                 if result.finish_reason != ProviderFinishReason.tool_call:
@@ -298,6 +376,7 @@ class AITurnService:
                                 policy_version=policy.version,
                                 exposed_capabilities=allowed_capabilities,
                                 prior_activity=capability_activity,
+                                commercial_state_revision=commercial_state_revision,
                             )
                         )
                         if terminal_result is not None:
@@ -328,6 +407,7 @@ class AITurnService:
                     capability_activity=capability_activity,
                     outcome=AITurnOutcome.failed,
                     safe_code=_turn_failure_safe_code(exc),
+                    commercial_state_revision=commercial_state_revision,
                 ),
                 exc,
             ) from None
@@ -342,6 +422,7 @@ class AITurnService:
         policy_version: str,
         exposed_capabilities: Sequence[ProviderCapability],
         prior_activity: Sequence[CapabilityAuditSummary],
+        commercial_state_revision: int,
     ) -> tuple[CapabilityExecutionResult, FinalizedAITurnResult | None]:
         if self._durable_session_factory is None:
             return (
@@ -355,6 +436,13 @@ class AITurnService:
         for attempt in range(_MAX_DURABLE_ACTION_ATTEMPTS):
             async with self._durable_session_factory() as session:
                 try:
+                    if self._commercial_state_loader is not None:
+                        await _require_current_transaction_snapshot(
+                            session,
+                            context=context,
+                            source_message_id=turn.source_message_id,
+                            commercial_state_revision=commercial_state_revision,
+                        )
                     execution_result = await self._capability_executor.execute(
                         requested_name=tool_call.capability_name,
                         model_arguments=tool_call.arguments,
@@ -398,6 +486,7 @@ class AITurnService:
                     exposed_capabilities=exposed_capabilities,
                     capability_activity=activity,
                     outcome=AITurnOutcome.handoff_requested,
+                    commercial_state_revision=commercial_state_revision,
                 )
                 try:
                     await self._audit_appender(session, audit_record)
@@ -411,6 +500,7 @@ class AITurnService:
                         text=None,
                         audit_record=audit_record,
                         audit_persisted=True,
+                        commercial_state_snapshot_revision=commercial_state_revision,
                     ),
                 )
 
@@ -425,6 +515,7 @@ class AITurnService:
         capability_activity: Sequence[CapabilityAuditSummary],
         outcome: AITurnOutcome,
         safe_code: str | None = None,
+        commercial_state_revision: int = 0,
     ) -> AITurnAuditRecord:
         identity = self._provider_identity
         return AITurnAuditRecord(
@@ -438,6 +529,8 @@ class AITurnService:
                 capability.name for capability in exposed_capabilities
             ),
             capability_activity=tuple(capability_activity),
+            commercial_state_revision_before=commercial_state_revision,
+            commercial_state_revision_after=commercial_state_revision,
             outcome=outcome,
             safe_code=safe_code,
         )
@@ -465,6 +558,7 @@ def get_ai_turn_service() -> AITurnService:
         get_provider_turn_adapter(),
         authority_checker=_ai_authority_is_current,
         durable_session_factory=async_session_factory,
+        commercial_state_loader=_postgres_commercial_state_loader,
     )
 
 
@@ -479,6 +573,59 @@ async def _ai_authority_is_current(context: TrustedCapabilityContext) -> bool:
             context.conversation_id,
             expected_ownership_version=context.expected_ownership_version,
         )
+
+
+async def _postgres_commercial_state_loader(
+    conversation_id: uuid.UUID,
+) -> CommercialState | None:
+    """Read durable continuity once before inference without holding locks."""
+    from app.database import async_session_factory
+
+    async with async_session_factory() as session:
+        return await read_commercial_state(session, conversation_id)
+
+
+async def _require_current_transaction_snapshot(
+    session: AsyncSession,
+    *,
+    context: TrustedCapabilityContext,
+    source_message_id: uuid.UUID | None,
+    commercial_state_revision: int,
+) -> None:
+    """Lock and reject a stale terminal result before any durable capability work."""
+    from sqlalchemy import select
+
+    from app.models.message import Message
+    from app.modules.m4_conversation.ownership import ai_may_reply
+
+    if not await ai_may_reply(
+        session,
+        context.conversation_id,
+        lock=True,
+        expected_ownership_version=context.expected_ownership_version,
+    ):
+        raise StaleAITurnAuthority
+    current_state = await read_commercial_state(session, context.conversation_id)
+    current_revision = current_state.revision if current_state is not None else 0
+    if current_revision != commercial_state_revision:
+        raise StaleAITurnAuthority
+    if source_message_id is None:
+        return
+    latest_inbound_id = await session.scalar(
+        select(Message.message_id)
+        .where(
+            Message.conversation_id == context.conversation_id,
+            Message.direction == "inbound",
+        )
+        .order_by(
+            Message.created_at.desc(),
+            Message.timestamp.desc(),
+            Message.message_id.desc(),
+        )
+        .limit(1)
+    )
+    if latest_inbound_id != source_message_id:
+        raise StaleAITurnAuthority
 
 
 async def _rollback_quietly(session: AsyncSession) -> None:
@@ -545,9 +692,23 @@ def _provider_tool_result(
     )
 
 
-def _build_runtime_prompt(turn: AITurn) -> str:
+def _commercial_state_finalizer_capability() -> ProviderCapability:
+    return ProviderCapability(
+        name=COMMERCIAL_STATE_FINALIZER,
+        description=(
+            "Finalize the customer reply and propose only a bounded commercial "
+            "continuity-state change; this is not a business action."
+        ),
+        input_schema=CommercialStateProposal.model_json_schema(),
+    )
+
+
+def _build_runtime_prompt(
+    turn: AITurn,
+    commercial_state: CommercialState | None = None,
+) -> str:
     """Keep customer-controlled content in runtime data, outside system policy."""
-    if not turn.history:
+    if not turn.history and commercial_state is None:
         return turn.user_content
 
     language_label = {
@@ -555,13 +716,29 @@ def _build_runtime_prompt(turn: AITurn) -> str:
         "french": "Français",
         "swahili": "Kiswahili",
     }.get(turn.language, "Français")
+    sections = []
+    projection = commercial_state_projection(commercial_state)
+    if projection:
+        compact_projection = json.dumps(
+            projection,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        sections.append(
+            "Mémoire commerciale sauvegardée (plus ancienne que le message actuel "
+            "et l'historique; non autoritative):\n"
+            f"{compact_projection}"
+        )
+
     history_lines = []
     for message in turn.history[-_HISTORY_LIMIT:]:
         role = "Client" if message.get("direction") == "inbound" else "Moi (bot)"
         history_lines.append(f"{role}: {message.get('content', '')}")
 
-    return (
-        f"Historique récent ({language_label}):\n"
-        f"{'\n'.join(history_lines)}\n\n"
-        f"Message actuel du client:\n{turn.user_content}"
-    )
+    if history_lines:
+        sections.append(
+            f"Historique récent ({language_label}):\n{'\n'.join(history_lines)}"
+        )
+    sections.append(f"Message actuel du client:\n{turn.user_content}")
+    return "\n\n".join(sections)

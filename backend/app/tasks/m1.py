@@ -17,7 +17,13 @@ import structlog
 from celery import Task
 from sqlalchemy.exc import IntegrityError
 
-from app.ai.audit import AITurnAuditRecord, AITurnOutcome, append_ai_turn_audit
+from app.ai.audit import (
+    AITurnAuditRecord,
+    AITurnOutcome,
+    CommercialStateField,
+    append_ai_turn_audit,
+)
+from app.ai.commercial_state import CommercialStateUpdate
 from app.config import get_settings
 from app.i18n.messages import t
 from app.tasks.celery_app import celery_app, run_async
@@ -138,10 +144,19 @@ async def _persist_outbound(
     expected_ownership_version: int,
     source_message_id: uuid.UUID | None = None,
     audit_record: AITurnAuditRecord | None = None,
+    expected_commercial_state_revision: int | None = None,
+    commercial_state_update: CommercialStateUpdate | None = None,
 ) -> uuid.UUID | None:
-    """Commit one response and its optional AI audit before any send attempt."""
+    """Commit continuity state, one response, and its AI audit atomically."""
     from app.database import async_session_factory
+    from app.ai.commercial_state import (
+        commercial_state_changed_fields,
+        read_commercial_state,
+        update_commercial_state_from_locked_snapshot,
+    )
+    from app.models.message import Message
     from app.modules.m1_gateway.service import persist_outbound
+    from sqlalchemy import select
 
     async with async_session_factory() as session:
         try:
@@ -158,6 +173,60 @@ async def _persist_outbound(
                     reason="ai_authority_changed",
                 )
                 return None
+            state_before = None
+            state_after = None
+            if (
+                audit_record is not None
+                and expected_commercial_state_revision is not None
+            ):
+                if source_message_id is None:
+                    raise ValueError("AI audit requires an authoritative source message")
+                if (
+                    audit_record.commercial_state_revision_before is not None
+                    and audit_record.commercial_state_revision_before
+                    != expected_commercial_state_revision
+                ):
+                    raise ValueError("AI audit commercial-state snapshot is inconsistent")
+                latest_inbound_id = await session.scalar(
+                    select(Message.message_id)
+                    .where(
+                        Message.conversation_id == conversation_id,
+                        Message.direction == "inbound",
+                    )
+                    .order_by(
+                        Message.created_at.desc(),
+                        Message.timestamp.desc(),
+                        Message.message_id.desc(),
+                    )
+                    .limit(1)
+                )
+                if latest_inbound_id != source_message_id:
+                    await session.rollback()
+                    log.info(
+                        "m1.persist_outbound.skipped",
+                        conversation_id=str(conversation_id),
+                        reason="newer_customer_evidence",
+                    )
+                    return None
+                state_before = await read_commercial_state(session, conversation_id)
+                current_revision = state_before.revision if state_before else 0
+                if current_revision != expected_commercial_state_revision:
+                    await session.rollback()
+                    log.info(
+                        "m1.persist_outbound.skipped",
+                        conversation_id=str(conversation_id),
+                        reason="commercial_state_changed",
+                    )
+                    return None
+                state_after = state_before
+                if commercial_state_update is not None:
+                    state_after = await update_commercial_state_from_locked_snapshot(
+                        session,
+                        conversation_id=conversation_id,
+                        current=state_before,
+                        expected_revision=expected_commercial_state_revision,
+                        state_update=commercial_state_update,
+                    )
             outbound_id = await persist_outbound(
                 session=session,
                 conversation_id=conversation_id,
@@ -166,13 +235,27 @@ async def _persist_outbound(
                 processing_time_ms=processing_time_ms,
             )
             if audit_record is not None:
-                if source_message_id is None:
-                    raise ValueError("AI audit requires an authoritative source message")
                 audit_values = audit_record.model_dump()
                 audit_values.update(
                     source_message_id=source_message_id,
                     outbound_message_id=outbound_id,
                 )
+                if expected_commercial_state_revision is not None:
+                    state_revision_after = state_after.revision if state_after else 0
+                    changed_fields = tuple(
+                        CommercialStateField(field_name)
+                        for field_name in commercial_state_changed_fields(
+                            state_before,
+                            state_after,
+                        )
+                    )
+                    audit_values.update(
+                        commercial_state_revision_before=(
+                            expected_commercial_state_revision
+                        ),
+                        commercial_state_revision_after=state_revision_after,
+                        commercial_state_changed_fields=changed_fields,
+                    )
                 await append_ai_turn_audit(
                     session,
                     AITurnAuditRecord.model_validate(audit_values, strict=True),
@@ -442,6 +525,8 @@ async def _process(
             allowed_capabilities=_M1_AI_CAPABILITIES,
         )
         audit_record = None
+        commercial_state_update = None
+        commercial_state_snapshot_revision = None
         try:
             finalized_turn = await ai_turn_service.generate_finalized(ai_turn)
         except AITurnPersistenceError:
@@ -455,6 +540,9 @@ async def _process(
             audit_record = AITurnAuditRecord.model_validate(
                 audit_values,
                 strict=True,
+            )
+            commercial_state_snapshot_revision = (
+                audit_record.commercial_state_revision_before
             )
         except Exception as exc:
             log.error(
@@ -472,6 +560,11 @@ async def _process(
                 }
             ai_response = finalized_turn.text
             audit_record = finalized_turn.audit_record
+            commercial_state_update = finalized_turn.commercial_state_update
+            if finalized_turn.audit_record.commercial_state_revision_before is not None:
+                commercial_state_snapshot_revision = (
+                    finalized_turn.commercial_state_snapshot_revision
+                )
 
         processing_ms = int((time.monotonic() - t0) * 1000)
 
@@ -484,6 +577,10 @@ async def _process(
             expected_ownership_version=expected_ownership_version,
             source_message_id=inbound.message_id,
             audit_record=audit_record,
+            expected_commercial_state_revision=(
+                commercial_state_snapshot_revision
+            ),
+            commercial_state_update=commercial_state_update,
         )
         if out_msg_id is None:
             return _persistence_failure_result(conv_id)

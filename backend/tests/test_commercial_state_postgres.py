@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 from app.ai.commercial_state import (
     CommercialStateRevisionConflict,
     CommercialStateUpdate,
-    PurchaseIntent,
     read_commercial_state,
     update_commercial_state,
 )
@@ -90,7 +89,7 @@ async def test_jsonb_persistence_context_preservation_and_revision_conflict(
             expected_revision=0,
             state_update=CommercialStateUpdate(
                 current_goal="find a portable option",
-                purchase_intent=PurchaseIntent.considering,
+                expressed_needs=["easy to carry"],
             ),
         )
         await session.commit()
@@ -112,7 +111,9 @@ async def test_jsonb_persistence_context_preservation_and_revision_conflict(
             winning_session,
             conversation_id=conversation_id,
             expected_revision=1,
-            state_update=CommercialStateUpdate(purchase_intent=PurchaseIntent.ready),
+            state_update=CommercialStateUpdate(
+                decision_constraints=[{"kind": "budget", "value": "maximum $35"}]
+            ),
         )
         await winning_session.commit()
     assert winner is not None and winner.revision == 2

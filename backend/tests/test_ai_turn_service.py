@@ -14,6 +14,11 @@ from app.ai.capabilities import (
     CapabilityRegistry,
     StrictCapabilityModel,
 )
+from app.ai.commercial_state import (
+    COMMERCIAL_STATE_FINALIZER,
+    CommercialState,
+    DecisionConstraint,
+)
 from app.ai.policy import AI_SYSTEM_POLICY_VERSION, get_system_policy
 from app.ai.provider_contract import (
     ProviderContinuationState,
@@ -216,6 +221,109 @@ async def test_turn_without_history_preserves_existing_user_prompt_shape():
     assert adapter.calls[0].messages == (
         ProviderMessage(role="user", content="Mbote"),
     )
+
+
+@pytest.mark.asyncio
+async def test_commercial_state_projection_is_compact_and_metadata_free():
+    state = CommercialState(
+        revision=7,
+        current_goal="find an air fryer",
+        decision_constraints=[DecisionConstraint(kind="budget", value="maximum $60")],
+    )
+
+    async def load_state(conversation_id):
+        assert conversation_id == CONVERSATION_ID
+        return state
+
+    adapter = _RecordingAdapter()
+    service = AITurnService(adapter, commercial_state_loader=load_state)
+    finalized = await service.generate_finalized(_turn())
+
+    request = adapter.calls[0]
+    prompt = request.messages[0].content
+    assert "find an air fryer" in prompt
+    assert "maximum $60" in prompt
+    for hidden in ("schema_version", "revision", "updated_at", "purchase_intent"):
+        assert hidden not in prompt
+    assert [item.name for item in request.allowed_capabilities] == [
+        COMMERCIAL_STATE_FINALIZER
+    ]
+    assert finalized.commercial_state_snapshot_revision == 7
+    assert finalized.audit_record.commercial_state_revision_before == 7
+    assert len(prompt) - len(_turn().user_content) < 400
+
+
+@pytest.mark.asyncio
+async def test_reserved_finalizer_returns_text_and_typed_partial_update_without_roundtrip():
+    selected_id = str(uuid.uuid4())
+
+    async def load_state(_conversation_id):
+        return CommercialState(revision=2, current_goal="find an air fryer")
+
+    adapter = _SequenceAdapter(
+        _tool_result(
+            _tool_call(
+                name=COMMERCIAL_STATE_FINALIZER,
+                arguments={
+                    "response_text": "Je garde ton budget de 50 USD.",
+                    "state_update": {
+                        "decision_constraints": [
+                            {"kind": "budget", "value": "maximum $50"}
+                        ],
+                        "selected_sellable_item_ids": [selected_id],
+                    },
+                },
+            )
+        )
+    )
+    service = AITurnService(
+        adapter,
+        authority_checker=_authority_allowed,
+        commercial_state_loader=load_state,
+    )
+
+    finalized = await service.generate_finalized(_turn())
+
+    assert finalized.text == "Je garde ton budget de 50 USD."
+    assert finalized.commercial_state_snapshot_revision == 2
+    assert finalized.commercial_state_update is not None
+    assert finalized.commercial_state_update.selected_sellable_item_ids == [
+        uuid.UUID(selected_id)
+    ]
+    assert len(adapter.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "forbidden_update",
+    [
+        {"unknown": "field"},
+        {"price": 55},
+        {"stock": "available"},
+        {"purchase_intent": "ready"},
+    ],
+)
+async def test_reserved_finalizer_rejects_forbidden_state_fields(forbidden_update):
+    async def load_state(_conversation_id):
+        return None
+
+    adapter = _SequenceAdapter(
+        _tool_result(
+            _tool_call(
+                name=COMMERCIAL_STATE_FINALIZER,
+                arguments={
+                    "response_text": "Unsafe",
+                    "state_update": forbidden_update,
+                },
+            )
+        )
+    )
+    service = AITurnService(adapter, commercial_state_loader=load_state)
+
+    with pytest.raises(ProviderTurnError) as captured:
+        await service.generate(_turn())
+    assert captured.value.category is ProviderErrorCategory.malformed_response
+    assert len(adapter.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -839,7 +947,7 @@ def test_policy_is_explicitly_versioned_and_contains_authority_limits():
     policy = get_system_policy("french")
     normalized_policy = " ".join(policy.text.split())
 
-    assert AI_SYSTEM_POLICY_VERSION == "mbb-ai-policy-v2-ai4-v1"
+    assert AI_SYSTEM_POLICY_VERSION == "mbb-ai-policy-v2-ai4-v2"
     assert policy.version == AI_SYSTEM_POLICY_VERSION
     assert "MBB AI Assistant" in policy.text
     for prohibited_fact in (
@@ -861,6 +969,9 @@ def test_policy_is_explicitly_versioned_and_contains_authority_limits():
     assert "one usage question at a time" in normalized_policy
     assert "avoid redundant/overlapping searches" in normalized_policy
     assert "Explicit human request" in normalized_policy
+    assert "current customer message" in normalized_policy
+    assert "Never expose, infer, propose, or activate purchase_intent" in normalized_policy
+    assert COMMERCIAL_STATE_FINALIZER in normalized_policy
     assert "Je vais vérifier et je reviens vers toi" not in policy.text
 
 

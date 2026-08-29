@@ -107,6 +107,7 @@ class CommercialStateField(str, Enum):
     current_concern = "current_concern"
     purchase_intent = "purchase_intent"
     next_objective = "next_objective"
+    selected_sellable_item_ids = "selected_sellable_item_ids"
 
 
 class AITurnOutcome(str, Enum):

@@ -191,7 +191,7 @@ def test_offline_cli_scores_replay_and_emits_machine_readable_json(tmp_path):
         "model": "fixture-model",
         "model_version": "fixture-model-v1",
         "reasoning_profile": "minimal",
-        "policy_version": "mbb-ai-policy-v2-ai4-v1",
+        "policy_version": "mbb-ai-policy-v2-ai4-v2",
     }
     assert report["aggregate"]["cases_executed"] == 1
     assert report["aggregate"]["deterministic_passes"] == 1
