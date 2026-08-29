@@ -802,11 +802,12 @@ async def test_scenario_c_human_handoff_is_terminal_through_real_m1(
     assert result == {
         "status": "waiting_for_human",
         "conversation_id": str(conversation.conversation_id),
+        "outbound_message_id": result["outbound_message_id"],
         "send_status": "skipped",
     }
     assert len(adapter.requests) == 1
     assert sum(message.direction == "inbound" for message in messages) == 1
-    assert sum(message.direction == "outbound" for message in messages) == 0
+    assert sum(message.direction == "outbound" for message in messages) == 1
     assert conversation.owner_type == "ai"
     assert conversation.human_owner_account_id is None
     assert conversation.ai_execution_state == "paused"
@@ -817,11 +818,14 @@ async def test_scenario_c_human_handoff_is_terminal_through_real_m1(
     assert tickets[0].escalation_type == "human_handoff"
     assert len(audits) == 1
     audit = audits[0]
+    outbound = next(message for message in messages if message.direction == "outbound")
+    assert outbound.content == "D'accord. Je transmets cette conversation à un conseiller."
+    assert result["outbound_message_id"] == str(outbound.message_id)
     _assert_common_audit(
         audit,
         conversation=conversation,
         source_message_id=source_message_id,
-        outbound_message_id=None,
+        outbound_message_id=outbound.message_id,
     )
     assert audit.outcome == "handoff_requested"
     assert audit.capability_activity == [
@@ -830,6 +834,7 @@ async def test_scenario_c_human_handoff_is_terminal_through_real_m1(
             "decision": "executed",
             "outcome": "success",
             "safe_code": None,
+            "handoff_reason": "explicit_human_request",
         }
     ]
     assert evidence.send_boundaries == []

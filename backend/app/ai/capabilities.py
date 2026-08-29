@@ -16,6 +16,7 @@ from pydantic import (
     Field,
     ValidationError,
     field_validator,
+    model_validator,
 )
 
 from app.models.catalog import normalize_category_code
@@ -270,6 +271,10 @@ class CapabilityExecutor:
 
 class RequestHumanHandoffInput(StrictCapabilityModel):
     reason_category: Literal[
+        "qualified_purchase_intent",
+        "explicit_human_request",
+        "authority_required",
+        "reliability_tool_failure",
         "customer_requested_human",
         "unsupported_action",
         "policy_exception",
@@ -277,6 +282,29 @@ class RequestHumanHandoffInput(StrictCapabilityModel):
         "repeated_misunderstanding",
         "required_capability_unavailable",
     ]
+    selected_sellable_item_id: str | None = Field(
+        default=None,
+        pattern=(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
+            r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        ),
+    )
+    purchase_intent: Literal["considering", "ready"] | None = None
+
+    @model_validator(mode="after")
+    def terminal_transition_is_consistent(self) -> RequestHumanHandoffInput:
+        reason = _canonical_handoff_reason(self.reason_category)
+        if reason == "qualified_purchase_intent":
+            if self.selected_sellable_item_id is None or self.purchase_intent != "ready":
+                raise ValueError(
+                    "qualified purchase intent requires one selected item and ready"
+                )
+        elif reason == "authority_required":
+            if self.purchase_intent == "ready":
+                raise ValueError("conditional authority cannot persist ready intent")
+        elif self.purchase_intent is not None:
+            raise ValueError("this handoff reason cannot alter purchase intent")
+        return self
 
 
 class RequestHumanHandoffOutput(StrictCapabilityModel):
@@ -284,6 +312,30 @@ class RequestHumanHandoffOutput(StrictCapabilityModel):
     ownership_version: int = Field(gt=0)
     escalation_ticket_id: uuid.UUID
     replayed: bool
+    handoff_reason: Literal[
+        "qualified_purchase_intent",
+        "explicit_human_request",
+        "authority_required",
+        "reliability_tool_failure",
+    ] | None = None
+    acknowledgment_text: str | None = Field(default=None, max_length=500)
+    outbound_message_id: uuid.UUID | None = None
+    commercial_state_revision_after: int | None = Field(default=None, ge=0)
+    commercial_state_changed_fields: tuple[str, ...] = Field(default=(), max_length=8)
+
+
+_HANDOFF_REASON_ALIASES = {
+    "customer_requested_human": "explicit_human_request",
+    "unsupported_action": "authority_required",
+    "policy_exception": "authority_required",
+    "insufficient_business_evidence": "reliability_tool_failure",
+    "repeated_misunderstanding": "reliability_tool_failure",
+    "required_capability_unavailable": "reliability_tool_failure",
+}
+
+
+def _canonical_handoff_reason(reason: str) -> str:
+    return _HANDOFF_REASON_ALIASES.get(reason, reason)
 
 
 class SearchProductsInput(StrictCapabilityModel):
@@ -497,20 +549,91 @@ async def _get_product_details(
 async def _request_human_handoff(
     session: AsyncSession,
     context: TrustedCapabilityContext,
-    _arguments: StrictCapabilityModel,
+    arguments: StrictCapabilityModel,
 ) -> object:
+    from app.ai.commercial_state import (
+        PurchaseIntent,
+        commercial_state_changed_fields,
+        read_commercial_state,
+        update_commercial_state_for_handoff_from_locked_snapshot,
+    )
+    from app.models.conversation import Conversation
+    from app.modules.m1_gateway.service import persist_outbound
     from app.modules.m4_conversation.ai_handoff import (
         AIHandoffConversationNotFound,
         StaleAIAuthority,
         apply_human_handoff,
+        handoff_acknowledgment,
     )
+    from app.modules.product_offer.service import (
+        ProductOfferNotFound,
+        require_product_offer,
+    )
+    from sqlalchemy import select
     from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+    assert isinstance(arguments, RequestHumanHandoffInput)
+    reason = _canonical_handoff_reason(arguments.reason_category)
+    selected_item_id = (
+        uuid.UUID(arguments.selected_sellable_item_id)
+        if reason in {"qualified_purchase_intent", "authority_required"}
+        and arguments.selected_sellable_item_id is not None
+        else None
+    )
     try:
+        state_before = await read_commercial_state(session, context.conversation_id)
+        offer = None
+        if selected_item_id is not None:
+            try:
+                offer = await require_product_offer(session, selected_item_id)
+            except ProductOfferNotFound as exc:
+                raise SafeCapabilityError("sellable_item_not_found") from exc
+        if reason == "qualified_purchase_intent":
+            assert offer is not None
+            if not offer.is_sellable_now:
+                raise SafeCapabilityError(offer.offer_status)
+
+        purchase_intent = (
+            PurchaseIntent(arguments.purchase_intent)
+            if arguments.purchase_intent is not None
+            else None
+        )
+        state_after = await update_commercial_state_for_handoff_from_locked_snapshot(
+            session,
+            conversation_id=context.conversation_id,
+            current=state_before,
+            expected_revision=state_before.revision if state_before is not None else 0,
+            purchase_intent=purchase_intent,
+            selected_sellable_item_id=(
+                selected_item_id
+                if reason in {"qualified_purchase_intent", "authority_required"}
+                else None
+            ),
+        )
+        language = await session.scalar(
+            select(Conversation.language_detected).where(
+                Conversation.conversation_id == context.conversation_id
+            )
+        )
+        if language is None:
+            raise AIHandoffConversationNotFound
+        acknowledgment = handoff_acknowledgment(
+            reason=reason,
+            language=language,
+            product_offer=offer if reason == "qualified_purchase_intent" else None,
+        )
+        outbound_message_id = await persist_outbound(
+            session=session,
+            conversation_id=context.conversation_id,
+            content=acknowledgment,
+            language=language,
+            processing_time_ms=0,
+        )
         result = await apply_human_handoff(
             session,
             conversation_id=context.conversation_id,
             expected_ownership_version=context.expected_ownership_version,
+            handoff_reason=reason,
         )
     except AIHandoffConversationNotFound as exc:
         raise SafeCapabilityError("conversation_not_found") from exc
@@ -531,6 +654,14 @@ async def _request_human_handoff(
         "ownership_version": result.ownership_version,
         "escalation_ticket_id": result.escalation_ticket_id,
         "replayed": result.replayed,
+        "handoff_reason": reason,
+        "acknowledgment_text": acknowledgment,
+        "outbound_message_id": outbound_message_id,
+        "commercial_state_revision_after": state_after.revision,
+        "commercial_state_changed_fields": commercial_state_changed_fields(
+            state_before,
+            state_after,
+        ),
     }
 
 

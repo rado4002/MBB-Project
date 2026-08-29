@@ -41,6 +41,7 @@ export interface OperatorConversationQueueItem {
   awaiting_response_since: string | null
   open_escalation: {
     exists: boolean
+    reason?: string | null
   }
   ownership: ConversationOwnership
 }
@@ -70,8 +71,42 @@ export interface OperatorConversationDetail {
   lead: OperatorLeadSummary | null
   open_escalation: {
     exists: boolean
+    reason?: string | null
   }
   ownership: ConversationOwnership
+  commercial_context?: {
+    current_goal: string | null
+    expressed_needs: string[]
+    decision_constraints: Array<{
+      kind: 'budget' | 'portability' | 'timing' | 'compatibility' | 'preference'
+      value: string
+    }>
+    current_concern: {
+      kind: 'price' | 'quality' | 'delivery' | 'comparison'
+      detail: string | null
+    } | null
+    purchase_intent: 'none' | 'considering' | 'ready'
+    next_objective:
+      | 'clarify_requirement'
+      | 'retrieve_options'
+      | 'answer_concern'
+      | 'clarify_choice'
+      | 'prepare_handoff'
+      | 'human_commercial_continuation'
+      | null
+    selected_products: Array<{
+      sellable_item_id: string
+      display_name: string | null
+      offer_status:
+        | 'sellable_now'
+        | 'availability_unconfirmed'
+        | 'out_of_stock'
+        | 'price_unavailable'
+        | 'inactive'
+        | null
+      current_usd_price: string | null
+    }>
+  } | null
 }
 
 export interface ConversationOwnership {
@@ -95,13 +130,14 @@ export interface OwnershipTransitionResponse {
   ownership: ConversationOwnership
 }
 
-export type MessageSenderType = 'customer' | 'operator' | 'system' | 'unknown'
+export type MessageSenderType = 'customer' | 'operator' | 'ai' | 'system' | 'unknown'
 
 export interface OperatorMessageItem {
   message_id: string
   occurred_at: string
   direction: MessageDirection
   sender_type: MessageSenderType
+  sender_display_name?: string | null
   operator_author: {
     account_id: string
     display_name: string

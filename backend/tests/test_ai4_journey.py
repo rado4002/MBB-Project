@@ -116,7 +116,7 @@ def test_ai4_policy_encodes_search_recommendation_and_boundary_behavior():
     policy = get_system_policy("french")
     normalized_policy = " ".join(policy.text.split())
 
-    assert policy.version == "mbb-ai-policy-v2-ai4-v2"
+    assert policy.version == "mbb-ai-policy-v2-ai4-v3"
     for behavior in (
         "search now for a named item",
         "one usage question at a time",

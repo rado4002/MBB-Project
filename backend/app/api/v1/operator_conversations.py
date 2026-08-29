@@ -28,6 +28,12 @@ from app.api.browser_auth_deps import (
 from app.api.browser_auth_errors import BrowserAuthError
 from app.config import Settings
 from app.database import get_db
+from app.ai.commercial_state import (
+    COMMERCIAL_STATE_KEY,
+    CommercialStateError,
+    commercial_state_from_context,
+)
+from app.models.ai_turn_audit import AITurnAudit
 from app.models.conversation import Conversation
 from app.models.customer import Customer
 from app.models.escalation_ticket import EscalationTicket
@@ -46,6 +52,7 @@ from app.modules.m4_conversation.ownership import (
     ReturnToAIUnavailable,
     transition_ownership,
 )
+from app.modules.product_offer.service import get_product_offer
 from app.modules.m4_conversation.internal_notes import (
     InternalNoteConversationNotFound,
     InternalNoteIdempotencyConflict,
@@ -78,6 +85,9 @@ from app.request_ids import normalize_or_generate_request_id
 from app.schemas.common import ConversationStatus, Language
 from app.schemas.operator_conversations import (
     OperatorConversationDetail,
+    OperatorCommercialConcern,
+    OperatorCommercialContext,
+    OperatorCommercialConstraint,
     OperatorConversationOwnership,
     OperatorConversationQueueItem,
     OperatorConversationQueueResponse,
@@ -92,6 +102,7 @@ from app.schemas.operator_conversations import (
     OperatorMessageMedia,
     OperatorOpenEscalation,
     OperatorReplyCreate,
+    OperatorSelectedProduct,
     OperatorTimelineMessageItem,
     OperatorTimelineResponse,
     OperatorOwnershipTransitionRequest,
@@ -144,6 +155,30 @@ def _open_escalation_exists():
             EscalationTicket.conversation_id == Conversation.conversation_id,
             EscalationTicket.status.in_(_OPEN_ESCALATION_STATUSES),
         )
+    )
+
+
+def _open_escalation_reason():
+    return (
+        select(EscalationTicket.reason)
+        .where(
+            EscalationTicket.conversation_id == Conversation.conversation_id,
+            EscalationTicket.status.in_(_OPEN_ESCALATION_STATUSES),
+        )
+        .order_by(EscalationTicket.created_at.desc())
+        .limit(1)
+        .correlate(Conversation)
+        .scalar_subquery()
+    )
+
+
+def _ai_actor_display_name():
+    return (
+        select(AITurnAudit.actor_display_name)
+        .where(AITurnAudit.outbound_message_id == Message.message_id)
+        .limit(1)
+        .correlate(Message)
+        .scalar_subquery()
     )
 
 
@@ -371,6 +406,7 @@ def _operator_message_item(
     author_display_name: str | None,
     delivery_state: str | None,
     delivery_state_timestamp: datetime | None,
+    ai_actor_display_name: str | None = None,
 ) -> OperatorMessageItem:
     is_text = content_type == "text"
     operator_author = None
@@ -386,8 +422,13 @@ def _operator_message_item(
         sender_type=(
             "customer"
             if direction == "inbound"
-            else "operator" if operator_author is not None else "unknown"
+            else (
+                "operator"
+                if operator_author is not None
+                else "ai" if ai_actor_display_name is not None else "unknown"
+            )
         ),
+        sender_display_name=ai_actor_display_name,
         operator_author=operator_author,
         delivery_state=delivery_state,
         delivery_state_timestamp=delivery_state_timestamp,
@@ -453,6 +494,7 @@ def _timeline_message_item(row: Any) -> OperatorTimelineMessageItem:
         author_display_name=row["author_display_name"],
         delivery_state=row["delivery_state"],
         delivery_state_timestamp=row["delivery_state_timestamp"],
+        ai_actor_display_name=row.get("ai_actor_display_name"),
     )
     return OperatorTimelineMessageItem(**message.model_dump())
 
@@ -466,6 +508,63 @@ def _timeline_note_item(row: Any) -> OperatorInternalNoteItem:
             display_name=row["author_display_name"],
         ),
         text=row["content"],
+    )
+
+
+async def _commercial_context_response(
+    db: AsyncSession,
+    raw_commercial_state: Any,
+) -> OperatorCommercialContext | None:
+    if raw_commercial_state is None:
+        return None
+    try:
+        state = commercial_state_from_context(
+            {COMMERCIAL_STATE_KEY: raw_commercial_state}
+        )
+    except CommercialStateError:
+        log.warning("operator.commercial_context.invalid")
+        return None
+    if state is None:
+        return None
+
+    selected_products: list[OperatorSelectedProduct] = []
+    for selected_id in state.selected_sellable_item_ids[:3]:
+        offer = await get_product_offer(db, selected_id)
+        display_name = None
+        if offer is not None:
+            display_name = offer.product_name
+            if offer.model_label:
+                display_name = f"{display_name} {offer.model_label}"
+        selected_products.append(
+            OperatorSelectedProduct(
+                sellable_item_id=selected_id,
+                display_name=display_name,
+                offer_status=offer.offer_status if offer is not None else None,
+                current_usd_price=(
+                    offer.current_usd_price if offer is not None else None
+                ),
+            )
+        )
+    return OperatorCommercialContext(
+        current_goal=state.current_goal,
+        expressed_needs=state.expressed_needs,
+        decision_constraints=[
+            OperatorCommercialConstraint(kind=item.kind.value, value=item.value)
+            for item in state.decision_constraints
+        ],
+        current_concern=(
+            OperatorCommercialConcern(
+                kind=state.current_concern.kind.value,
+                detail=state.current_concern.detail,
+            )
+            if state.current_concern is not None
+            else None
+        ),
+        purchase_intent=state.purchase_intent.value,
+        next_objective=(
+            state.next_objective.value if state.next_objective is not None else None
+        ),
+        selected_products=selected_products,
     )
 
 
@@ -1050,6 +1149,7 @@ async def get_operator_timeline(
             message="The conversation was not found.",
         )
 
+    ai_actor_display_name = _ai_actor_display_name()
     message_items = select(
         literal("message").label("kind"),
         Message.message_id.label("item_id"),
@@ -1062,6 +1162,7 @@ async def get_operator_timeline(
         Message.author_display_name.label("author_display_name"),
         Message.delivery_state.label("delivery_state"),
         Message.delivery_state_timestamp.label("delivery_state_timestamp"),
+        ai_actor_display_name.label("ai_actor_display_name"),
     ).where(
         Message.conversation_id == conversation_id,
         (Message.operator_author_account_id.is_(None))
@@ -1081,6 +1182,7 @@ async def get_operator_timeline(
         cast(literal(None), TIMESTAMP(timezone=True)).label(
             "delivery_state_timestamp"
         ),
+        cast(literal(None), String(100)).label("ai_actor_display_name"),
     ).where(InternalNote.conversation_id == conversation_id)
     timeline = union_all(message_items, note_items).subquery("operator_timeline")
     statement = (
@@ -1144,6 +1246,7 @@ async def get_operator_conversation(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> OperatorConversationDetail:
     open_escalation = _open_escalation_exists()
+    open_escalation_reason = _open_escalation_reason()
     statement = (
         select(
             Conversation.conversation_id,
@@ -1165,6 +1268,10 @@ async def get_operator_conversation(
                 "lead_product_interests"
             ),
             open_escalation.label("has_open_escalation"),
+            open_escalation_reason.label("open_escalation_reason"),
+            Conversation.context[COMMERCIAL_STATE_KEY].label(
+                "commercial_state"
+            ),
             OperatorAccount.display_name.label("human_owner_display_name"),
         )
         .join(Customer, Customer.phone_number == Conversation.customer_id)
@@ -1197,6 +1304,10 @@ async def get_operator_conversation(
             intent=row["lead_intent"],
             product_interests=_display_interests(row["lead_product_interests"]),
         )
+    commercial_context = await _commercial_context_response(
+        db,
+        row.get("commercial_state"),
+    )
     response.headers["Cache-Control"] = "no-store"
     return OperatorConversationDetail(
         conversation_id=row["conversation_id"],
@@ -1210,9 +1321,11 @@ async def get_operator_conversation(
         ),
         lead=lead,
         open_escalation=OperatorOpenEscalation(
-            exists=row["has_open_escalation"]
+            exists=row["has_open_escalation"],
+            reason=row.get("open_escalation_reason"),
         ),
         ownership=_ownership_from_row(row),
+        commercial_context=commercial_context,
     )
 
 
@@ -1248,6 +1361,7 @@ async def get_operator_message_history(
             message="The conversation was not found.",
         )
 
+    ai_actor_display_name = _ai_actor_display_name()
     statement = (
         select(
             Message.message_id,
@@ -1260,6 +1374,7 @@ async def get_operator_message_history(
             Message.author_display_name,
             Message.delivery_state,
             Message.delivery_state_timestamp,
+            ai_actor_display_name.label("ai_actor_display_name"),
         )
         .where(Message.conversation_id == conversation_id)
         .where(
@@ -1301,6 +1416,7 @@ async def get_operator_message_history(
                 author_display_name=row.get("author_display_name"),
                 delivery_state=row.get("delivery_state"),
                 delivery_state_timestamp=row.get("delivery_state_timestamp"),
+                ai_actor_display_name=row.get("ai_actor_display_name"),
             )
         )
 

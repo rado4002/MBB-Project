@@ -108,7 +108,24 @@ describe('read-only conversation workspace', () => {
           'Maintenance',
         ],
       },
-      open_escalation: { exists: true },
+      open_escalation: {
+        exists: true,
+        reason: 'qualified_purchase_intent',
+      },
+      commercial_context: {
+        current_goal: 'Family cooking',
+        expressed_needs: ['Family of 5'],
+        decision_constraints: [{ kind: 'budget', value: 'Maximum $70' }],
+        current_concern: null,
+        purchase_intent: 'ready',
+        next_objective: 'human_commercial_continuation',
+        selected_products: [{
+          sellable_item_id: '40000000-0000-4000-8000-000000000006',
+          display_name: 'Air Fryer 6L',
+          offer_status: 'sellable_now',
+          current_usd_price: '55.00',
+        }],
+      },
     }
     server.use(
       authenticated(),
@@ -127,6 +144,10 @@ describe('read-only conversation workspace', () => {
     expect(screen.getByText('Lead score').nextElementSibling).toHaveTextContent('High')
     expect(screen.getByText('Sales Ready')).toBeInTheDocument()
     expect(screen.getByText('Request Quote')).toBeInTheDocument()
+    expect(screen.getByText('Qualified Purchase Intent')).toBeInTheDocument()
+    expect(screen.getByText('Family cooking')).toBeInTheDocument()
+    expect(screen.getByText('Ready')).toBeInTheDocument()
+    expect(screen.getByText(/Air Fryer 6L.*Sellable Now.*\$55\.00/)).toBeInTheDocument()
     expect(
       screen.getAllByText('Open escalation').some((node) => node.tagName === 'SPAN'),
     ).toBe(true)
@@ -182,6 +203,13 @@ describe('read-only conversation workspace', () => {
         text: null,
         media: { kind: 'voice_note', available: false },
       }),
+      messageFixture('ffffffff-ffff-4fff-8fff-ffffffffffff', {
+        occurred_at: '2026-08-02T12:18:00Z',
+        direction: 'outbound',
+        sender_type: 'ai',
+        sender_display_name: 'MBB AI Assistant',
+        text: 'Je transmets ta demande.',
+      }),
       messageFixture('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', {
         occurred_at: '2026-08-02T12:20:00Z',
         content_type: 'image',
@@ -210,6 +238,7 @@ describe('read-only conversation workspace', () => {
       expect.stringContaining('Unknown sender'),
       expect.stringContaining('Operator'),
       expect.stringContaining('System'),
+      expect.stringContaining('MBB AI Assistant'),
       expect.stringContaining('Image unavailable'),
     ])
     expect(within(history).getByText('Voice note unavailable')).toBeInTheDocument()

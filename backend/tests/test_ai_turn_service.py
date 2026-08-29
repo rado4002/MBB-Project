@@ -947,7 +947,7 @@ def test_policy_is_explicitly_versioned_and_contains_authority_limits():
     policy = get_system_policy("french")
     normalized_policy = " ".join(policy.text.split())
 
-    assert AI_SYSTEM_POLICY_VERSION == "mbb-ai-policy-v2-ai4-v2"
+    assert AI_SYSTEM_POLICY_VERSION == "mbb-ai-policy-v2-ai4-v3"
     assert policy.version == AI_SYSTEM_POLICY_VERSION
     assert "MBB AI Assistant" in policy.text
     for prohibited_fact in (
@@ -970,7 +970,10 @@ def test_policy_is_explicitly_versioned_and_contains_authority_limits():
     assert "avoid redundant/overlapping searches" in normalized_policy
     assert "Explicit human request" in normalized_policy
     assert "current customer message" in normalized_policy
-    assert "Never expose, infer, propose, or activate purchase_intent" in normalized_policy
+    assert (
+        "Normal continuity updates may set purchase_intent only to none or considering"
+        in normalized_policy
+    )
     assert COMMERCIAL_STATE_FINALIZER in normalized_policy
     assert "Je vais vérifier et je reviens vers toi" not in policy.text
 

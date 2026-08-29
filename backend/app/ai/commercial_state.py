@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Annotated, Any, Mapping
+from typing import Annotated, Any, Literal, Mapping
 
 from pydantic import (
     BaseModel,
@@ -100,7 +100,7 @@ class CommercialConcernKind(str, Enum):
 
 
 class PurchaseIntent(str, Enum):
-    """Historical state retained for v1 compatibility; AI-4D never exposes/writes it."""
+    """Bounded intent memory; ready remains terminal and server-controlled."""
 
     none = "none"
     considering = "considering"
@@ -113,6 +113,7 @@ class NextObjective(str, Enum):
     answer_concern = "answer_concern"
     clarify_choice = "clarify_choice"
     prepare_handoff = "prepare_handoff"
+    human_commercial_continuation = "human_commercial_continuation"
 
 
 class DecisionConstraint(_StrictModel):
@@ -206,6 +207,9 @@ class CommercialStateUpdate(_StrictModel):
         max_length=MAX_OPEN_QUESTIONS,
     )
     current_concern: CommercialConcern | None = None
+    purchase_intent: Literal[PurchaseIntent.none, PurchaseIntent.considering] | None = (
+        None
+    )
     next_objective: NextObjective | None = None
     selected_sellable_item_ids: list[uuid.UUID] | None = Field(
         default=None,
@@ -240,6 +244,13 @@ class CommercialStateUpdate(_StrictModel):
             self.selected_sellable_item_ids
         ) != len(set(self.selected_sellable_item_ids)):
             raise ValueError("selected Sellable Item IDs must be unique")
+        if (
+            "next_objective" in self.model_fields_set
+            and self.next_objective is NextObjective.human_commercial_continuation
+        ):
+            raise ValueError(
+                "post-handoff objective is controlled by the terminal transaction"
+            )
         return self
 
 
@@ -315,7 +326,7 @@ def commercial_state_from_context(
 
 
 def commercial_state_projection(state: CommercialState | None) -> dict[str, Any]:
-    """Return compact conversational fields only; omit metadata and purchase intent."""
+    """Return compact conversational fields; historical intent is not fresh evidence."""
     if state is None:
         return {}
     projection = state.model_dump(
@@ -374,6 +385,8 @@ def apply_commercial_state_update(
         value = getattr(state_update, field_name)
         if field_name in collection_fields and value is None:
             value = []
+        if field_name == "purchase_intent" and value is None:
+            value = PurchaseIntent.none
         candidate_data[field_name] = value
 
     candidate_data.update(
@@ -413,6 +426,7 @@ def commercial_state_changed_fields(
         "decision_constraints",
         "open_questions",
         "current_concern",
+        "purchase_intent",
         "next_objective",
         "selected_sellable_item_ids",
     )
@@ -421,6 +435,75 @@ def commercial_state_changed_fields(
         for field_name in fields
         if getattr(before_state, field_name) != getattr(after_state, field_name)
     )
+
+
+async def update_commercial_state_for_handoff_from_locked_snapshot(
+    session: AsyncSession,
+    *,
+    conversation_id: uuid.UUID,
+    current: CommercialState | None,
+    expected_revision: int,
+    purchase_intent: Literal[PurchaseIntent.considering, PurchaseIntent.ready]
+    | None,
+    selected_sellable_item_id: uuid.UUID | None,
+) -> CommercialState:
+    """Persist the server-controlled post-handoff state from a locked snapshot."""
+    current_revision = current.revision if current is not None else 0
+    if current_revision != expected_revision:
+        raise CommercialStateRevisionConflict(current_revision)
+    if purchase_intent is PurchaseIntent.ready and selected_sellable_item_id is None:
+        raise CommercialStateSelectedItemInvalid(
+            "ready purchase intent requires exactly one selected Sellable Item"
+        )
+
+    base = current or CommercialState()
+    candidate_data = base.model_dump(mode="json")
+    if purchase_intent is not None:
+        candidate_data["purchase_intent"] = purchase_intent
+    if selected_sellable_item_id is not None:
+        candidate_data["selected_sellable_item_ids"] = [selected_sellable_item_id]
+    if purchase_intent is PurchaseIntent.ready and len(
+        candidate_data["selected_sellable_item_ids"]
+    ) != 1:
+        raise CommercialStateSelectedItemInvalid(
+            "ready purchase intent requires exactly one selected Sellable Item"
+        )
+    candidate_data.update(
+        schema_version=COMMERCIAL_STATE_SCHEMA_VERSION,
+        revision=current_revision,
+        updated_at=base.updated_at,
+        next_objective=NextObjective.human_commercial_continuation,
+    )
+    candidate = CommercialState.model_validate(candidate_data)
+    if _semantic_state(candidate) == _semantic_state(base):
+        return base
+
+    candidate_data.update(
+        revision=current_revision + 1,
+        updated_at=datetime.now(timezone.utc),
+    )
+    next_state = CommercialState.model_validate(candidate_data)
+    await _validate_new_selected_item_ids(session, current, next_state)
+    namespace_patch = {COMMERCIAL_STATE_KEY: next_state.model_dump(mode="json")}
+    changed = await session.execute(
+        sqlalchemy_update(Conversation)
+        .where(Conversation.conversation_id == conversation_id)
+        .values(
+            context=Conversation.context.op("||")(
+                bindparam(
+                    "terminal_commercial_state_namespace_patch",
+                    namespace_patch,
+                    type_=JSONB,
+                )
+            ),
+            updated_at=func.now(),
+        )
+    )
+    if changed.rowcount != 1:
+        raise CommercialStatePersistenceError(
+            "terminal commercial state namespace update was not applied"
+        )
+    return next_state
 
 
 async def read_commercial_state(

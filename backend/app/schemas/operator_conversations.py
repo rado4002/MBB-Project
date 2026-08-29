@@ -1,6 +1,7 @@
 """Minimized browser-operator conversation read contracts."""
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -23,6 +24,7 @@ class OperatorLatestMessage(BaseModel):
 
 class OperatorOpenEscalation(BaseModel):
     exists: bool
+    reason: str | None = Field(default=None, max_length=64)
 
 
 class OperatorHumanOwner(BaseModel):
@@ -62,6 +64,52 @@ class OperatorLeadSummary(BaseModel):
     product_interests: list[str] = Field(default_factory=list, max_length=5)
 
 
+class OperatorCommercialConstraint(BaseModel):
+    kind: Literal["budget", "portability", "timing", "compatibility", "preference"]
+    value: str
+
+
+class OperatorCommercialConcern(BaseModel):
+    kind: Literal["price", "quality", "delivery", "comparison"]
+    detail: str | None
+
+
+class OperatorSelectedProduct(BaseModel):
+    sellable_item_id: UUID
+    display_name: str | None
+    offer_status: Literal[
+        "sellable_now",
+        "availability_unconfirmed",
+        "out_of_stock",
+        "price_unavailable",
+        "inactive",
+    ] | None
+    current_usd_price: Decimal | None
+
+
+class OperatorCommercialContext(BaseModel):
+    current_goal: str | None
+    expressed_needs: list[str] = Field(default_factory=list, max_length=6)
+    decision_constraints: list[OperatorCommercialConstraint] = Field(
+        default_factory=list,
+        max_length=6,
+    )
+    current_concern: OperatorCommercialConcern | None
+    purchase_intent: Literal["none", "considering", "ready"]
+    next_objective: Literal[
+        "clarify_requirement",
+        "retrieve_options",
+        "answer_concern",
+        "clarify_choice",
+        "prepare_handoff",
+        "human_commercial_continuation",
+    ] | None
+    selected_products: list[OperatorSelectedProduct] = Field(
+        default_factory=list,
+        max_length=3,
+    )
+
+
 class OperatorConversationDetail(BaseModel):
     conversation_id: UUID
     status: ConversationStatus
@@ -72,6 +120,7 @@ class OperatorConversationDetail(BaseModel):
     lead: OperatorLeadSummary | None
     open_escalation: OperatorOpenEscalation
     ownership: OperatorConversationOwnership
+    commercial_context: OperatorCommercialContext | None = None
 
 
 class OperatorOwnershipTransitionRequest(BaseModel):
@@ -93,7 +142,8 @@ class OperatorMessageItem(BaseModel):
     message_id: UUID
     occurred_at: datetime
     direction: Literal["inbound", "outbound"]
-    sender_type: Literal["customer", "operator", "system", "unknown"]
+    sender_type: Literal["customer", "operator", "ai", "system", "unknown"]
+    sender_display_name: str | None = Field(default=None, max_length=100)
     operator_author: OperatorHumanOwner | None = None
     delivery_state: Literal["accepted", "sent", "failed", "uncertain"] | None = None
     delivery_state_timestamp: datetime | None = None

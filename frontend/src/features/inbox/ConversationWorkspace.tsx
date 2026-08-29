@@ -75,6 +75,8 @@ function actorLabel(senderType: MessageSenderType) {
       return 'Customer'
     case 'operator':
       return 'Operator'
+    case 'ai':
+      return 'MBB AI Assistant'
     case 'system':
       return 'System'
     default:
@@ -85,6 +87,9 @@ function actorLabel(senderType: MessageSenderType) {
 function messageActorLabel(message: OperatorMessageItem) {
   if (message.sender_type === 'operator' && message.operator_author) {
     return `${message.operator_author.display_name} — Operator`
+  }
+  if (message.sender_type === 'ai') {
+    return message.sender_display_name || 'MBB AI Assistant'
   }
   return actorLabel(message.sender_type)
 }
@@ -269,6 +274,9 @@ function ConversationHeader({
           Last activity <time dateTime={detail.updated_at}>{formatTimestamp(detail.updated_at)}</time>
         </span>
         {detail.open_escalation.exists ? <span>Open escalation</span> : null}
+        {detail.open_escalation.reason ? (
+          <span>Reason: {label(detail.open_escalation.reason)}</span>
+        ) : null}
       </div>
     </div>
   )
@@ -300,9 +308,42 @@ function ContextBody({
   if (error) return <p>Context is unavailable.</p>
   if (!detail) return <p>Context is unavailable.</p>
   const ProductHeading = productHeadingLevel
+  const commercial = detail.commercial_context
   return (
     <>
       <dl className="context-details">
+        {detail.open_escalation.reason ? (
+          <div><dt>Handoff reason</dt><dd>{label(detail.open_escalation.reason)}</dd></div>
+        ) : null}
+        {commercial ? (
+          <>
+            <div><dt>Goal</dt><dd>{commercial.current_goal || 'Not stated'}</dd></div>
+            <div><dt>Purchase intent</dt><dd>{label(commercial.purchase_intent)}</dd></div>
+            <div><dt>Next objective</dt><dd>{label(commercial.next_objective)}</dd></div>
+            <div>
+              <dt>Needs</dt>
+              <dd>{commercial.expressed_needs.length
+                ? commercial.expressed_needs.join(', ')
+                : 'None stated'}</dd>
+            </div>
+            <div>
+              <dt>Constraints</dt>
+              <dd>{commercial.decision_constraints.length
+                ? commercial.decision_constraints
+                  .map((constraint) => `${label(constraint.kind)}: ${constraint.value}`)
+                  .join(', ')
+                : 'None stated'}</dd>
+            </div>
+            <div>
+              <dt>Concern</dt>
+              <dd>{commercial.current_concern
+                ? `${label(commercial.current_concern.kind)}${commercial.current_concern.detail
+                  ? `: ${commercial.current_concern.detail}`
+                  : ''}`
+                : 'None'}</dd>
+            </div>
+          </>
+        ) : null}
         {detail.lead ? (
           <>
             <div><dt>Lead score</dt><dd>{label(detail.lead.score)}</dd></div>
@@ -311,6 +352,22 @@ function ContextBody({
           </>
         ) : null}
       </dl>
+      {commercial ? (
+        <>
+          <ProductHeading>Selected products</ProductHeading>
+          {commercial.selected_products.length ? (
+            <ul className="interest-list">
+              {commercial.selected_products.map((product) => (
+                <li key={product.sellable_item_id}>
+                  {product.display_name || 'Unavailable selected item'}
+                  {product.offer_status ? ` — ${label(product.offer_status)}` : ''}
+                  {product.current_usd_price ? ` — $${product.current_usd_price}` : ''}
+                </li>
+              ))}
+            </ul>
+          ) : <p>No selected product.</p>}
+        </>
+      ) : null}
       {detail.lead ? (
         <>
           <ProductHeading>Product interests</ProductHeading>

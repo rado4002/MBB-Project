@@ -17,6 +17,7 @@ from app.ai.audit import (
     CapabilityAuditDecision,
     CapabilityAuditOutcome,
     CapabilityAuditSummary,
+    CommercialStateField,
     append_ai_turn_audit,
 )
 from app.ai.capabilities import (
@@ -29,6 +30,7 @@ from app.ai.capabilities import (
     CapabilityRegistry,
     CapabilitySuccess,
     CapabilityTransactionRetry,
+    RequestHumanHandoffOutput,
     TrustedCapabilityContext,
 )
 from app.ai.commercial_state import (
@@ -163,11 +165,16 @@ class FinalizedAITurnResult:
     audit_persisted: bool = False
     commercial_state_snapshot_revision: int = 0
     commercial_state_update: CommercialStateUpdate | None = None
+    outbound_message_id: uuid.UUID | None = None
 
     def __post_init__(self) -> None:
         is_handoff = self.audit_record.outcome == AITurnOutcome.handoff_requested
-        if is_handoff != (self.text is None):
-            raise ValueError("finalized turn text does not match its outcome")
+        if not is_handoff and self.text is None:
+            raise ValueError("non-terminal finalized turn requires customer text")
+        if is_handoff and (self.text is None) != (self.outbound_message_id is None):
+            raise ValueError("terminal text and persisted outbound must appear together")
+        if not is_handoff and self.outbound_message_id is not None:
+            raise ValueError("normal turn cannot pre-persist its outbound message")
         if is_handoff != self.audit_persisted:
             raise ValueError("only terminal handoff audit is pre-persisted")
         if self.commercial_state_snapshot_revision < 0:
@@ -487,6 +494,30 @@ class AITurnService:
                     capability_activity=activity,
                     outcome=AITurnOutcome.handoff_requested,
                     commercial_state_revision=commercial_state_revision,
+                    commercial_state_revision_after=(
+                        execution_result.output.commercial_state_revision_after
+                        if isinstance(
+                            execution_result.output,
+                            RequestHumanHandoffOutput,
+                        )
+                        else None
+                    ),
+                    commercial_state_changed_fields=(
+                        execution_result.output.commercial_state_changed_fields
+                        if isinstance(
+                            execution_result.output,
+                            RequestHumanHandoffOutput,
+                        )
+                        else ()
+                    ),
+                    outbound_message_id=(
+                        execution_result.output.outbound_message_id
+                        if isinstance(
+                            execution_result.output,
+                            RequestHumanHandoffOutput,
+                        )
+                        else None
+                    ),
                 )
                 try:
                     await self._audit_appender(session, audit_record)
@@ -497,10 +528,25 @@ class AITurnService:
                 return (
                     execution_result,
                     FinalizedAITurnResult(
-                        text=None,
+                        text=(
+                            execution_result.output.acknowledgment_text
+                            if isinstance(
+                                execution_result.output,
+                                RequestHumanHandoffOutput,
+                            )
+                            else None
+                        ),
                         audit_record=audit_record,
                         audit_persisted=True,
                         commercial_state_snapshot_revision=commercial_state_revision,
+                        outbound_message_id=(
+                            execution_result.output.outbound_message_id
+                            if isinstance(
+                                execution_result.output,
+                                RequestHumanHandoffOutput,
+                            )
+                            else None
+                        ),
                     ),
                 )
 
@@ -516,12 +562,16 @@ class AITurnService:
         outcome: AITurnOutcome,
         safe_code: str | None = None,
         commercial_state_revision: int = 0,
+        commercial_state_revision_after: int | None = None,
+        commercial_state_changed_fields: Sequence[str] = (),
+        outbound_message_id: uuid.UUID | None = None,
     ) -> AITurnAuditRecord:
         identity = self._provider_identity
         return AITurnAuditRecord(
             turn_id=turn.turn_id,
             conversation_id=turn.conversation_id,
             source_message_id=turn.source_message_id,
+            outbound_message_id=outbound_message_id,
             policy_version=policy_version,
             provider=identity.provider if identity is not None else None,
             model=identity.model if identity is not None else None,
@@ -530,7 +580,15 @@ class AITurnService:
             ),
             capability_activity=tuple(capability_activity),
             commercial_state_revision_before=commercial_state_revision,
-            commercial_state_revision_after=commercial_state_revision,
+            commercial_state_revision_after=(
+                commercial_state_revision
+                if commercial_state_revision_after is None
+                else commercial_state_revision_after
+            ),
+            commercial_state_changed_fields=tuple(
+                CommercialStateField(field_name)
+                for field_name in commercial_state_changed_fields
+            ),
             outcome=outcome,
             safe_code=safe_code,
         )
@@ -640,10 +698,16 @@ def _capability_audit_summary(
     result: CapabilityExecutionResult,
 ) -> CapabilityAuditSummary:
     if isinstance(result, CapabilitySuccess):
+        handoff_reason = (
+            result.output.handoff_reason
+            if isinstance(result.output, RequestHumanHandoffOutput)
+            else None
+        )
         return CapabilityAuditSummary(
             capability_name=tool_call.capability_name,
             decision=CapabilityAuditDecision.executed,
             outcome=CapabilityAuditOutcome.success,
+            handoff_reason=handoff_reason,
         )
     if result.error == CapabilityErrorCategory.execution_failed:
         return CapabilityAuditSummary(

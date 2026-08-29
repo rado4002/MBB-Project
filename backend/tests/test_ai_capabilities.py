@@ -283,7 +283,9 @@ def test_production_registry_contains_only_approved_capabilities():
         "sellable_item_id"
     }
     assert set(specifications[1].input_schema["properties"]) == {
-        "reason_category"
+        "reason_category",
+        "selected_sellable_item_id",
+        "purchase_intent",
     }
     assert set(specifications[2].input_schema["properties"]) == {
         "query",

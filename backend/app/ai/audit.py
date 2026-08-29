@@ -78,6 +78,12 @@ class CapabilityAuditSummary(_StrictAuditModel):
     decision: CapabilityAuditDecision
     outcome: CapabilityAuditOutcome
     safe_code: SafeName | None = None
+    handoff_reason: Literal[
+        "qualified_purchase_intent",
+        "explicit_human_request",
+        "authority_required",
+        "reliability_tool_failure",
+    ] | None = Field(default=None, exclude=True)
 
     @model_validator(mode="after")
     def decision_matches_outcome(self) -> CapabilityAuditSummary:
@@ -96,6 +102,12 @@ class CapabilityAuditSummary(_StrictAuditModel):
             CapabilityAuditOutcome.not_executed,
         } and self.safe_code is not None:
             raise ValueError("safe_code is only valid for denied or failed activity")
+        if self.handoff_reason is not None and not (
+            self.capability_name == "request_human_handoff"
+            and self.decision is CapabilityAuditDecision.executed
+            and self.outcome is CapabilityAuditOutcome.success
+        ):
+            raise ValueError("handoff reason requires a successful terminal handoff")
         return self
 
 
@@ -199,7 +211,15 @@ async def append_ai_turn_audit(
         model=record.model,
         exposed_capabilities=list(record.exposed_capabilities),
         capability_activity=[
-            summary.model_dump(mode="json") for summary in record.capability_activity
+            {
+                **summary.model_dump(mode="json"),
+                **(
+                    {"handoff_reason": summary.handoff_reason}
+                    if summary.handoff_reason is not None
+                    else {}
+                ),
+            }
+            for summary in record.capability_activity
         ],
         commercial_state_revision_before=record.commercial_state_revision_before,
         commercial_state_revision_after=record.commercial_state_revision_after,

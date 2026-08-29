@@ -314,7 +314,8 @@ async def test_executor_reads_authoritative_product_offers_without_business_writ
     async with factory() as session:
         await session.execute(
             text(
-                "UPDATE mbb.exchange_rates SET ended_at = NOW() "
+                    "UPDATE mbb.exchange_rates "
+                    "SET ended_at = GREATEST(NOW(), effective_at) "
                 "WHERE ended_at IS NULL"
             )
         )

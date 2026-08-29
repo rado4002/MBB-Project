@@ -424,7 +424,8 @@ async def test_handoff_and_audit_commit_atomically_and_reasoning_is_excluded(
         )
     )
 
-    assert finalized.text is None
+    assert finalized.text == "D'accord. Je transmets cette conversation à un conseiller."
+    assert finalized.outbound_message_id is not None
     assert finalized.audit_persisted is True
     async with factory() as session:
         stored = await session.get(Conversation, conversation.conversation_id)
@@ -445,13 +446,14 @@ async def test_handoff_and_audit_commit_atomically_and_reasoning_is_excluded(
         assert tickets[0].status == "open"
         assert audit is not None
         assert audit.outcome == "handoff_requested"
-        assert audit.outbound_message_id is None
+        assert audit.outbound_message_id == finalized.outbound_message_id
         assert audit.capability_activity == [
             {
                 "capability_name": "request_human_handoff",
                 "decision": "executed",
                 "outcome": "success",
                 "safe_code": None,
+                "handoff_reason": "explicit_human_request",
             }
         ]
         serialized_audit = json.dumps(
@@ -464,7 +466,7 @@ async def test_handoff_and_audit_commit_atomically_and_reasoning_is_excluded(
             select(func.count()).select_from(Message).where(
                 Message.direction == "outbound"
             )
-        ) == 0
+        ) == 1
 
 
 @pytest.mark.asyncio

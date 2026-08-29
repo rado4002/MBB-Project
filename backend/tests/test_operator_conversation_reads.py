@@ -540,6 +540,7 @@ async def test_detail_is_minimized_and_missing_is_indistinguishable(
         "lead",
         "open_escalation",
         "ownership",
+        "commercial_context",
     }
     assert body["ownership"]["owner_type"] == "ai"
     assert body["ownership"]["human_owner"] is None
@@ -555,14 +556,15 @@ async def test_detail_is_minimized_and_missing_is_indistinguishable(
         "club",
         "consent",
         "opt_out",
-        "context",
         "messages",
     ):
         assert forbidden not in response.text
+    assert "qualification_state" not in response.text
     detail_sql = str(
         database.statements[-1].compile(dialect=postgresql.dialect())
     )
-    assert "mbb.conversations.context" not in detail_sql
+    assert "commercial_state" in detail_sql
+    assert "qualification_state" not in detail_sql
 
     database.detail_rows = []
     missing = await client.get(
@@ -574,6 +576,58 @@ async def test_detail_is_minimized_and_missing_is_indistinguishable(
     assert missing.status_code == inaccessible.status_code == 404
     assert missing.json()["error"]["code"] == "CONVERSATION_NOT_FOUND"
     assert inaccessible.json()["error"]["code"] == "CONVERSATION_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_detail_projects_only_bounded_valid_commercial_state(
+    operator_harness,
+) -> None:
+    client, database, _account_value = operator_harness
+    conversation_id = uuid.uuid4()
+    row = _detail_row(conversation_id, datetime.now(timezone.utc))
+    row.update(
+        open_escalation_reason="qualified_purchase_intent",
+        commercial_state={
+            "schema_version": 2,
+            "revision": 4,
+            "current_goal": "Family cooking",
+            "expressed_needs": ["Family of 5"],
+            "decision_constraints": [{"kind": "budget", "value": "max $70"}],
+            "open_questions": ["internal question excluded from DTO"],
+            "current_concern": None,
+            "purchase_intent": "ready",
+            "next_objective": "human_commercial_continuation",
+            "selected_sellable_item_ids": [],
+            "updated_at": "2026-08-29T10:00:00Z",
+        },
+    )
+    database.detail_rows = [row]
+
+    response = await client.get(
+        f"/api/v1/operator/conversations/{conversation_id}"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["open_escalation"]["reason"] == "qualified_purchase_intent"
+    assert body["commercial_context"] == {
+        "current_goal": "Family cooking",
+        "expressed_needs": ["Family of 5"],
+        "decision_constraints": [{"kind": "budget", "value": "max $70"}],
+        "current_concern": None,
+        "purchase_intent": "ready",
+        "next_objective": "human_commercial_continuation",
+        "selected_products": [],
+    }
+    assert "open_questions" not in response.text
+    assert "internal question excluded" not in response.text
+
+    row["commercial_state"] = {"schema_version": 2, "revision": "malformed"}
+    malformed = await client.get(
+        f"/api/v1/operator/conversations/{conversation_id}"
+    )
+    assert malformed.status_code == 200
+    assert malformed.json()["commercial_context"] is None
 
 
 @pytest.mark.asyncio

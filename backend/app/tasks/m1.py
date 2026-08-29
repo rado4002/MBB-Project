@@ -552,11 +552,24 @@ async def _process(
             )
             return _persistence_failure_result(conv_id)
         else:
-            if finalized_turn.text is None:
+            if finalized_turn.audit_record.outcome == AITurnOutcome.handoff_requested:
+                if (
+                    finalized_turn.text is None
+                    or finalized_turn.outbound_message_id is None
+                ):
+                    log.error("m1.ai_handoff.missing_persisted_ack", conv_id=conv_id)
+                    return _persistence_failure_result(conv_id)
+                send_result = await _send_persisted_handoff_ack_safe(
+                    customer_phone,
+                    finalized_turn.text,
+                    outbound_message_id=finalized_turn.outbound_message_id,
+                    conversation_id=inbound.conversation_id,
+                )
                 return {
                     "status": "waiting_for_human",
                     "conversation_id": conv_id,
-                    "send_status": "skipped",
+                    "outbound_message_id": str(finalized_turn.outbound_message_id),
+                    "send_status": send_result["status"],
                 }
             ai_response = finalized_turn.text
             audit_record = finalized_turn.audit_record
@@ -723,6 +736,68 @@ async def _send_safe(
             )
             return {"status": "unknown_or_failed"}
         log.info("m1.send_message.sent")
+        return {
+            "status": "sent",
+            "provider_message_id": provider_message_id.strip(),
+        }
+    except Exception as exc:
+        log.error(
+            "m1.send_message.unknown_or_failed",
+            error_type=type(exc).__name__,
+        )
+        return {"status": "unknown_or_failed"}
+
+
+async def _send_persisted_handoff_ack_safe(
+    phone: str,
+    text: str,
+    *,
+    outbound_message_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+) -> dict[str, str]:
+    """Send a committed terminal acknowledgment through the existing ledger key."""
+    from sqlalchemy import select
+
+    from app.adapters import get_messaging_adapter
+    from app.database import async_session_factory
+    from app.models.ai_turn_audit import AITurnAudit
+    from app.models.message import Message
+
+    if not settings.whatsapp_send_enabled:
+        log.info("m1.send_message.skipped", reason="whatsapp_send_disabled")
+        return {"status": "skipped"}
+
+    async with async_session_factory() as session:
+        persisted = (
+            await session.execute(
+                select(Message.message_id)
+                .join(
+                    AITurnAudit,
+                    AITurnAudit.outbound_message_id == Message.message_id,
+                )
+                .where(
+                    Message.message_id == outbound_message_id,
+                    Message.conversation_id == conversation_id,
+                    Message.direction == "outbound",
+                    Message.content == text,
+                    AITurnAudit.conversation_id == conversation_id,
+                    AITurnAudit.outcome == AITurnOutcome.handoff_requested.value,
+                )
+            )
+        ).scalar_one_or_none()
+        await session.rollback()
+    if persisted is None:
+        log.error("m1.ai_handoff.unverified_persisted_ack")
+        return {"status": "unknown_or_failed"}
+
+    try:
+        provider_message_id = await get_messaging_adapter().send_message(
+            phone,
+            text,
+            idempotency_key=str(outbound_message_id),
+        )
+        if not isinstance(provider_message_id, str) or not provider_message_id.strip():
+            raise ValueError("unconfirmed provider message ID")
         return {
             "status": "sent",
             "provider_message_id": provider_message_id.strip(),

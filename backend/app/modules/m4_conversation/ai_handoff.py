@@ -12,10 +12,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.conversation import Conversation
 from app.models.escalation_ticket import EscalationTicket
+from app.schemas.product_offer import ProductOfferResponse
+from app.i18n.messages import t
 
 _ACTIVE_ESCALATION_STATUSES = ("open", "in_progress")
 _AI_HANDOFF_SOURCE = "ai_capability"
 _AI_HANDOFF_TYPE = "human_handoff"
+CANONICAL_AI_HANDOFF_REASONS = (
+    "qualified_purchase_intent",
+    "explicit_human_request",
+    "authority_required",
+    "reliability_tool_failure",
+)
 
 
 class AIHandoffError(Exception):
@@ -66,8 +74,11 @@ async def apply_human_handoff(
     *,
     conversation_id: uuid.UUID,
     expected_ownership_version: int,
+    handoff_reason: str = _AI_HANDOFF_TYPE,
 ) -> AIHandoffResult:
     """Apply one AI handoff inside the caller's current transaction."""
+    if handoff_reason not in {*CANONICAL_AI_HANDOFF_REASONS, _AI_HANDOFF_TYPE}:
+        raise ValueError("unsupported AI handoff reason")
     conversation = await session.scalar(
         select(Conversation)
         .where(Conversation.conversation_id == conversation_id)
@@ -109,7 +120,7 @@ async def apply_human_handoff(
             conversation_id=conversation_id,
             customer_id=conversation.customer_id,
             priority="medium",
-            reason=_AI_HANDOFF_TYPE,
+            reason=handoff_reason,
             source=_AI_HANDOFF_SOURCE,
             escalation_type=_AI_HANDOFF_TYPE,
             operator_reason=None,
@@ -132,6 +143,27 @@ async def apply_human_handoff(
         escalation_source=active_ticket.source,
         replayed=False,
     )
+
+
+def handoff_acknowledgment(
+    *,
+    reason: str,
+    language: str,
+    product_offer: ProductOfferResponse | None = None,
+) -> str:
+    """Render one short application-owned terminal acknowledgment."""
+    if reason not in CANONICAL_AI_HANDOFF_REASONS:
+        raise ValueError("canonical handoff reason is required")
+    if reason == "qualified_purchase_intent":
+        if product_offer is None or not product_offer.is_sellable_now:
+            raise ValueError("qualified handoff requires a current sellable offer")
+        product_display = product_offer.product_name
+        if product_offer.model_label:
+            product_display = f"{product_display} {product_offer.model_label}"
+        return t("ai4e_handoff_qualified_purchase", language).format(
+            product=product_display
+        )
+    return t(f"ai4e_handoff_{reason}", language)
 
 
 async def request_human_handoff(

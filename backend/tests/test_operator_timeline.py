@@ -113,6 +113,34 @@ async def test_timeline_combines_discriminated_items_with_stable_cursor() -> Non
 
 
 @pytest.mark.asyncio
+async def test_timeline_attributes_only_audited_outbound_to_mbb_ai() -> None:
+    client, database, _account, redis_client = await _authenticated_client()
+    conversation_id = uuid.uuid4()
+    occurred_at = datetime(2026, 8, 29, 12, tzinfo=timezone.utc)
+    ai_row = _message_row(uuid.uuid4(), occurred_at)
+    ai_row.update(
+        direction="outbound",
+        content="Je transmets ta demande.",
+        ai_actor_display_name="MBB AI Assistant",
+    )
+    legacy_row = _message_row(uuid.uuid4(), occurred_at)
+    legacy_row.update(direction="outbound", content="Legacy outbound")
+    database.message_rows = [legacy_row, ai_row]
+    try:
+        response = await client.get(
+            f"/api/v1/operator/conversations/{conversation_id}/timeline"
+        )
+        assert response.status_code == 200
+        items = response.json()["items"]
+        assert [item["sender_type"] for item in items] == ["ai", "unknown"]
+        assert items[0]["sender_display_name"] == "MBB AI Assistant"
+        assert items[1]["sender_display_name"] is None
+    finally:
+        await client.aclose()
+        await redis_client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_timeline_is_404_safe_and_analyst_cannot_read_notes() -> None:
     client, database, _account, redis_client = await _authenticated_client()
     database.conversation_accessible = False

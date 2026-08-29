@@ -17,7 +17,9 @@ class EscalationTicket(Base):
         ),
         CheckConstraint(
             "reason IN ('voice_note', 'complex_complaint', 'high_value_lead', "
-            "'unresolved_3x', 'sav_issue', 'human_handoff')",
+            "'unresolved_3x', 'sav_issue', 'human_handoff', "
+            "'qualified_purchase_intent', 'explicit_human_request', "
+            "'authority_required', 'reliability_tool_failure')",
             name="chk_esc_reason",
         ),
         CheckConstraint(
@@ -47,7 +49,10 @@ class EscalationTicket(Base):
         ),
         CheckConstraint(
             "source <> 'ai_capability' OR "
-            "(escalation_type = 'human_handoff' AND reason = 'human_handoff' "
+            "(escalation_type = 'human_handoff' AND reason IN "
+            "('human_handoff', 'qualified_purchase_intent', "
+            "'explicit_human_request', 'authority_required', "
+            "'reliability_tool_failure') "
             "AND operator_reason IS NULL AND created_by_account_id IS NULL)",
             name="chk_esc_ai_capability_fields",
         ),
