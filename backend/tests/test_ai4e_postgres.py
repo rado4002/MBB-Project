@@ -7,9 +7,12 @@ from decimal import Decimal
 
 import pytest
 import pytest_asyncio
+from fastapi import Response
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
+from app.api.browser_auth_deps import BrowserPrincipal, BrowserSessionContext
+from app.api.v1.operator_conversations import get_operator_conversation
 from app.ai.audit import AITurnOutcome
 from app.ai.commercial_state import (
     CommercialState,
@@ -28,6 +31,7 @@ from app.ai.turn import (
     AITurnPersistenceError,
     AITurnService,
 )
+from app.config import Settings
 from app.models.ai_turn_audit import AITurnAudit
 from app.models.catalog import Product, SellableItem
 from app.models.conversation import Conversation
@@ -39,6 +43,8 @@ from app.models.operator_account import OperatorAccount
 from app.models.pricing import SellableItemPrice
 from app.modules.m1_gateway.service import process_inbound
 from app.modules.m4_conversation.ownership import transition_ownership
+from app.operator_identity.browser_auth import BrowserAuthState
+from app.tasks.m1 import _handle_voice_note
 
 DATABASE_URL = os.environ.get("AI4E_TEST_DATABASE_URL")
 IDEMPOTENCY_SECRET = "ai4e-return-secret-" + ("x" * 32)
@@ -276,6 +282,35 @@ def _turn(conversation: Conversation, source: Message, *, version: int = 1) -> A
             "search_products",
         ),
     )
+
+
+def _principal(operator: OperatorAccount) -> BrowserPrincipal:
+    state = BrowserAuthState(
+        redis_client=object(),
+        settings=Settings(
+            browser_session_hmac_secret="s" * 32,
+            browser_csrf_hmac_secret="c" * 32,
+        ),
+    )
+    return BrowserPrincipal(
+        account=operator,
+        session=BrowserSessionContext(
+            raw_token="not-used",
+            record=object(),
+            state=state,
+        ),
+        capabilities=frozenset({"conversation.read"}),
+    )
+
+
+async def _operator_detail(factory, conversation_id, operator):
+    async with factory() as session:
+        return await get_operator_conversation(
+            conversation_id=conversation_id,
+            response=Response(),
+            principal=_principal(operator),
+            db=session,
+        )
 
 
 @pytest.mark.asyncio
@@ -800,3 +835,238 @@ async def test_operator_projection_reads_live_product_and_ai_provenance(
     )
     assert projected.sender_type == "ai"
     assert projected.sender_display_name == "MBB AI Assistant"
+
+
+@pytest.mark.asyncio
+async def test_legacy_voice_ticket_keeps_provenance_while_operator_reads_current_ai_reason(
+    engine: AsyncEngine,
+) -> None:
+    factory, conversation, item, inbound, operator = await _seed(engine)
+    async with factory() as session:
+        await _handle_voice_note(
+            session=session,
+            customer_phone=conversation.customer_id,
+            conversation_id=conversation.conversation_id,
+            language=conversation.language_detected,
+        )
+
+    await _service(
+        factory,
+        _SequenceAdapter(
+            _handoff_result(
+                reason="qualified_purchase_intent",
+                item_id=item.sellable_item_id,
+                purchase_intent="ready",
+            )
+        ),
+    ).generate_finalized(_turn(conversation, inbound))
+
+    async with factory() as session:
+        tickets = (
+            await session.execute(
+                select(EscalationTicket).where(
+                    EscalationTicket.conversation_id == conversation.conversation_id,
+                    EscalationTicket.status.in_(("open", "in_progress")),
+                )
+            )
+        ).scalars().all()
+        audit = await session.scalar(
+            select(AITurnAudit).where(
+                AITurnAudit.conversation_id == conversation.conversation_id,
+                AITurnAudit.outcome == AITurnOutcome.handoff_requested.value,
+            )
+        )
+        persisted = await session.get(Conversation, conversation.conversation_id)
+
+    detail = await _operator_detail(factory, conversation.conversation_id, operator)
+    assert len(tickets) == 1
+    assert tickets[0].reason == "voice_note"
+    assert tickets[0].source == "legacy"
+    assert audit is not None
+    assert audit.capability_activity[0]["handoff_reason"] == (
+        "qualified_purchase_intent"
+    )
+    assert persisted is not None and persisted.ai_execution_state == "paused"
+    assert detail.open_escalation.reason == "qualified_purchase_intent"
+
+
+@pytest.mark.asyncio
+async def test_operator_ticket_keeps_provenance_while_current_ai_reason_is_effective(
+    engine: AsyncEngine,
+) -> None:
+    factory, conversation, _item, inbound, operator = await _seed(engine)
+    async with factory() as session:
+        session.add(
+            EscalationTicket(
+                conversation_id=conversation.conversation_id,
+                customer_id=conversation.customer_id,
+                priority="high",
+                reason="complex_complaint",
+                source="operator_browser",
+                escalation_type="complex_issue",
+                operator_reason="Customer complaint requires operator review.",
+                created_by_account_id=operator.account_id,
+                status="open",
+                transcript_snapshot=[],
+            )
+        )
+        await session.commit()
+
+    await _service(
+        factory,
+        _SequenceAdapter(_handoff_result(reason="explicit_human_request")),
+    ).generate_finalized(_turn(conversation, inbound))
+
+    async with factory() as session:
+        tickets = (
+            await session.execute(
+                select(EscalationTicket).where(
+                    EscalationTicket.conversation_id == conversation.conversation_id,
+                    EscalationTicket.status.in_(("open", "in_progress")),
+                )
+            )
+        ).scalars().all()
+    detail = await _operator_detail(factory, conversation.conversation_id, operator)
+
+    assert len(tickets) == 1
+    assert tickets[0].reason == "complex_complaint"
+    assert tickets[0].source == "operator_browser"
+    assert tickets[0].operator_reason == (
+        "Customer complaint requires operator review."
+    )
+    assert tickets[0].created_by_account_id == operator.account_id
+    assert detail.open_escalation.reason == "explicit_human_request"
+
+
+@pytest.mark.asyncio
+async def test_active_legacy_ticket_without_current_terminal_audit_uses_original_reason(
+    engine: AsyncEngine,
+) -> None:
+    factory, conversation, _item, _inbound, operator = await _seed(engine)
+    async with factory() as session:
+        await _handle_voice_note(
+            session=session,
+            customer_phone=conversation.customer_id,
+            conversation_id=conversation.conversation_id,
+            language=conversation.language_detected,
+        )
+
+    detail = await _operator_detail(factory, conversation.conversation_id, operator)
+    assert detail.ownership.ai_execution_state == "eligible"
+    assert detail.open_escalation.reason == "voice_note"
+
+
+@pytest.mark.asyncio
+async def test_return_to_ai_and_later_escalation_do_not_expose_stale_terminal_reason(
+    engine: AsyncEngine,
+) -> None:
+    factory, conversation, item, inbound, operator = await _seed(engine)
+    await _service(
+        factory,
+        _SequenceAdapter(
+            _handoff_result(
+                reason="qualified_purchase_intent",
+                item_id=item.sellable_item_id,
+                purchase_intent="ready",
+            )
+        ),
+    ).generate_finalized(_turn(conversation, inbound))
+
+    async with factory() as session:
+        takeover = await transition_ownership(
+            session,
+            conversation_id=conversation.conversation_id,
+            target_owner_type="human",
+            expected_version=2,
+            actor_account_id=operator.account_id,
+            actor_display_name=operator.display_name,
+            actor_role=operator.role,
+            idempotency_key=uuid.uuid4(),
+            idempotency_secret=IDEMPOTENCY_SECRET,
+            request_id="ai4f-takeover",
+            ai_adapter="claude",
+        )
+        returned = await transition_ownership(
+            session,
+            conversation_id=conversation.conversation_id,
+            target_owner_type="ai",
+            expected_version=takeover.ownership.version,
+            actor_account_id=operator.account_id,
+            actor_display_name=operator.display_name,
+            actor_role=operator.role,
+            idempotency_key=uuid.uuid4(),
+            idempotency_secret=IDEMPOTENCY_SECRET,
+            request_id="ai4f-return",
+            ai_adapter="claude",
+        )
+    assert returned.ownership.version == 4
+
+    returned_detail = await _operator_detail(
+        factory,
+        conversation.conversation_id,
+        operator,
+    )
+    assert returned_detail.ownership.ai_execution_state == "eligible"
+    assert returned_detail.open_escalation.exists is False
+    assert returned_detail.open_escalation.reason is None
+
+    async with factory() as session:
+        session.add(
+            EscalationTicket(
+                conversation_id=conversation.conversation_id,
+                customer_id=conversation.customer_id,
+                priority="high",
+                reason="voice_note",
+                source="legacy",
+                status="open",
+                transcript_snapshot=[],
+            )
+        )
+        await session.commit()
+
+    later_detail = await _operator_detail(
+        factory,
+        conversation.conversation_id,
+        operator,
+    )
+    assert later_detail.open_escalation.exists is True
+    assert later_detail.open_escalation.reason == "voice_note"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    (
+        "qualified_purchase_intent",
+        "explicit_human_request",
+        "authority_required",
+        "reliability_tool_failure",
+    ),
+)
+async def test_clean_current_ai4e_handoff_projects_each_canonical_reason(
+    engine: AsyncEngine,
+    reason: str,
+) -> None:
+    factory, conversation, item, inbound, operator = await _seed(engine)
+    await _service(
+        factory,
+        _SequenceAdapter(
+            _handoff_result(
+                reason=reason,
+                item_id=(
+                    item.sellable_item_id
+                    if reason == "qualified_purchase_intent"
+                    else None
+                ),
+                purchase_intent=(
+                    "ready"
+                    if reason == "qualified_purchase_intent"
+                    else "considering" if reason == "authority_required" else None
+                ),
+            )
+        ),
+    ).generate_finalized(_turn(conversation, inbound))
+
+    detail = await _operator_detail(factory, conversation.conversation_id, operator)
+    assert detail.open_escalation.exists is True
+    assert detail.open_escalation.reason == reason

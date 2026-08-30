@@ -14,9 +14,24 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Depends, Header, Query, Request, Response, status
 from pydantic import UUID4
-from sqlalchemy import TIMESTAMP, String, cast, exists, func, literal, select, true, tuple_, union_all
+from sqlalchemy import (
+    TIMESTAMP,
+    String,
+    and_,
+    case,
+    cast,
+    exists,
+    func,
+    literal,
+    select,
+    true,
+    tuple_,
+    union_all,
+)
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import aliased
 
 from app.api.browser_auth_deps import (
     BrowserPrincipal,
@@ -127,6 +142,12 @@ _MAX_CURSOR_LENGTH = 1024
 _PRODUCT_INTEREST_LIMIT = 5
 _PRODUCT_INTEREST_CHARACTER_LIMIT = 80
 _PREVIEW_CHARACTER_LIMIT = 120
+_CANONICAL_AI_HANDOFF_REASONS = (
+    "qualified_purchase_intent",
+    "explicit_human_request",
+    "authority_required",
+    "reliability_tool_failure",
+)
 
 _MEDIA_PLACEHOLDERS = {
     "french": {
@@ -169,6 +190,83 @@ def _open_escalation_reason():
         .limit(1)
         .correlate(Conversation)
         .scalar_subquery()
+    )
+
+
+def _current_ai_terminal_handoff_reason():
+    source_message = aliased(Message)
+    outbound_message = aliased(Message)
+    successful_handoff_reason = case(
+        *(
+            (
+                AITurnAudit.capability_activity.op("@>")(
+                    cast(
+                        literal(
+                            json.dumps(
+                                [
+                                    {
+                                        "capability_name": "request_human_handoff",
+                                        "decision": "executed",
+                                        "outcome": "success",
+                                        "handoff_reason": reason,
+                                    }
+                                ],
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            )
+                        ),
+                        JSONB,
+                    )
+                ),
+                literal(reason),
+            )
+            for reason in _CANONICAL_AI_HANDOFF_REASONS
+        )
+    )
+    return (
+        select(successful_handoff_reason)
+        .select_from(AITurnAudit)
+        .join(
+            source_message,
+            source_message.message_id == AITurnAudit.source_message_id,
+        )
+        .join(
+            outbound_message,
+            outbound_message.message_id == AITurnAudit.outbound_message_id,
+        )
+        .where(
+            AITurnAudit.conversation_id == Conversation.conversation_id,
+            AITurnAudit.outcome == "handoff_requested",
+            source_message.conversation_id == Conversation.conversation_id,
+            source_message.direction == "inbound",
+            outbound_message.conversation_id == Conversation.conversation_id,
+            outbound_message.direction == "outbound",
+            successful_handoff_reason.is_not(None),
+        )
+        .order_by(AITurnAudit.created_at.desc(), AITurnAudit.turn_id.desc())
+        .limit(1)
+        .correlate(Conversation)
+        .scalar_subquery()
+    )
+
+
+def _effective_handoff_reason():
+    current_ai_reason = _current_ai_terminal_handoff_reason()
+    original_escalation_reason = _open_escalation_reason()
+    return func.coalesce(
+        case(
+            (
+                and_(
+                    Conversation.owner_type == "ai",
+                    Conversation.human_owner_account_id.is_(None),
+                    Conversation.ai_execution_state == "paused",
+                    Conversation.ownership_version > 1,
+                    _open_escalation_exists(),
+                ),
+                current_ai_reason,
+            ),
+        ),
+        original_escalation_reason,
     )
 
 
@@ -1246,7 +1344,7 @@ async def get_operator_conversation(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> OperatorConversationDetail:
     open_escalation = _open_escalation_exists()
-    open_escalation_reason = _open_escalation_reason()
+    effective_handoff_reason = _effective_handoff_reason()
     statement = (
         select(
             Conversation.conversation_id,
@@ -1268,7 +1366,7 @@ async def get_operator_conversation(
                 "lead_product_interests"
             ),
             open_escalation.label("has_open_escalation"),
-            open_escalation_reason.label("open_escalation_reason"),
+            effective_handoff_reason.label("open_escalation_reason"),
             Conversation.context[COMMERCIAL_STATE_KEY].label(
                 "commercial_state"
             ),
