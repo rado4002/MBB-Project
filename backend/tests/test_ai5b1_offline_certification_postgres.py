@@ -140,6 +140,8 @@ async def _install_closed_runtime(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker,
     adapter: ProviderTurnAdapter,
+    *,
+    allow_mocked_provider_http: bool = False,
 ) -> _RuntimeEvidence:
     import app.adapters as adapters
     from app.adapters.ai import deepseek_adapter
@@ -156,13 +158,21 @@ async def _install_closed_runtime(
         lambda: pytest.fail("payment adapter resolution was attempted"),
     )
 
-    async def reject_http(*_args, **_kwargs):
-        pytest.fail("live provider HTTP transport was attempted")
+    original_create_chat_completion = (
+        deepseek_adapter._DeepSeekHTTPTransport.create_chat_completion
+    )
+
+    async def guarded_http(transport, payload):
+        if not allow_mocked_provider_http or not isinstance(
+            transport._http_transport, httpx.MockTransport
+        ):
+            pytest.fail("live provider HTTP transport was attempted")
+        return await original_create_chat_completion(transport, payload)
 
     monkeypatch.setattr(
         deepseek_adapter._DeepSeekHTTPTransport,
         "create_chat_completion",
-        reject_http,
+        guarded_http,
     )
     return evidence
 

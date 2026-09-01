@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from collections.abc import Sequence
 from pathlib import Path
 import shutil
 import socket
@@ -17,6 +18,10 @@ import uuid
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 TEST_PATH = "tests/test_ai5b1_offline_certification_postgres.py"
 DEADLINE_TEST_PATH = "tests/test_ai5b1_deadlines.py"
+AI5B2_BRIDGE_TEST_PATHS = (
+    "tests/test_ai5b2_canary_bridge.py",
+    "tests/test_ai5b2_canary_bridge_postgres.py",
+)
 REGRESSION_TEST_PATHS = (
     "tests/test_ai_offline_integration_postgres.py",
     "tests/test_ai4d_continuity_postgres.py",
@@ -141,24 +146,33 @@ def _certification_environment(
     return env
 
 
-def _arguments() -> argparse.Namespace:
+def _arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
+    suite = parser.add_mutually_exclusive_group()
+    suite.add_argument(
         "--regressions",
         action="store_true",
         help="run the relevant existing PostgreSQL regression set",
     )
-    return parser.parse_args()
-
-
-def main() -> int:
-    arguments = _arguments()
-    suite = "postgres_regressions" if arguments.regressions else "ai5b1_scenarios"
-    pytest_targets = (
-        REGRESSION_TEST_PATHS
-        if arguments.regressions
-        else (DEADLINE_TEST_PATH, TEST_PATH)
+    suite.add_argument(
+        "--ai5b2-bridge",
+        action="store_true",
+        help="run the offline AI-5B2 real-journey bridge checks",
     )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    arguments = _arguments(argv)
+    if arguments.regressions:
+        suite = "postgres_regressions"
+        pytest_targets = REGRESSION_TEST_PATHS
+    elif arguments.ai5b2_bridge:
+        suite = "ai5b2_bridge_offline"
+        pytest_targets = AI5B2_BRIDGE_TEST_PATHS
+    else:
+        suite = "ai5b1_scenarios"
+        pytest_targets = (DEADLINE_TEST_PATH, TEST_PATH)
     bin_dir = _postgres_bin()
     temp_root = Path(tempfile.gettempdir()).resolve()
     cluster_id = CLUSTER_PREFIX + uuid.uuid4().hex
@@ -176,6 +190,10 @@ def main() -> int:
         database_name=database_name,
         cluster_id=cluster_id,
     )
+    if arguments.ai5b2_bridge:
+        env["AI5B2_BRIDGE_TEST_DATABASE_URL"] = env["AI5B1_TEST_DATABASE_URL"]
+        env["AI5B2_BRIDGE_DISPOSABLE_CLUSTER_ID"] = cluster_id
+        env["AI5B2_BRIDGE_MODE"] = "offline"
     if arguments.regressions:
         for name in (
             "AI1D_TEST_DATABASE_URL",
@@ -334,7 +352,12 @@ def main() -> int:
         "migrated": migrated,
         "schema_verified": schema_verified,
         "tests_passed": tests_passed,
-        "seven_scenarios_passed": tests_passed if not arguments.regressions else None,
+        "seven_scenarios_passed": (
+            tests_passed
+            if not arguments.regressions and not arguments.ai5b2_bridge
+            else None
+        ),
+        "four_canary_bridge_passed": (tests_passed if arguments.ai5b2_bridge else None),
         "database_dropped": database_dropped,
         "cluster_stopped": cluster_stopped,
         "temporary_directory_removed": directory_removed,

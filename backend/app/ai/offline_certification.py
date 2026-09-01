@@ -77,6 +77,18 @@ class EvaluationClock(Protocol):
         """Complete only after evaluation time advances by ``seconds``."""
 
 
+class SystemEvaluationClock:
+    """Real monotonic timer for a separately authorized evaluation run."""
+
+    def monotonic(self) -> float:
+        return time.monotonic()
+
+    async def sleep(self, seconds: float) -> None:
+        if seconds < 0:
+            raise ValueError("evaluation sleep cannot be negative")
+        await asyncio.sleep(seconds)
+
+
 class ManualEvaluationClock:
     """Deterministic monotonic clock whose advancement wakes real async tasks."""
 
