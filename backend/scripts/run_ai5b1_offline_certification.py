@@ -16,6 +16,7 @@ import uuid
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 TEST_PATH = "tests/test_ai5b1_offline_certification_postgres.py"
+DEADLINE_TEST_PATH = "tests/test_ai5b1_deadlines.py"
 REGRESSION_TEST_PATHS = (
     "tests/test_ai_offline_integration_postgres.py",
     "tests/test_ai4d_continuity_postgres.py",
@@ -153,7 +154,11 @@ def _arguments() -> argparse.Namespace:
 def main() -> int:
     arguments = _arguments()
     suite = "postgres_regressions" if arguments.regressions else "ai5b1_scenarios"
-    pytest_targets = REGRESSION_TEST_PATHS if arguments.regressions else (TEST_PATH,)
+    pytest_targets = (
+        REGRESSION_TEST_PATHS
+        if arguments.regressions
+        else (DEADLINE_TEST_PATH, TEST_PATH)
+    )
     bin_dir = _postgres_bin()
     temp_root = Path(tempfile.gettempdir()).resolve()
     cluster_id = CLUSTER_PREFIX + uuid.uuid4().hex

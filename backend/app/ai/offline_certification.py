@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
+from typing import Literal, Protocol, TypeVar
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.adapters.base import ProviderTurnAdapter
@@ -61,6 +65,246 @@ def classify_latency(milliseconds: int) -> OfflineLatencyClass:
     if milliseconds <= 60_000:
         return OfflineLatencyClass.outer_watchdog
     return OfflineLatencyClass.beyond_watchdog
+
+
+class EvaluationClock(Protocol):
+    """Minimal clock/timer boundary used by evaluation-owned deadlines."""
+
+    def monotonic(self) -> float:
+        """Return the current evaluation time in seconds."""
+
+    async def sleep(self, seconds: float) -> None:
+        """Complete only after evaluation time advances by ``seconds``."""
+
+
+class ManualEvaluationClock:
+    """Deterministic monotonic clock whose advancement wakes real async tasks."""
+
+    def __init__(self, *, initial_seconds: float = 0.0) -> None:
+        if initial_seconds < 0:
+            raise ValueError("initial evaluation time cannot be negative")
+        self._now = float(initial_seconds)
+        self._waiters: list[tuple[float, asyncio.Future[None]]] = []
+
+    def monotonic(self) -> float:
+        return self._now
+
+    @property
+    def pending_timer_count(self) -> int:
+        return sum(not future.done() for _, future in self._waiters)
+
+    async def sleep(self, seconds: float) -> None:
+        if seconds < 0:
+            raise ValueError("evaluation sleep cannot be negative")
+        if seconds == 0:
+            await asyncio.sleep(0)
+            return
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[None] = loop.create_future()
+        waiter = (self._now + seconds, future)
+        self._waiters.append(waiter)
+        try:
+            await future
+        finally:
+            if waiter in self._waiters:
+                self._waiters.remove(waiter)
+
+    async def advance(self, seconds: float) -> None:
+        """Advance time and let every newly due async timer run."""
+        if seconds < 0:
+            raise ValueError("evaluation clock cannot move backward")
+        self._now += seconds
+        due = [
+            future
+            for deadline, future in tuple(self._waiters)
+            if deadline <= self._now and not future.done()
+        ]
+        for future in due:
+            future.set_result(None)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+
+class OfflineDeadlineEvidence(_StrictModel):
+    deadline_scope: Literal["provider_request"] = "provider_request"
+    enforced_deadline_ms: int = Field(ge=1)
+    virtual_started_ms: int = Field(ge=0)
+    virtual_expired_ms: int = Field(ge=0)
+    virtual_elapsed_ms: int = Field(ge=0)
+    measured_wall_clock_ms: int = Field(ge=0)
+    normalized_failure_code: Literal["timeout"] = "timeout"
+    cancellation_requested: bool
+
+
+class EvaluationDeadlineAdapter(ProviderTurnAdapter):
+    """Enforce an evaluation-only deadline around each provider request."""
+
+    def __init__(
+        self,
+        adapter: ProviderTurnAdapter,
+        *,
+        clock: EvaluationClock,
+        deadline_seconds: float = AI5B1_PROVIDER_DEADLINE_SECONDS,
+        wall_clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if deadline_seconds <= 0:
+            raise ValueError("provider deadline must be positive")
+        self._adapter = adapter
+        self._clock = clock
+        self._deadline_seconds = deadline_seconds
+        self._wall_clock = wall_clock
+        self.provider_name = adapter.provider_name
+        self.model = adapter.model
+        self.deadline_evidence: list[OfflineDeadlineEvidence] = []
+        self.accepted_results = 0
+        self.late_completions_observed = 0
+        self.late_completions_discarded = 0
+        self.late_completion_finish_reasons: list[ProviderFinishReason] = []
+        self._operations: set[asyncio.Task[ProviderTurnResult]] = set()
+        self._late_monitors: set[asyncio.Task[None]] = set()
+
+    @property
+    def unfinished_task_count(self) -> int:
+        return sum(
+            not task.done() for task in (*self._operations, *self._late_monitors)
+        )
+
+    async def generate_turn(self, request: ProviderTurnRequest) -> ProviderTurnResult:
+        virtual_started = self._clock.monotonic()
+        wall_started = self._wall_clock()
+        deadline = asyncio.create_task(self._clock.sleep(self._deadline_seconds))
+        operation = asyncio.create_task(self._adapter.generate_turn(request))
+        self._operations.add(operation)
+        operation.add_done_callback(self._operations.discard)
+        done, _pending = await asyncio.wait(
+            (operation, deadline),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if deadline in done:
+            cancellation_requested = operation.cancel()
+            monitor = asyncio.create_task(self._observe_late_completion(operation))
+            self._late_monitors.add(monitor)
+            monitor.add_done_callback(self._late_monitors.discard)
+            virtual_expired = self._clock.monotonic()
+            self.deadline_evidence.append(
+                OfflineDeadlineEvidence(
+                    enforced_deadline_ms=round(self._deadline_seconds * 1_000),
+                    virtual_started_ms=round(virtual_started * 1_000),
+                    virtual_expired_ms=round(virtual_expired * 1_000),
+                    virtual_elapsed_ms=round(
+                        (virtual_expired - virtual_started) * 1_000
+                    ),
+                    measured_wall_clock_ms=max(
+                        0, round((self._wall_clock() - wall_started) * 1_000)
+                    ),
+                    cancellation_requested=cancellation_requested,
+                )
+            )
+            raise normalized_timeout()
+
+        deadline.cancel()
+        await asyncio.gather(deadline, return_exceptions=True)
+        result = await operation
+        self.accepted_results += 1
+        return result
+
+    async def _observe_late_completion(
+        self, operation: asyncio.Task[ProviderTurnResult]
+    ) -> None:
+        try:
+            result = await operation
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            return
+        self.late_completions_observed += 1
+        self.late_completion_finish_reasons.append(result.finish_reason)
+        self.late_completions_discarded += 1
+
+    async def drain_late_completions(self) -> None:
+        """Wait for observed late work so tests cannot leak background tasks."""
+        monitors = tuple(self._late_monitors)
+        if monitors:
+            await asyncio.gather(*monitors, return_exceptions=True)
+
+
+class OfflineWatchdogExpired(RuntimeError):
+    """Raised when the evaluation-owned outer watchdog actually expires."""
+
+
+class OfflineWatchdogEvidence(_StrictModel):
+    enforced_watchdog_ms: int = Field(ge=1)
+    virtual_elapsed_ms: int = Field(ge=0)
+    measured_wall_clock_ms: int = Field(ge=0)
+    stop_handler_called: bool
+    cancellation_requested: bool
+
+
+_WatchdogResult = TypeVar("_WatchdogResult")
+WatchdogStopHandler = Callable[[], None | Awaitable[None]]
+
+
+class EvaluationOuterWatchdog:
+    """Stop one evaluation-owned operation when injected watchdog time expires."""
+
+    def __init__(
+        self,
+        *,
+        clock: EvaluationClock,
+        stop_handler: WatchdogStopHandler,
+        watchdog_seconds: float = AI5B1_OUTER_WATCHDOG_SECONDS,
+        wall_clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if watchdog_seconds <= 0:
+            raise ValueError("outer watchdog must be positive")
+        self._clock = clock
+        self._stop_handler = stop_handler
+        self._watchdog_seconds = watchdog_seconds
+        self._wall_clock = wall_clock
+        self.evidence: list[OfflineWatchdogEvidence] = []
+        self._tasks: set[asyncio.Task[object]] = set()
+
+    @property
+    def unfinished_task_count(self) -> int:
+        return sum(not task.done() for task in self._tasks)
+
+    async def run(self, operation: Awaitable[_WatchdogResult]) -> _WatchdogResult:
+        virtual_started = self._clock.monotonic()
+        wall_started = self._wall_clock()
+        timer = asyncio.create_task(self._clock.sleep(self._watchdog_seconds))
+        task = asyncio.create_task(operation)
+        self._tasks.update((timer, task))
+        timer.add_done_callback(self._tasks.discard)
+        task.add_done_callback(self._tasks.discard)
+        done, _pending = await asyncio.wait(
+            (task, timer),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if timer in done:
+            cancellation_requested = task.cancel()
+            stop_result = self._stop_handler()
+            if inspect.isawaitable(stop_result):
+                await stop_result
+            await asyncio.gather(task, return_exceptions=True)
+            virtual_expired = self._clock.monotonic()
+            self.evidence.append(
+                OfflineWatchdogEvidence(
+                    enforced_watchdog_ms=round(self._watchdog_seconds * 1_000),
+                    virtual_elapsed_ms=round(
+                        (virtual_expired - virtual_started) * 1_000
+                    ),
+                    measured_wall_clock_ms=max(
+                        0, round((self._wall_clock() - wall_started) * 1_000)
+                    ),
+                    stop_handler_called=True,
+                    cancellation_requested=cancellation_requested,
+                )
+            )
+            raise OfflineWatchdogExpired("offline_evaluation_outer_watchdog_expired")
+
+        timer.cancel()
+        await asyncio.gather(timer, return_exceptions=True)
+        return await task
 
 
 class OfflineBudgetLimits(_StrictModel):
@@ -128,7 +372,9 @@ class OfflineBudgetLedger:
 class OfflineProviderCallEvidence(_StrictModel):
     call_index: int = Field(ge=1)
     requested_max_output_tokens: int = Field(ge=1, le=AI5B_MAX_OUTPUT_TOKENS)
-    latency_ms: int = Field(ge=0)
+    timing_basis: Literal["represented"] = "represented"
+    represented_latency_ms: int = Field(ge=0)
+    measured_wall_clock_ms: int = Field(ge=0)
     latency_class: OfflineLatencyClass
     finish_reason: ProviderFinishReason | None = None
     failure_code: str | None = None
@@ -155,7 +401,6 @@ class ScriptedProviderStep:
     represented_latency_ms: int = 0
     reserved_tokens: int = 0
     reserved_cost_usd: Decimal = Decimal("0")
-    late_result: ProviderTurnResult | None = None
 
     def __post_init__(self) -> None:
         if self.represented_latency_ms < 0 or self.reserved_tokens < 0:
@@ -180,7 +425,6 @@ class RecordingScriptedProvider(ProviderTurnAdapter):
         self.budget = budget or OfflineBudgetLedger()
         self.requests: list[ProviderTurnRequest] = []
         self.evidence: list[OfflineProviderCallEvidence] = []
-        self.rejected_late_results = 0
         self.network_calls = 0
 
     async def generate_turn(self, request: ProviderTurnRequest) -> ProviderTurnResult:
@@ -194,6 +438,7 @@ class RecordingScriptedProvider(ProviderTurnAdapter):
             reserved_cost_usd=step.reserved_cost_usd,
         )
         self.requests.append(request)
+        wall_started = time.monotonic()
         try:
             result = step.action(request)
             if inspect.isawaitable(result):
@@ -205,13 +450,14 @@ class RecordingScriptedProvider(ProviderTurnAdapter):
                 OfflineProviderCallEvidence(
                     call_index=index + 1,
                     requested_max_output_tokens=request.max_output_tokens,
-                    latency_ms=step.represented_latency_ms,
+                    represented_latency_ms=step.represented_latency_ms,
+                    measured_wall_clock_ms=max(
+                        0, round((time.monotonic() - wall_started) * 1_000)
+                    ),
                     latency_class=classify_latency(step.represented_latency_ms),
                     failure_code=exc.safe_code,
                 )
             )
-            if step.late_result is not None:
-                self.rejected_late_results += 1
             raise
         self.budget.record_usage(result.usage)
         usage = result.usage
@@ -219,7 +465,10 @@ class RecordingScriptedProvider(ProviderTurnAdapter):
             OfflineProviderCallEvidence(
                 call_index=index + 1,
                 requested_max_output_tokens=request.max_output_tokens,
-                latency_ms=step.represented_latency_ms,
+                represented_latency_ms=step.represented_latency_ms,
+                measured_wall_clock_ms=max(
+                    0, round((time.monotonic() - wall_started) * 1_000)
+                ),
                 latency_class=classify_latency(step.represented_latency_ms),
                 finish_reason=result.finish_reason,
                 input_tokens=usage.input_tokens if usage else None,

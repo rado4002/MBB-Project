@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -17,11 +19,14 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.adapters.ai.deepseek_adapter import DeepSeekAdapter
+from app.adapters.base import ProviderTurnAdapter
 from app.ai.commercial_state import CommercialState, read_commercial_state
 from app.ai.offline_certification import (
     AI5B1_OUTER_WATCHDOG_SECONDS,
     AI5B1_PROVIDER_DEADLINE_SECONDS,
     AI5B1_SAFE_BOUNDARY_SECONDS,
+    EvaluationDeadlineAdapter,
+    ManualEvaluationClock,
     OfflineBudgetExceeded,
     OfflineBudgetLedger,
     OfflineBudgetLimits,
@@ -29,7 +34,6 @@ from app.ai.offline_certification import (
     RecordingScriptedProvider,
     ScriptedProviderStep,
     classify_latency,
-    normalized_timeout,
     redacted_evidence_json,
 )
 from app.ai.provider_contract import (
@@ -135,7 +139,7 @@ async def postgres():
 async def _install_closed_runtime(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker,
-    adapter: RecordingScriptedProvider,
+    adapter: ProviderTurnAdapter,
 ) -> _RuntimeEvidence:
     import app.adapters as adapters
     from app.adapters.ai import deepseek_adapter
@@ -193,6 +197,53 @@ async def _assert_protected_unchanged(
     baseline: dict[str, str],
 ) -> None:
     assert await _protected_snapshot(factory) == baseline
+
+
+async def _late_effect_snapshot(
+    factory: async_sessionmaker,
+    phone: str,
+) -> dict[str, object]:
+    conversation, messages, audits, tickets = await _stored_state(factory, phone)
+    state = await read_commercial_state_for_test(factory, conversation.conversation_id)
+    return {
+        "messages": tuple(
+            (str(item.message_id), item.direction, item.content) for item in messages
+        ),
+        "commercial_state": (
+            state.model_dump(mode="json") if state is not None else None
+        ),
+        "audits": tuple(
+            (
+                str(item.turn_id),
+                item.outcome,
+                item.safe_code,
+                str(item.outbound_message_id),
+            )
+            for item in audits
+        ),
+        "tickets": tuple((str(item.ticket_id), item.status) for item in tickets),
+        "ownership": (
+            conversation.owner_type,
+            conversation.ownership_version,
+            conversation.ai_execution_state,
+        ),
+    }
+
+
+def _assert_late_completion_rejected(
+    before: dict[str, object],
+    after: dict[str, object],
+) -> None:
+    assert after == before
+    assert LATE_RESULT_SENTINEL not in json.dumps(after, default=str)
+
+
+async def _wait_for_manual_timer(clock: ManualEvaluationClock) -> None:
+    async def timer_is_registered() -> None:
+        while clock.pending_timer_count == 0:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(timer_is_registered(), timeout=5)
 
 
 def _finalizer(
@@ -664,6 +715,9 @@ async def test_b1_o05_telemetry_and_budgets(postgres, monkeypatch) -> None:
     assert result["status"] == "processed"
     assert len(adapter.evidence) == 1
     call = adapter.evidence[0]
+    assert call.timing_basis == "represented"
+    assert call.represented_latency_ms == 5_500
+    assert call.measured_wall_clock_ms >= 0
     assert call.latency_class == OfflineLatencyClass.routine_target
     assert call.finish_reason == ProviderFinishReason.max_output
     assert call.input_tokens == 12 and call.output_tokens == 8
@@ -799,6 +853,7 @@ async def test_b1_o06_multilingual_evidence(postgres, monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_b1_o07_timeout_and_late_result(postgres, monkeypatch) -> None:
     factory, _truth, baseline = postgres
+    phone = "+243810005109"
 
     class SyntheticTimeoutTransport:
         calls = 0
@@ -827,45 +882,100 @@ async def test_b1_o07_timeout_and_late_result(postgres, monkeypatch) -> None:
     assert normalized.value.category == ProviderErrorCategory.timeout
     assert transport.calls == 1
 
-    def timeout_step(_request: ProviderTurnRequest) -> ProviderTurnResult:
-        raise normalized_timeout()
+    clock = ManualEvaluationClock()
+    operation_started = asyncio.Event()
+    cancellation_observed = asyncio.Event()
+    release_late_completion = asyncio.Event()
+    late_result_produced = asyncio.Event()
 
-    late = ProviderTurnResult(
-        text=LATE_RESULT_SENTINEL,
-        finish_reason=ProviderFinishReason.completed,
+    async def cancellation_resistant_operation(
+        _request: ProviderTurnRequest,
+    ) -> ProviderTurnResult:
+        operation_started.set()
+        try:
+            await release_late_completion.wait()
+        except asyncio.CancelledError:
+            cancellation_observed.set()
+            await release_late_completion.wait()
+        late_result_produced.set()
+        return ProviderTurnResult(
+            text=LATE_RESULT_SENTINEL,
+            finish_reason=ProviderFinishReason.completed,
+        )
+
+    scripted = RecordingScriptedProvider(
+        (ScriptedProviderStep(cancellation_resistant_operation),)
     )
-    adapter = RecordingScriptedProvider(
-        (
-            ScriptedProviderStep(
-                timeout_step,
-                represented_latency_ms=AI5B1_PROVIDER_DEADLINE_SECONDS * 1_000,
-                late_result=late,
-            ),
+    controller = EvaluationDeadlineAdapter(scripted, clock=clock)
+    await _install_closed_runtime(monkeypatch, factory, controller)
+    virtual_started = clock.monotonic()
+    wall_started = time.monotonic()
+    processing = asyncio.create_task(
+        _run_m1(
+            phone=phone,
+            content="Quel est le prix actuel ?",
         )
     )
-    await _install_closed_runtime(monkeypatch, factory, adapter)
-    result, source_message_id, _ = await _run_m1(
-        phone="+243810005109",
-        content="Quel est le prix actuel ?",
-    )
-    conversation, messages, audits, tickets = await _stored_state(
-        factory, "+243810005109"
-    )
+    await asyncio.wait_for(operation_started.wait(), timeout=5)
+    await _wait_for_manual_timer(clock)
+
+    await clock.advance(AI5B1_PROVIDER_DEADLINE_SECONDS - 0.001)
+    assert not processing.done()
+    assert not cancellation_observed.is_set()
+    assert not late_result_produced.is_set()
+
+    await clock.advance(0.001)
+    result, source_message_id, _ = await asyncio.wait_for(processing, timeout=5)
+    wall_elapsed_ms = round((time.monotonic() - wall_started) * 1_000)
+    virtual_fallback_elapsed_ms = round((clock.monotonic() - virtual_started) * 1_000)
+    await asyncio.wait_for(cancellation_observed.wait(), timeout=5)
+    before_late_release = await _late_effect_snapshot(factory, phone)
+    conversation, messages, audits, tickets = await _stored_state(factory, phone)
     outbound = [item for item in messages if item.direction == "outbound"]
     assert result["status"] == "processed"
-    assert result["processing_ms"] < AI5B1_SAFE_BOUNDARY_SECONDS * 1_000
+    assert result["processing_ms"] <= wall_elapsed_ms
+    assert virtual_fallback_elapsed_ms == 12_000
+    assert virtual_fallback_elapsed_ms <= AI5B1_SAFE_BOUNDARY_SECONDS * 1_000
     assert len(outbound) == 1 and outbound[0].content == t("error_fallback", "french")
     assert len(audits) == 1 and audits[0].source_message_id == source_message_id
     assert audits[0].outcome == "fallback_used"
     assert audits[0].safe_code == "timeout"
     assert tickets == []
     assert conversation.ai_execution_state == "eligible"
-    assert adapter.evidence[0].failure_code == "timeout"
-    assert adapter.evidence[0].latency_ms == 12_000
-    assert adapter.evidence[0].latency_class == OfflineLatencyClass.provider_deadline
-    assert adapter.rejected_late_results == 1
-    assert adapter.network_calls == 0
-    assert all(LATE_RESULT_SENTINEL not in item.content for item in messages)
+    assert len(controller.deadline_evidence) == 1
+    deadline = controller.deadline_evidence[0]
+    assert deadline.deadline_scope == "provider_request"
+    assert deadline.enforced_deadline_ms == 12_000
+    assert deadline.virtual_elapsed_ms == 12_000
+    assert deadline.measured_wall_clock_ms <= wall_elapsed_ms
+    assert deadline.normalized_failure_code == "timeout"
+    assert deadline.cancellation_requested is True
+    assert controller.accepted_results == 0
+    assert scripted.network_calls == 0
+    assert not late_result_produced.is_set()
+
+    release_late_completion.set()
+    await asyncio.wait_for(late_result_produced.wait(), timeout=5)
+    await asyncio.wait_for(controller.drain_late_completions(), timeout=5)
+    after_late_release = await _late_effect_snapshot(factory, phone)
+
+    assert controller.late_completions_observed == 1
+    assert controller.late_completions_discarded == 1
+    assert controller.late_completion_finish_reasons == [ProviderFinishReason.completed]
+    assert len(scripted.evidence) == 1
+    assert scripted.evidence[0].finish_reason == ProviderFinishReason.completed
+    _assert_late_completion_rejected(before_late_release, after_late_release)
+    negative_control = copy.deepcopy(after_late_release)
+    negative_messages = negative_control["messages"]
+    assert isinstance(negative_messages, tuple)
+    negative_control["messages"] = (
+        *negative_messages,
+        ("negative-control", "outbound", LATE_RESULT_SENTINEL),
+    )
+    with pytest.raises(AssertionError):
+        _assert_late_completion_rejected(before_late_release, negative_control)
+    assert controller.unfinished_task_count == 0
+    assert clock.pending_timer_count == 0
     assert classify_latency(AI5B1_SAFE_BOUNDARY_SECONDS * 1_000) == (
         OfflineLatencyClass.safe_boundary
     )

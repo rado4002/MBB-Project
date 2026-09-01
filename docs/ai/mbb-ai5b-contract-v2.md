@@ -6,6 +6,13 @@ Status: AI-5B1 offline-certification contract and future AI-5B2/AI-5C design.
 This document does not authorize or execute AI-5B2, AI-5C, a live provider, a
 pilot, or a public deployment.
 
+Correction record: AI-5B1-R1 supersedes the original B1-O07 timing evidence in
+commit `f960a0d`. That evidence recorded a synthetic 12-second value and
+incremented a late-result counter without advancing a clock or observing a
+late completion. AI-5B1-R1 requires timer-driven expiry and an actually
+produced, observed and discarded late completion. The correction does not
+change production AI behavior or timeout configuration.
+
 ## Authority and boundaries
 
 Current repository behavior and tests are authoritative for implementation.
@@ -61,10 +68,11 @@ The seven certification scenarios are:
 - B1-O05 synthetic usage, latency, call/token/cost/durable-action ceilings and
   stop-before-call behavior;
 - B1-O06 lossless synthetic multilingual transcript/evidence encoding;
-- B1-O07 real adapter timeout normalization, the real AITurnService/M1 failure
-  path, represented 12-second deadline, safe result by the represented
-  15-second boundary, rejected late completion, and separately classified
-  60-second emergency watchdog.
+- B1-O07 real adapter timeout normalization, an evaluation-owned enforced
+  12-second per-request deadline, the real AITurnService/M1 failure path,
+  genuine rejection of a cancellation-resistant late completion, unchanged
+  PostgreSQL state after late delivery, and an exercised evaluation-owned
+  60-second outer watchdog.
 
 AI-5B1 has zero provider network calls, zero provider API tokens and zero
 provider cost. It does not produce a live latency sample or validate language
@@ -135,7 +143,8 @@ Each offline provider-call record contains:
 
 - one-based call index;
 - requested generated-token limit;
-- measured or explicitly represented latency and latency class;
+- an explicit timing basis, represented synthetic latency, separately measured
+  wall-clock latency, and latency class;
 - normalized finish reason or safe failure code;
 - optional numeric input, output, total, cache-hit, cache-miss and reasoning
   token fields;
@@ -150,6 +159,13 @@ multilingual transcript evidence may retain the exact synthetic text.
 Redaction removes secret, credential, authorization, reasoning-content and
 continuation fields before serialization.
 
+Deadline-expiry evidence is separate from scripted-call latency evidence. It
+contains the enforced per-request deadline, virtual start and expiry times,
+virtual elapsed time, independently measured wall-clock time, normalized
+timeout code and whether cancellation was requested. Late-result evidence is
+recorded only after the underlying provider operation actually returns after
+expiry and the controller observes and discards that result.
+
 ## Time contract
 
 - one-call complete turn target: approximately 5 seconds p95;
@@ -160,10 +176,30 @@ continuation fields before serialization.
 - safe fallback or applicable handoff boundary: approximately 15 seconds;
 - emergency outer watchdog: 60 seconds, classified separately.
 
-AI-5B1 uses injected/represented time and no long sleeps. Timeout certification
-combines the real HTTP-timeout normalization, the same normalized scripted
-timeout, the real AITurnService/M1 failure handling, and rejection of late
-completion. Runner cancellation alone is insufficient evidence.
+AI-5B1-R1 uses an evaluation-owned monotonic clock and timer. Advancing that
+clock to 12 seconds expires one pending provider request and produces the same
+normalized timeout consumed by the real AITurnService/M1 fallback and
+persistence path. The controller requests cancellation, but a scripted
+cancellation-resistant operation is subsequently released and returns a real
+late result; the controller observes and discards it. PostgreSQL state is
+compared immediately before and after that late delivery.
+
+The 12-second enforcement is per provider request in the evaluation wrapper,
+not a whole-turn production deadline. It does not establish a 15-second bound
+for a turn containing multiple provider calls. B1-O07 records virtual elapsed
+time through its single-request timeout and fallback separately from measured
+wall-clock test time. It is not a live latency sample or an unconditional
+production 15-second guarantee.
+
+The production DeepSeek adapter remains unchanged and retains its normal
+60-second default. Its real HTTP-timeout normalization is exercised with a
+synthetic transport error, but AI-5B1-R1 does not claim that production already
+uses the evaluation wrapper's 12-second limit.
+
+The 60-second outer watchdog is also evaluation-owned. Injected time actually
+expires its timer, cancels the supervised evaluation operation, invokes its
+stop handler and drains the task. It is not a production M1 watchdog and is no
+longer evidenced merely by classifying the number 60,000.
 
 ## Budgets and stop rules
 
