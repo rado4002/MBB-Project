@@ -94,6 +94,7 @@ def _response(
             "total_tokens": 26,
             "prompt_cache_hit_tokens": 0,
             "prompt_cache_miss_tokens": 17,
+            "completion_tokens_details": {"reasoning_tokens": 4},
         },
     }
 
@@ -172,6 +173,9 @@ async def test_text_completion_translates_without_reasoning_leak() -> None:
     assert result.usage.input_tokens == 17
     assert result.usage.output_tokens == 9
     assert result.usage.total_tokens == 26
+    assert result.usage.cache_hit_tokens == 0
+    assert result.usage.cache_miss_tokens == 17
+    assert result.usage.reasoning_tokens == 4
     assert result.continuation_state is None
     assert "private synthetic reasoning" not in repr(result)
     assert "private synthetic reasoning" not in result.model_dump_json()

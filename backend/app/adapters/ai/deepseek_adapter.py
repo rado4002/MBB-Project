@@ -486,11 +486,21 @@ def _parse_usage(raw_usage: Any) -> ProviderUsage | None:
         return None
     if not isinstance(raw_usage, Mapping):
         raise ProviderTurnError(ProviderErrorCategory.malformed_response)
+    completion_details = raw_usage.get("completion_tokens_details")
+    if completion_details is not None and not isinstance(completion_details, Mapping):
+        raise ProviderTurnError(ProviderErrorCategory.malformed_response)
     try:
         return ProviderUsage(
             input_tokens=raw_usage.get("prompt_tokens"),
             output_tokens=raw_usage.get("completion_tokens"),
             total_tokens=raw_usage.get("total_tokens"),
+            cache_hit_tokens=raw_usage.get("prompt_cache_hit_tokens"),
+            cache_miss_tokens=raw_usage.get("prompt_cache_miss_tokens"),
+            reasoning_tokens=(
+                raw_usage.get("reasoning_tokens")
+                if completion_details is None
+                else completion_details.get("reasoning_tokens")
+            ),
         )
     except ValidationError:
         raise ProviderTurnError(ProviderErrorCategory.malformed_response) from None
