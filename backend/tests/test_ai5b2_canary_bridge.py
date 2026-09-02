@@ -15,10 +15,13 @@ from app.ai.canary_bridge import (
     AI5B2BridgeConfigurationError,
     AI5B2BudgetProfile,
     AI5B2ProviderSelection,
+    CanaryAuthorizationRecord,
     CanaryBridgeEvidence,
     CanaryCaseEvidence,
     CanaryManualReviewStatus,
     CanaryProviderMode,
+    CanaryPricingVerificationRecord,
+    CanaryReviewerAssignmentRecord,
     CanaryTranscriptEntry,
     CumulativeBudgetProvider,
     dry_run_manifest,
@@ -42,6 +45,37 @@ from app.ai.provider_contract import (
     ProviderUsage,
 )
 from scripts.run_ai5b2_canary_bridge import main as bridge_main
+
+
+_SYNTHETIC_BASELINE = "1" * 40
+
+
+def _synthetic_dispatch_records(run_id: str = "synthetic-ai5b2-run") -> dict:
+    return {
+        "current_baseline_commit": _SYNTHETIC_BASELINE,
+        "authorization": CanaryAuthorizationRecord(
+            record_id="synthetic:authorization:ai5b2",
+            run_id=run_id,
+            baseline_commit=_SYNTHETIC_BASELINE,
+            synthetic=True,
+        ),
+        "pricing_verification": CanaryPricingVerificationRecord(
+            record_id="synthetic:pricing:ai5b2",
+            source="synthetic://offline-fixture-not-official-pricing",
+            verified_at="synthetic-not-a-real-verification-time",
+            input_usd_per_million=Decimal("0.50"),
+            output_usd_per_million=Decimal("1.00"),
+            synthetic=True,
+        ),
+        "reviewer_assignment": CanaryReviewerAssignmentRecord(
+            record_id="synthetic:reviewer-assignment:ai5b2",
+            reviewer_id="synthetic:reviewer:not-a-human-review",
+            drc_language_familiarity_confirmed=True,
+            synthetic=True,
+        ),
+        "external_effects_disabled": True,
+        "disposable_database_isolated": True,
+    }
 
 
 class _SequenceAdapter(ProviderTurnAdapter):
@@ -124,9 +158,9 @@ def test_live_validation_precedes_credentials_and_dispatch() -> None:
         mode=CanaryProviderMode.live,
         explicit_live_opt_in=True,
         run_id="ai5b2-valid-run",
-        pricing_verified=True,
-        manual_reviewer_assigned=True,
+        current_baseline_commit=_SYNTHETIC_BASELINE,
         external_effects_disabled=True,
+        disposable_database_isolated=True,
         budget=AI5B2BudgetProfile(max_provider_calls=6),
     )
     with pytest.raises(AI5B2BridgeConfigurationError) as budget_failure:
@@ -141,12 +175,10 @@ def test_live_validation_precedes_credentials_and_dispatch() -> None:
 
     selected = select_canary_provider(
         AI5B2ProviderSelection(
-            mode=CanaryProviderMode.live,
+            mode=CanaryProviderMode.offline_mocked_http,
             explicit_live_opt_in=True,
-            run_id="ai5b2-valid-run",
-            pricing_verified=True,
-            manual_reviewer_assigned=True,
-            external_effects_disabled=True,
+            run_id="synthetic-ai5b2-run",
+            **_synthetic_dispatch_records(),
         ),
         offline_factory=lambda: _SequenceAdapter(_result()),
         credential_loader=load_credential,
@@ -155,6 +187,39 @@ def test_live_validation_precedes_credentials_and_dispatch() -> None:
     assert isinstance(selected, _SequenceAdapter)
     assert credential_loads == 1 and constructions == 1
     assert selected.calls == 0
+
+    with pytest.raises(AI5B2BridgeConfigurationError) as missing_pricing:
+        select_canary_provider(
+            AI5B2ProviderSelection(
+                mode=CanaryProviderMode.offline_mocked_http,
+                explicit_live_opt_in=True,
+                run_id="synthetic-ai5b2-run",
+                **{
+                    **_synthetic_dispatch_records(),
+                    "pricing_verification": None,
+                },
+            ),
+            offline_factory=lambda: _SequenceAdapter(_result()),
+            credential_loader=load_credential,
+            live_factory=construct,
+        )
+    assert missing_pricing.value.safe_code == "official_pricing_not_verified"
+    assert credential_loads == 1 and constructions == 1
+
+    with pytest.raises(AI5B2BridgeConfigurationError) as synthetic_live:
+        select_canary_provider(
+            AI5B2ProviderSelection(
+                mode=CanaryProviderMode.live,
+                explicit_live_opt_in=True,
+                run_id="synthetic-ai5b2-run",
+                **_synthetic_dispatch_records(),
+            ),
+            offline_factory=lambda: _SequenceAdapter(_result()),
+            credential_loader=load_credential,
+            live_factory=construct,
+        )
+    assert synthetic_live.value.safe_code == "synthetic_record_forbidden_in_live_mode"
+    assert credential_loads == 1 and constructions == 1
 
 
 @pytest.mark.asyncio

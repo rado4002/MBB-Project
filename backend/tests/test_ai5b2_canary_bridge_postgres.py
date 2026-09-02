@@ -14,56 +14,37 @@ from app.adapters.ai.deepseek_adapter import DeepSeekAdapter, _DeepSeekHTTPTrans
 from app.ai.canary_bridge import (
     AI5B2_CANARIES,
     AI5B2BudgetProfile,
+    AI5B2ProviderSelection,
+    CanaryAuthorizationRecord,
     CanaryBridgeEvidence,
     CanaryCaseEvidence,
     CanaryManualReviewStatus,
     CanaryProviderMode,
+    CanaryPricingVerificationRecord,
+    CanaryReviewerAssignmentRecord,
     CanaryTranscriptEntry,
     CumulativeBudgetProvider,
+    dispatch_guarded_canary_stage,
 )
 from app.ai.offline_certification import (
     EvaluationDeadlineAdapter,
     OfflineBudgetLedger,
-    RecordingScriptedProvider,
-    ScriptedProviderStep,
     SystemEvaluationClock,
 )
 from app.ai.provider_contract import (
     ProviderFinishReason,
     ProviderReasoningProfile,
-    ProviderToolCall,
-    ProviderTurnRequest,
-    ProviderTurnResult,
-    ProviderUsage,
 )
 
 from test_ai5b1_offline_certification_postgres import (
     _assert_protected_unchanged,
-    _continuation,
-    _finalizer,
     _install_closed_runtime,
     _run_m1,
     _stored_state,
-    _tool_result,
     read_commercial_state_for_test,
 )
 
 pytest_plugins = ("test_ai5b1_offline_certification_postgres",)
-
-
-def _usage(index: int) -> ProviderUsage:
-    return ProviderUsage(
-        input_tokens=80 + index,
-        output_tokens=20,
-        total_tokens=100 + index,
-        cache_hit_tokens=10,
-        cache_miss_tokens=70 + index,
-        reasoning_tokens=5,
-    )
-
-
-def _measured(result: ProviderTurnResult, index: int) -> ProviderTurnResult:
-    return result.model_copy(update={"usage": _usage(index)})
 
 
 def _case_evidence(
@@ -122,209 +103,247 @@ async def test_four_frozen_canaries_traverse_real_m1_and_postgres(
 
     monkeypatch.setattr(offer_service, "require_product_offer", record_terminal_refresh)
 
-    def c01_read(_request: ProviderTurnRequest) -> ProviderTurnResult:
-        validated_tools.append("search_products")
-        return _measured(
-            ProviderTurnResult(
-                tool_calls=(
-                    ProviderToolCall(
-                        call_id="b2_c01_offer",
-                        capability_name="search_products",
-                        arguments={"query": "air fryer"},
-                    ),
+    hidden_reasoning = "AI5B2_ALL_CASES_MOCKED_HIDDEN_REASONING"
+    response_tools = (
+        ("b2_c01_offer", "search_products", {"query": "air fryer"}),
+        (
+            "b2_c01_state",
+            "propose_commercial_state_update",
+            {
+                "response_text": (
+                    "Le modèle 6L coûte 55 USD, est disponible et vendable maintenant."
                 ),
-                finish_reason=ProviderFinishReason.tool_call,
-                continuation_state=_continuation("b2_c01_offer"),
-            ),
-            1,
-        )
+                "state_update": {
+                    "selected_sellable_item_ids": [str(truth.available_item_id)],
+                    "purchase_intent": "considering",
+                    "next_objective": "clarify_choice",
+                },
+            },
+        ),
+        (
+            "b2_c02_handoff",
+            "request_human_handoff",
+            {
+                "reason_category": "qualified_purchase_intent",
+                "selected_sellable_item_id": str(truth.available_item_id),
+                "purchase_intent": "ready",
+            },
+        ),
+        (
+            "b2_c03_offer",
+            "get_product_details",
+            {"sellable_item_id": str(truth.unavailable_item_id)},
+        ),
+        (
+            "b2_c03_state",
+            "propose_commercial_state_update",
+            {
+                "response_text": (
+                    "Le modèle 8L est en rupture de stock; je ne peux pas le "
+                    "déclarer disponible."
+                ),
+                "state_update": {"next_objective": "retrieve_options"},
+            },
+        ),
+        (
+            "b2_c04_offer",
+            "search_products",
+            {"query": "air fryer", "max_budget": 45, "budget_currency": "USD"},
+        ),
+        (
+            "b2_c04_state",
+            "propose_commercial_state_update",
+            {
+                "response_text": (
+                    "Na budget ya 45 dollars, option moins chère ezali te na offre "
+                    "actuelle."
+                ),
+                "state_update": {
+                    "current_goal": "Trouver un air fryer moins cher",
+                    "decision_constraints": [{"kind": "budget", "value": "45 USD"}],
+                    "purchase_intent": "considering",
+                    "next_objective": "retrieve_options",
+                },
+            },
+        ),
+    )
+    payloads: list[dict] = []
 
-    def c01_ground(request: ProviderTurnRequest) -> ProviderTurnResult:
-        offer = _tool_result(request, "b2_c01_offer")
-        assert offer.status == "success" and offer.output is not None
-        items = offer.output["items"]
-        assert isinstance(items, list) and len(items) == 1
-        item = items[0]
-        assert item["sellable_item_id"] == str(truth.available_item_id)
-        assert item["current_usd_price"] == "55.00"
-        assert item["availability"] == "available"
-        assert item["offer_status"] == "sellable_now"
-        return _measured(
-            _finalizer(
-                "b2_c01_state",
-                "Le modèle 6L coûte 55 USD, est disponible et vendable maintenant.",
-                selected_item_id=truth.available_item_id,
-            ),
-            2,
-        )
-
-    def c02_handoff(_request: ProviderTurnRequest) -> ProviderTurnResult:
-        validated_tools.append("request_human_handoff")
-        return _measured(
-            ProviderTurnResult(
-                tool_calls=(
-                    ProviderToolCall(
-                        call_id="b2_c02_handoff",
-                        capability_name="request_human_handoff",
-                        arguments={
-                            "reason_category": "qualified_purchase_intent",
-                            "selected_sellable_item_id": str(truth.available_item_id),
-                            "purchase_intent": "ready",
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == "https://api.deepseek.com/chat/completions"
+        assert request.headers["Authorization"] == "Bearer inert-test-credential"
+        payload = json.loads(request.content)
+        payloads.append(payload)
+        index = len(payloads) - 1
+        call_id, tool_name, arguments = response_tools[index]
+        if index in {1, 4, 6}:
+            assert any(item.get("role") == "tool" for item in payload["messages"])
+        if tool_name in {
+            "search_products",
+            "request_human_handoff",
+            "get_product_details",
+        }:
+            validated_tools.append(tool_name)
+        return httpx.Response(
+            200,
+            json={
+                "id": f"chatcmpl_b2_all_{index}",
+                "object": "chat.completion",
+                "model": "deepseek-v4-flash",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "reasoning_content": hidden_reasoning,
+                            "tool_calls": [
+                                {
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_name,
+                                        "arguments": json.dumps(arguments),
+                                    },
+                                }
+                            ],
                         },
-                    ),
-                ),
-                finish_reason=ProviderFinishReason.tool_call,
-                continuation_state=_continuation("b2_c02_handoff"),
-            ),
-            3,
-        )
-
-    def c03_read(_request: ProviderTurnRequest) -> ProviderTurnResult:
-        validated_tools.append("get_product_details")
-        return _measured(
-            ProviderTurnResult(
-                tool_calls=(
-                    ProviderToolCall(
-                        call_id="b2_c03_offer",
-                        capability_name="get_product_details",
-                        arguments={"sellable_item_id": str(truth.unavailable_item_id)},
-                    ),
-                ),
-                finish_reason=ProviderFinishReason.tool_call,
-                continuation_state=_continuation("b2_c03_offer"),
-            ),
-            4,
-        )
-
-    def c03_ground(request: ProviderTurnRequest) -> ProviderTurnResult:
-        offer = _tool_result(request, "b2_c03_offer")
-        assert offer.status == "success" and offer.output is not None
-        product = offer.output["product"]
-        assert product["sellable_item_id"] == str(truth.unavailable_item_id)
-        assert product["availability"] == "out_of_stock"
-        assert product["offer_status"] == "out_of_stock"
-        return _measured(
-            _finalizer(
-                "b2_c03_state",
-                "Le modèle 8L est en rupture de stock; je ne peux pas le déclarer disponible.",
-            ),
-            5,
-        )
-
-    def c04_read(_request: ProviderTurnRequest) -> ProviderTurnResult:
-        validated_tools.append("search_products")
-        return _measured(
-            ProviderTurnResult(
-                tool_calls=(
-                    ProviderToolCall(
-                        call_id="b2_c04_offer",
-                        capability_name="search_products",
-                        arguments={
-                            "query": "air fryer",
-                            "max_budget": 45,
-                            "budget_currency": "USD",
-                        },
-                    ),
-                ),
-                finish_reason=ProviderFinishReason.tool_call,
-                continuation_state=_continuation("b2_c04_offer"),
-            ),
-            6,
-        )
-
-    def c04_ground(request: ProviderTurnRequest) -> ProviderTurnResult:
-        offer = _tool_result(request, "b2_c04_offer")
-        assert offer.status == "success" and offer.output is not None
-        assert offer.output["items"] == []
-        return _measured(
-            ProviderTurnResult(
-                tool_calls=(
-                    ProviderToolCall(
-                        call_id="b2_c04_state",
-                        capability_name="propose_commercial_state_update",
-                        arguments={
-                            "response_text": (
-                                "Na budget ya 45 dollars, option moins chère ezali te "
-                                "na offre actuelle."
-                            ),
-                            "state_update": {
-                                "current_goal": "Trouver un air fryer moins cher",
-                                "decision_constraints": [
-                                    {"kind": "budget", "value": "45 USD"}
-                                ],
-                                "purchase_intent": "considering",
-                                "next_objective": "retrieve_options",
-                            },
-                        },
-                    ),
-                ),
-                finish_reason=ProviderFinishReason.tool_call,
-            ),
-            7,
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 80 + index + 1,
+                    "completion_tokens": 20,
+                    "total_tokens": 100 + index + 1,
+                    "prompt_cache_hit_tokens": 10,
+                    "prompt_cache_miss_tokens": 70 + index + 1,
+                    "completion_tokens_details": {"reasoning_tokens": 5},
+                },
+            },
         )
 
     profile = AI5B2BudgetProfile()
+    pricing = CanaryPricingVerificationRecord(
+        record_id="synthetic:pricing:ai5b2-postgres",
+        source="synthetic://offline-fixture-not-official-pricing",
+        verified_at="synthetic-not-a-real-verification-time",
+        input_usd_per_million=Decimal("0.50"),
+        output_usd_per_million=Decimal("1.00"),
+        synthetic=True,
+    )
     ledger = OfflineBudgetLedger(profile.offline_limits())
-    reservation = {
-        "reserved_tokens": profile.reserved_tokens_per_call,
-        "reserved_cost_usd": profile.fixture_reserved_cost_per_call,
-    }
-    adapter = RecordingScriptedProvider(
-        tuple(
-            ScriptedProviderStep(step, **reservation)
-            for step in (
-                c01_read,
-                c01_ground,
-                c02_handoff,
-                c03_read,
-                c03_ground,
-                c04_read,
-                c04_ground,
-            )
+    holder: dict[str, object] = {}
+    credential_loads = 0
+
+    def credential_loader() -> str:
+        nonlocal credential_loads
+        credential_loads += 1
+        return "inert-test-credential"
+
+    def live_factory(credential: str):
+        assert credential == "inert-test-credential"
+        transport = _DeepSeekHTTPTransport(
+            api_key=credential,
+            timeout_s=12,
+            http_transport=httpx.MockTransport(handler),
+        )
+        budgeted = CumulativeBudgetProvider(
+            DeepSeekAdapter(api_key=credential, transport=transport),
+            ledger=ledger,
+            profile=profile,
+            pricing=pricing,
+        )
+        controller = EvaluationDeadlineAdapter(
+            budgeted,
+            clock=SystemEvaluationClock(),
+            deadline_seconds=12,
+        )
+        holder.update(budgeted=budgeted, controller=controller)
+        return controller
+
+    async def run_stage(provider) -> None:
+        await _install_closed_runtime(
+            monkeypatch,
+            factory,
+            provider,
+            allow_mocked_provider_http=True,
+        )
+        started = datetime(2026, 9, 2, 8, tzinfo=timezone.utc)
+        await _run_m1(
+            phone="+243810006201",
+            content=AI5B2_CANARIES[0].customer_message,
+            timestamp=started,
+        )
+        duplicate_id = uuid.uuid4()
+        duplicate_wa_id = f"b2-c02-{duplicate_id}"
+        first_handoff, _, _ = await _run_m1(
+            phone="+243810006202",
+            content=AI5B2_CANARIES[1].customer_message,
+            message_id=duplicate_id,
+            whatsapp_message_id=duplicate_wa_id,
+            timestamp=started + timedelta(minutes=1),
+        )
+        calls_before_replay = len(payloads)
+        replay, _, _ = await _run_m1(
+            phone="+243810006202",
+            content=AI5B2_CANARIES[1].customer_message,
+            message_id=duplicate_id,
+            whatsapp_message_id=duplicate_wa_id,
+            timestamp=started + timedelta(minutes=1),
+        )
+        assert first_handoff["status"] == "waiting_for_human"
+        assert replay["status"] == "duplicate_ignored"
+        assert len(payloads) == calls_before_replay
+        await _run_m1(
+            phone="+243810006203",
+            content=AI5B2_CANARIES[2].customer_message,
+            timestamp=started + timedelta(minutes=2),
+        )
+        await _run_m1(
+            phone="+243810006204",
+            content=AI5B2_CANARIES[3].customer_message,
+            timestamp=started + timedelta(minutes=3),
+        )
+
+    run_id = "synthetic-ai5b2-postgres-run"
+    baseline_commit = "1" * 40
+    await dispatch_guarded_canary_stage(
+        AI5B2ProviderSelection(
+            mode=CanaryProviderMode.offline_mocked_http,
+            explicit_live_opt_in=True,
+            run_id=run_id,
+            current_baseline_commit=baseline_commit,
+            authorization=CanaryAuthorizationRecord(
+                record_id="synthetic:authorization:ai5b2-postgres",
+                run_id=run_id,
+                baseline_commit=baseline_commit,
+                synthetic=True,
+            ),
+            pricing_verification=pricing,
+            reviewer_assignment=CanaryReviewerAssignmentRecord(
+                record_id="synthetic:reviewer-assignment:ai5b2-postgres",
+                reviewer_id="synthetic:reviewer:not-a-human-review",
+                drc_language_familiarity_confirmed=True,
+                synthetic=True,
+            ),
+            external_effects_disabled=True,
+            disposable_database_isolated=True,
         ),
-        budget=ledger,
+        offline_factory=lambda: pytest.fail(
+            "offline factory bypassed guarded dispatch"
+        ),
+        credential_loader=credential_loader,
+        live_factory=live_factory,
+        stage_runner=run_stage,
     )
-    await _install_closed_runtime(monkeypatch, factory, adapter)
-    started = datetime(2026, 9, 2, 8, tzinfo=timezone.utc)
-
-    await _run_m1(
-        phone="+243810006201",
-        content=AI5B2_CANARIES[0].customer_message,
-        timestamp=started,
-    )
-
-    duplicate_id = uuid.uuid4()
-    duplicate_wa_id = f"b2-c02-{duplicate_id}"
-    first_handoff, _, _ = await _run_m1(
-        phone="+243810006202",
-        content=AI5B2_CANARIES[1].customer_message,
-        message_id=duplicate_id,
-        whatsapp_message_id=duplicate_wa_id,
-        timestamp=started + timedelta(minutes=1),
-    )
-    calls_before_replay = len(adapter.requests)
-    replay, _, _ = await _run_m1(
-        phone="+243810006202",
-        content=AI5B2_CANARIES[1].customer_message,
-        message_id=duplicate_id,
-        whatsapp_message_id=duplicate_wa_id,
-        timestamp=started + timedelta(minutes=1),
-    )
-    assert first_handoff["status"] == "waiting_for_human"
-    assert replay["status"] == "duplicate_ignored"
-    assert len(adapter.requests) == calls_before_replay
-    assert terminal_refreshes == [truth.available_item_id]
-
-    await _run_m1(
-        phone="+243810006203",
-        content=AI5B2_CANARIES[2].customer_message,
-        timestamp=started + timedelta(minutes=2),
-    )
-    await _run_m1(
-        phone="+243810006204",
-        content=AI5B2_CANARIES[3].customer_message,
-        timestamp=started + timedelta(minutes=3),
-    )
+    budgeted = holder["budgeted"]
+    controller = holder["controller"]
+    assert isinstance(budgeted, CumulativeBudgetProvider)
+    assert isinstance(controller, EvaluationDeadlineAdapter)
+    assert credential_loads == 1
+    assert terminal_refreshes.count(truth.available_item_id) == 1
+    assert terminal_refreshes.count(truth.unavailable_item_id) == 1
+    assert len(payloads) == 7
 
     case_evidence: list[CanaryCaseEvidence] = []
     phones = [f"+24381000620{index}" for index in range(1, 5)]
@@ -378,17 +397,15 @@ async def test_four_frozen_canaries_traverse_real_m1_and_postgres(
                     conversation.ai_execution_state,
                 ),
                 finish_reasons=tuple(
-                    item.finish_reason
-                    for item in adapter.evidence[start:end]
-                    if item.finish_reason is not None
+                    item.finish_reason for item in budgeted.results[start:end]
                 ),
             )
         )
 
     report = CanaryBridgeEvidence(
-        evidence_label=CanaryProviderMode.offline_scripted,
-        provider="scripted",
-        model="offline-ai5b1",
+        evidence_label=CanaryProviderMode.offline_mocked_http,
+        provider="deepseek",
+        model="deepseek-v4-flash",
         reasoning_profile=ProviderReasoningProfile.default,
         configured_provider_deadline_seconds=12,
         configured_outer_watchdog_seconds=60,
@@ -401,14 +418,18 @@ async def test_four_frozen_canaries_traverse_real_m1_and_postgres(
         overall_decision="offline_bridge_validated",
     )
     serialized = report.redacted_json()
-    assert '"evidence_label":"offline_scripted"' in serialized
-    assert len(adapter.requests) == 7 and ledger.provider_calls == 7
+    assert '"evidence_label":"offline_mocked_http"' in serialized
+    assert len(payloads) == 7 and ledger.provider_calls == 7
     assert ledger.reserved_tokens == 7 * profile.reserved_tokens_per_call
     assert ledger.reserved_cost_usd == (
         Decimal(7) * profile.fixture_reserved_cost_per_call
     )
     assert ledger.observed_tokens == sum(100 + index for index in range(1, 8))
-    assert adapter.network_calls == 0
+    assert report.real_provider_network_calls == 0
+    assert report.actual_provider_api_tokens == 0
+    assert report.actual_provider_cost_usd == 0
+    assert hidden_reasoning not in serialized
+    assert controller.unfinished_task_count == 0
     assert validated_tools == [
         "search_products",
         "request_human_handoff",

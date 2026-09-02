@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from decimal import Decimal
 from enum import Enum
-from typing import Literal
+from typing import Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -45,6 +46,8 @@ OFFLINE_RESERVED_INPUT_TOKENS_PER_CALL = 2_048
 OFFLINE_RESERVED_OUTPUT_TOKENS_PER_CALL = 512
 
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$")
+_SAFE_RECORD_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{7,127}$")
+_COMMIT_ID = re.compile(r"^[0-9a-f]{40}$")
 
 
 class _StrictModel(BaseModel):
@@ -168,17 +171,57 @@ class AI5B2BridgeConfigurationError(RuntimeError):
         super().__init__(f"ai5b2_bridge_configuration_error:{safe_code}")
 
 
+class CanaryAuthorizationRecord(_StrictModel):
+    """Run-specific authorization metadata; the secret/signature stays external."""
+
+    record_id: str
+    run_id: str
+    baseline_commit: str
+    case_ids: tuple[str, ...] = AI5B2_CANARY_IDS
+    synthetic: bool = False
+
+
+class CanaryPricingVerificationRecord(_StrictModel):
+    """Pricing metadata supplied by the authorizer, never fetched by the bridge."""
+
+    record_id: str
+    model: str = "deepseek-v4-flash"
+    source: str
+    verified_at: str
+    input_usd_per_million: Decimal = Field(gt=0)
+    output_usd_per_million: Decimal = Field(gt=0)
+    synthetic: bool = False
+
+    def reserved_cost(self, *, input_tokens: int, output_tokens: int) -> Decimal:
+        return (
+            Decimal(input_tokens) * self.input_usd_per_million
+            + Decimal(output_tokens) * self.output_usd_per_million
+        ) / Decimal(1_000_000)
+
+
+class CanaryReviewerAssignmentRecord(_StrictModel):
+    """Assignment metadata only; it does not represent a completed review."""
+
+    record_id: str
+    reviewer_id: str
+    drc_language_familiarity_confirmed: bool
+    synthetic: bool = False
+
+
 class AI5B2ProviderSelection(_StrictModel):
     mode: CanaryProviderMode = CanaryProviderMode.dry_run
     explicit_live_opt_in: bool = False
     run_id: str | None = None
+    current_baseline_commit: str | None = None
     case_ids: tuple[str, ...] = AI5B2_CANARY_IDS
     budget: AI5B2BudgetProfile = AI5B2BudgetProfile()
     model: str = "deepseek-v4-flash"
     reasoning_profile: ProviderReasoningProfile = ProviderReasoningProfile.default
-    pricing_verified: bool = False
-    manual_reviewer_assigned: bool = False
+    authorization: CanaryAuthorizationRecord | None = None
+    pricing_verification: CanaryPricingVerificationRecord | None = None
+    reviewer_assignment: CanaryReviewerAssignmentRecord | None = None
     external_effects_disabled: bool = False
+    disposable_database_isolated: bool = False
 
 
 ProviderFactory = Callable[[], ProviderTurnAdapter]
@@ -194,7 +237,10 @@ def select_canary_provider(
     live_factory: LiveProviderFactory,
 ) -> ProviderTurnAdapter:
     """Select a provider only after ordered live-authorization validation."""
-    if selection.mode != CanaryProviderMode.live:
+    if selection.mode not in {
+        CanaryProviderMode.live,
+        CanaryProviderMode.offline_mocked_http,
+    }:
         return offline_factory()
     _validate_live_selection(selection)
     credential = credential_loader()
@@ -208,6 +254,11 @@ def _validate_live_selection(selection: AI5B2ProviderSelection) -> None:
         raise AI5B2BridgeConfigurationError("explicit_live_opt_in_required")
     if selection.run_id is None or _SAFE_RUN_ID.fullmatch(selection.run_id) is None:
         raise AI5B2BridgeConfigurationError("live_run_id_invalid")
+    if (
+        selection.current_baseline_commit is None
+        or _COMMIT_ID.fullmatch(selection.current_baseline_commit) is None
+    ):
+        raise AI5B2BridgeConfigurationError("run_baseline_invalid")
     if selection.case_ids != AI5B2_CANARY_IDS:
         raise AI5B2BridgeConfigurationError("frozen_canary_set_required")
     if selection.budget.max_case_executions != len(AI5B2_CANARIES):
@@ -239,10 +290,89 @@ def _validate_live_selection(selection: AI5B2ProviderSelection) -> None:
         raise AI5B2BridgeConfigurationError("reasoning_profile_invalid")
     if not selection.external_effects_disabled:
         raise AI5B2BridgeConfigurationError("external_effects_not_disabled")
-    if not selection.pricing_verified:
+    if not selection.disposable_database_isolated:
+        raise AI5B2BridgeConfigurationError("disposable_database_not_isolated")
+
+    authorization = selection.authorization
+    if authorization is None:
+        raise AI5B2BridgeConfigurationError("authorization_record_required")
+    if _SAFE_RECORD_ID.fullmatch(authorization.record_id) is None:
+        raise AI5B2BridgeConfigurationError("authorization_record_invalid")
+    if (
+        authorization.run_id != selection.run_id
+        or authorization.baseline_commit != selection.current_baseline_commit
+        or authorization.case_ids != selection.case_ids
+    ):
+        raise AI5B2BridgeConfigurationError("authorization_scope_mismatch")
+
+    pricing = selection.pricing_verification
+    if pricing is None:
         raise AI5B2BridgeConfigurationError("official_pricing_not_verified")
-    if not selection.manual_reviewer_assigned:
+    if (
+        _SAFE_RECORD_ID.fullmatch(pricing.record_id) is None
+        or not pricing.source.strip()
+        or not pricing.verified_at.strip()
+        or pricing.model != selection.model
+    ):
+        raise AI5B2BridgeConfigurationError("pricing_verification_invalid")
+    maximum_dispatches = min(
+        selection.budget.max_provider_calls,
+        selection.budget.max_total_tokens // selection.budget.reserved_tokens_per_call,
+    )
+    maximum_reserved_cost = Decimal(maximum_dispatches) * pricing.reserved_cost(
+        input_tokens=OFFLINE_RESERVED_INPUT_TOKENS_PER_CALL,
+        output_tokens=OFFLINE_RESERVED_OUTPUT_TOKENS_PER_CALL,
+    )
+    if maximum_reserved_cost > selection.budget.max_cost_usd:
+        raise AI5B2BridgeConfigurationError("pricing_exceeds_cost_budget")
+
+    reviewer = selection.reviewer_assignment
+    if reviewer is None:
         raise AI5B2BridgeConfigurationError("manual_reviewer_not_assigned")
+    if (
+        _SAFE_RECORD_ID.fullmatch(reviewer.record_id) is None
+        or _SAFE_RECORD_ID.fullmatch(reviewer.reviewer_id) is None
+        or not reviewer.drc_language_familiarity_confirmed
+    ):
+        raise AI5B2BridgeConfigurationError("manual_reviewer_assignment_invalid")
+
+    records_are_synthetic = (
+        authorization.synthetic,
+        pricing.synthetic,
+        reviewer.synthetic,
+    )
+    if selection.mode == CanaryProviderMode.live and any(records_are_synthetic):
+        raise AI5B2BridgeConfigurationError("synthetic_record_forbidden_in_live_mode")
+    if selection.mode == CanaryProviderMode.offline_mocked_http and not all(
+        records_are_synthetic
+    ):
+        raise AI5B2BridgeConfigurationError("offline_records_must_be_synthetic")
+
+
+_StageResult = TypeVar("_StageResult")
+CanaryStageRunner = Callable[[ProviderTurnAdapter], Awaitable[_StageResult]]
+
+
+async def dispatch_guarded_canary_stage(
+    selection: AI5B2ProviderSelection,
+    *,
+    offline_factory: ProviderFactory,
+    credential_loader: CredentialLoader,
+    live_factory: LiveProviderFactory,
+    stage_runner: CanaryStageRunner[_StageResult],
+) -> _StageResult:
+    """Run the stage only after the same ordered gate used by live mode."""
+    provider = select_canary_provider(
+        selection,
+        offline_factory=offline_factory,
+        credential_loader=credential_loader,
+        live_factory=live_factory,
+    )
+    try:
+        async with asyncio.timeout(selection.budget.stage_ceiling_seconds):
+            return await stage_runner(provider)
+    except TimeoutError:
+        raise AI5B2BridgeConfigurationError("stage_ceiling_expired") from None
 
 
 class CumulativeBudgetProvider(ProviderTurnAdapter):
@@ -254,10 +384,12 @@ class CumulativeBudgetProvider(ProviderTurnAdapter):
         *,
         ledger: OfflineBudgetLedger,
         profile: AI5B2BudgetProfile,
+        pricing: CanaryPricingVerificationRecord | None = None,
     ) -> None:
         self._adapter = adapter
         self.ledger = ledger
         self.profile = profile
+        self.pricing = pricing
         self.provider_name = adapter.provider_name
         self.model = adapter.model
         self.dispatched_requests = 0
@@ -265,10 +397,18 @@ class CumulativeBudgetProvider(ProviderTurnAdapter):
         self.missing_usage_failures = 0
 
     async def generate_turn(self, request: ProviderTurnRequest) -> ProviderTurnResult:
+        reserved_cost = (
+            self.pricing.reserved_cost(
+                input_tokens=OFFLINE_RESERVED_INPUT_TOKENS_PER_CALL,
+                output_tokens=OFFLINE_RESERVED_OUTPUT_TOKENS_PER_CALL,
+            )
+            if self.pricing is not None
+            else self.profile.fixture_reserved_cost_per_call
+        )
         self.ledger.reserve_provider_call(
             max_output_tokens=request.max_output_tokens,
             reserved_tokens=self.profile.reserved_tokens_per_call,
-            reserved_cost_usd=self.profile.fixture_reserved_cost_per_call,
+            reserved_cost_usd=reserved_cost,
         )
         self.dispatched_requests += 1
         result = await self._adapter.generate_turn(request)

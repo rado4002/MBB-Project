@@ -294,8 +294,31 @@ Ambient credentials never activate live mode. Future live provider selection
 requires an explicit live flag, safe run identifier, exact frozen case set,
 validated cumulative budget, disabled business effects, newly verified
 official pricing and an assigned Human reviewer before credential loading.
-Provider construction alone does not authorize dispatch. A live journey run
-remains a separately authorized task.
+The authorization record is bound to the run identifier, current Git baseline
+and exact frozen case set. Pricing-verification and reviewer-assignment records
+are explicit metadata; reviewer assignment is not completed review. Live mode
+rejects synthetic records. It also requires the configured application database
+to match the uniquely identified, loopback-only disposable PostgreSQL database
+and verifies the actual external-effect settings, rather than accepting command
+flags alone.
+
+The guarded stage function performs ordered preflight, credential loading,
+provider construction and stage execution. After all gates pass, the CLI uses
+that function to inject the selected cumulative-budget/deadline-wrapped DeepSeek
+adapter into the real M1 path for C01--C04 and the C02 exact replay. This removes
+the former unconditional post-construction stop. It does not itself authorize a
+run: the live flags and non-synthetic authorization, official-pricing and Human
+reviewer records must come from a separate authorization, and the disposable
+database must already have been created, migrated and seeded by the controlled
+evaluation lifecycle.
+
+Offline mocked-HTTP certification uses the same guarded stage function with an
+inert credential loader and records explicitly marked synthetic. All four cases
+then traverse the real DeepSeek adapter over `httpx.MockTransport`, the
+evaluation deadline, real M1/AITurnService, registered capabilities and the
+runner-owned disposable PostgreSQL database. Those seven mocked HTTP dispatches
+remain zero real provider network calls, zero provider API tokens and zero
+provider cost.
 
 Offline reservation tests use clearly synthetic fixture rates of USD 0.50 per
 million input tokens and USD 1.00 per million output tokens, reserving 2,048
