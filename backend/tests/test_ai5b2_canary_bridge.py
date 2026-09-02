@@ -233,6 +233,8 @@ async def test_run_budget_is_cumulative_and_missing_usage_fails_safely() -> None
     await adapter.generate_turn(_request())
     with pytest.raises(OfflineBudgetExceeded, match="provider_calls"):
         await adapter.generate_turn(_request())
+    with pytest.raises(AI5B2BridgeConfigurationError, match="stage_dispatch_stopped"):
+        await adapter.generate_turn(_request())
 
     assert inner.calls == 1
     assert adapter.dispatched_requests == 1
@@ -257,6 +259,12 @@ async def test_run_budget_is_cumulative_and_missing_usage_fails_safely() -> None
     assert missing_ledger.provider_calls == 1
     assert missing_ledger.observed_tokens == 0
     assert missing_ledger.reserved_tokens == missing_profile.reserved_tokens_per_call
+    assert missing.call_evidence[0].outcome == "failed"
+    assert missing.call_evidence[0].total_tokens is None
+    assert missing.call_evidence[0].estimated_cost_usd is None
+    with pytest.raises(AI5B2BridgeConfigurationError, match="stage_dispatch_stopped"):
+        await missing.generate_turn(_request())
+    assert missing_inner.calls == 1
 
 
 @pytest.mark.asyncio
@@ -291,7 +299,11 @@ async def test_bridge_deadline_observes_and_discards_real_late_completion() -> N
         ledger=ledger,
         profile=profile,
     )
-    controller = EvaluationDeadlineAdapter(budgeted, clock=clock)
+    controller = EvaluationDeadlineAdapter(
+        budgeted,
+        clock=clock,
+        on_timeout=budgeted.mark_current_request_timed_out,
+    )
     pending = asyncio.create_task(controller.generate_turn(_request()))
     await asyncio.wait_for(started.wait(), timeout=1)
 
@@ -316,6 +328,9 @@ async def test_bridge_deadline_observes_and_discards_real_late_completion() -> N
     assert controller.late_completions_observed == 1
     assert controller.late_completions_discarded == 1
     assert ledger.observed_tokens == 13
+    assert budgeted.stop_latch.stop_reason == "provider_timeout"
+    assert budgeted.call_evidence[0].outcome == "timed_out"
+    assert budgeted.call_evidence[0].total_tokens == 13
     assert controller.unfinished_task_count == 0
     assert clock.pending_timer_count == 0
 
@@ -336,6 +351,10 @@ async def test_malformed_provider_failure_keeps_precall_reservation() -> None:
     assert ledger.provider_calls == 1
     assert ledger.reserved_tokens == profile.reserved_tokens_per_call
     assert ledger.reserved_cost_usd == profile.fixture_reserved_cost_per_call
+    assert adapter.call_evidence[0].outcome == "failed"
+    with pytest.raises(AI5B2BridgeConfigurationError, match="stage_dispatch_stopped"):
+        await adapter.generate_turn(_request())
+    assert inner.calls == 1
 
 
 def test_evidence_redaction_and_live_manual_review_gate() -> None:

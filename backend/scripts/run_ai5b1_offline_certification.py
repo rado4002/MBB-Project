@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass, field
 import json
 import os
 from collections.abc import Sequence
@@ -42,6 +43,209 @@ DATABASE_USER = "ai5b1_admin"
 
 class CertificationRuntimeError(RuntimeError):
     pass
+
+
+@dataclass
+class DisposablePostgresRuntime:
+    """One verified loopback PostgreSQL cluster owned by a single evaluation."""
+
+    suite: str
+    cluster_id: str = field(default_factory=lambda: CLUSTER_PREFIX + uuid.uuid4().hex)
+    database_name: str = field(
+        default_factory=lambda: DATABASE_PREFIX + uuid.uuid4().hex
+    )
+    port: int = field(default_factory=lambda: _unused_loopback_port())
+    cluster_root: Path = field(init=False)
+    data_dir: Path = field(init=False)
+    log_path: Path = field(init=False)
+    env: dict[str, str] = field(init=False)
+    started: bool = False
+    database_created: bool = False
+    migrated: bool = False
+    schema_verified: bool = False
+    database_dropped: bool = False
+    cluster_stopped: bool = False
+    directory_removed: bool = False
+
+    def __post_init__(self) -> None:
+        temp_root = Path(tempfile.gettempdir()).resolve()
+        self.cluster_root = (temp_root / self.cluster_id).resolve()
+        if (
+            self.cluster_root.parent != temp_root
+            or not self.cluster_root.name.startswith(CLUSTER_PREFIX)
+        ):
+            raise CertificationRuntimeError("temporary cluster identity is unsafe")
+        self.data_dir = self.cluster_root / "data"
+        self.log_path = self.cluster_root / "postgres.log"
+        self.env = _certification_environment(
+            port=self.port,
+            database_name=self.database_name,
+            cluster_id=self.cluster_id,
+        )
+
+    @property
+    def database_url(self) -> str:
+        return self.env["AI5B1_TEST_DATABASE_URL"]
+
+    def prepare(self) -> None:
+        """Create, start, migrate, and verify the exact run-owned database."""
+        bin_dir = _postgres_bin()
+        self.cluster_root.mkdir(parents=False, exist_ok=False)
+        try:
+            _run(
+                [
+                    _exe(bin_dir, "initdb"),
+                    "-D",
+                    str(self.data_dir),
+                    "-U",
+                    DATABASE_USER,
+                    "-A",
+                    "trust",
+                    "--encoding=UTF8",
+                    "--no-locale",
+                ]
+            )
+            _run(
+                [
+                    _exe(bin_dir, "pg_ctl"),
+                    "-D",
+                    str(self.data_dir),
+                    "-l",
+                    str(self.log_path),
+                    "-o",
+                    f"-p {self.port} -h 127.0.0.1",
+                    "-w",
+                    "start",
+                ],
+                capture=False,
+            )
+            self.started = True
+            _run(
+                [
+                    _exe(bin_dir, "createdb"),
+                    "-h",
+                    "127.0.0.1",
+                    "-p",
+                    str(self.port),
+                    "-U",
+                    DATABASE_USER,
+                    self.database_name,
+                ],
+                env=self.env,
+            )
+            self.database_created = True
+            _run(
+                [
+                    sys.executable,
+                    "-m",
+                    "alembic",
+                    "-c",
+                    "alembic.ini",
+                    "upgrade",
+                    "head",
+                ],
+                env=self.env,
+                echo=True,
+            )
+            self.migrated = True
+            verified = _run(
+                [
+                    _exe(bin_dir, "psql"),
+                    "-h",
+                    "127.0.0.1",
+                    "-p",
+                    str(self.port),
+                    "-U",
+                    DATABASE_USER,
+                    "-d",
+                    self.database_name,
+                    "-X",
+                    "-tAc",
+                    "SELECT count(*) FROM pg_namespace WHERE nspname='mbb'",
+                ],
+                env=self.env,
+            )
+            self.schema_verified = verified.stdout.strip() == "1"
+            if not self.schema_verified:
+                raise CertificationRuntimeError("migrated mbb schema was not verified")
+        except BaseException:
+            try:
+                self.cleanup()
+            except BaseException:
+                # Preserve the setup failure. cleanup() already attempts every
+                # run-owned teardown step before it reports its own failure.
+                pass
+            raise
+
+    def cleanup(self) -> None:
+        """Idempotently remove only resources carrying this runtime's identity."""
+        bin_dir = _postgres_bin()
+        cleanup_failure: BaseException | None = None
+        if self.database_created and self.started and not self.database_dropped:
+            try:
+                _run(
+                    [
+                        _exe(bin_dir, "dropdb"),
+                        "-h",
+                        "127.0.0.1",
+                        "-p",
+                        str(self.port),
+                        "-U",
+                        DATABASE_USER,
+                        self.database_name,
+                    ],
+                    env=self.env,
+                )
+                self.database_dropped = True
+            except BaseException as exc:
+                cleanup_failure = exc
+        if self.started and not self.cluster_stopped:
+            try:
+                _run(
+                    [
+                        _exe(bin_dir, "pg_ctl"),
+                        "-D",
+                        str(self.data_dir),
+                        "-m",
+                        "fast",
+                        "-w",
+                        "stop",
+                    ],
+                    capture=False,
+                )
+                self.cluster_stopped = True
+            except BaseException as exc:
+                cleanup_failure = cleanup_failure or exc
+        temp_root = Path(tempfile.gettempdir()).resolve()
+        resolved_root = self.cluster_root.resolve()
+        if (
+            resolved_root.exists()
+            and resolved_root.parent == temp_root
+            and resolved_root.name == self.cluster_id
+            and resolved_root.name.startswith(CLUSTER_PREFIX)
+        ):
+            try:
+                shutil.rmtree(resolved_root)
+            except BaseException as exc:
+                cleanup_failure = cleanup_failure or exc
+        self.directory_removed = not resolved_root.exists()
+        if cleanup_failure is not None:
+            raise cleanup_failure
+
+    def evidence(self) -> dict[str, object]:
+        return {
+            "suite": self.suite,
+            "cluster_identity": self.cluster_id,
+            "database_identity": self.database_name,
+            "loopback_port": self.port,
+            "loopback_only": True,
+            "database_created": self.database_created,
+            "migrated": self.migrated,
+            "schema_verified": self.schema_verified,
+            "database_dropped": self.database_dropped,
+            "cluster_stopped": self.cluster_stopped,
+            "temporary_directory_removed": self.directory_removed,
+        }
 
 
 def _postgres_bin() -> Path:
@@ -173,26 +377,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         suite = "ai5b1_scenarios"
         pytest_targets = (DEADLINE_TEST_PATH, TEST_PATH)
-    bin_dir = _postgres_bin()
-    temp_root = Path(tempfile.gettempdir()).resolve()
-    cluster_id = CLUSTER_PREFIX + uuid.uuid4().hex
-    cluster_root = (temp_root / cluster_id).resolve()
-    if cluster_root.parent != temp_root or not cluster_root.name.startswith(
-        CLUSTER_PREFIX
-    ):
-        raise CertificationRuntimeError("temporary cluster identity is unsafe")
-    data_dir = cluster_root / "data"
-    log_path = cluster_root / "postgres.log"
-    database_name = DATABASE_PREFIX + uuid.uuid4().hex
-    port = _unused_loopback_port()
-    env = _certification_environment(
-        port=port,
-        database_name=database_name,
-        cluster_id=cluster_id,
-    )
+    runtime = DisposablePostgresRuntime(suite=suite)
+    env = runtime.env
     if arguments.ai5b2_bridge:
         env["AI5B2_BRIDGE_TEST_DATABASE_URL"] = env["AI5B1_TEST_DATABASE_URL"]
-        env["AI5B2_BRIDGE_DISPOSABLE_CLUSTER_ID"] = cluster_id
+        env["AI5B2_BRIDGE_DISPOSABLE_CLUSTER_ID"] = runtime.cluster_id
         env["AI5B2_BRIDGE_MODE"] = "offline"
     if arguments.regressions:
         for name in (
@@ -206,86 +395,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             "E2_TEST_DATABASE_URL",
         ):
             env[name] = env["AI5B1_TEST_DATABASE_URL"]
-    started = False
-    database_created = False
-    migrated = False
-    schema_verified = False
-    database_dropped = False
-    cluster_stopped = False
-    directory_removed = False
     tests_passed = False
-    failure: Exception | None = None
-
-    cluster_root.mkdir(parents=False, exist_ok=False)
+    failure: BaseException | None = None
     try:
-        _run(
-            [
-                _exe(bin_dir, "initdb"),
-                "-D",
-                str(data_dir),
-                "-U",
-                DATABASE_USER,
-                "-A",
-                "trust",
-                "--encoding=UTF8",
-                "--no-locale",
-            ]
-        )
-        _run(
-            [
-                _exe(bin_dir, "pg_ctl"),
-                "-D",
-                str(data_dir),
-                "-l",
-                str(log_path),
-                "-o",
-                f"-p {port} -h 127.0.0.1",
-                "-w",
-                "start",
-            ],
-            capture=False,
-        )
-        started = True
-        _run(
-            [
-                _exe(bin_dir, "createdb"),
-                "-h",
-                "127.0.0.1",
-                "-p",
-                str(port),
-                "-U",
-                DATABASE_USER,
-                database_name,
-            ],
-            env=env,
-        )
-        database_created = True
-        _run(
-            [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
-            env=env,
-            echo=True,
-        )
-        migrated = True
-        verified = _run(
-            [
-                _exe(bin_dir, "psql"),
-                "-h",
-                "127.0.0.1",
-                "-p",
-                str(port),
-                "-U",
-                DATABASE_USER,
-                "-d",
-                database_name,
-                "-X",
-                "-tAc",
-                "SELECT count(*) FROM pg_namespace WHERE nspname='mbb'",
-            ],
-            env=env,
-        )
-        schema_verified = verified.stdout.strip() == "1"
-        if not schema_verified:
-            raise CertificationRuntimeError("migrated mbb schema was not verified")
+        runtime.prepare()
         _run(
             [
                 sys.executable,
@@ -301,56 +414,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             echo=True,
         )
         tests_passed = True
-    except Exception as exc:
+    except BaseException as exc:
         failure = exc
     finally:
-        if database_created and started:
-            try:
-                _run(
-                    [
-                        _exe(bin_dir, "dropdb"),
-                        "-h",
-                        "127.0.0.1",
-                        "-p",
-                        str(port),
-                        "-U",
-                        DATABASE_USER,
-                        database_name,
-                    ],
-                    env=env,
-                )
-                database_dropped = True
-            except Exception as exc:
-                failure = failure or exc
-        if started:
-            try:
-                _run(
-                    [
-                        _exe(bin_dir, "pg_ctl"),
-                        "-D",
-                        str(data_dir),
-                        "-m",
-                        "fast",
-                        "-w",
-                        "stop",
-                    ],
-                    capture=False,
-                )
-                cluster_stopped = True
-            except Exception as exc:
-                failure = failure or exc
-        if cluster_root.exists() and (cluster_root.parent == temp_root):
-            shutil.rmtree(cluster_root)
-        directory_removed = not cluster_root.exists()
+        try:
+            runtime.cleanup()
+        except BaseException as exc:
+            failure = failure or exc
 
     evidence = {
         "contract_version": "mbb-ai5b-contract-v2",
-        "suite": suite,
-        "cluster_identity": cluster_id,
-        "loopback_only": True,
-        "database_created": database_created,
-        "migrated": migrated,
-        "schema_verified": schema_verified,
+        **runtime.evidence(),
         "tests_passed": tests_passed,
         "seven_scenarios_passed": (
             tests_passed
@@ -358,9 +432,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             else None
         ),
         "four_canary_bridge_passed": (tests_passed if arguments.ai5b2_bridge else None),
-        "database_dropped": database_dropped,
-        "cluster_stopped": cluster_stopped,
-        "temporary_directory_removed": directory_removed,
         "provider_network_calls": 0,
         "provider_api_tokens": 0,
         "provider_cost_usd": "0",
@@ -371,13 +442,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     if not all(
         (
-            database_created,
-            migrated,
-            schema_verified,
+            runtime.database_created,
+            runtime.migrated,
+            runtime.schema_verified,
             tests_passed,
-            database_dropped,
-            cluster_stopped,
-            directory_removed,
+            runtime.database_dropped,
+            runtime.cluster_stopped,
+            runtime.directory_removed,
         )
     ):
         return 1

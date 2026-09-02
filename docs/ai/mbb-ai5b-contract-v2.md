@@ -305,12 +305,33 @@ flags alone.
 The guarded stage function performs ordered preflight, credential loading,
 provider construction and stage execution. After all gates pass, the CLI uses
 that function to inject the selected cumulative-budget/deadline-wrapped DeepSeek
-adapter into the real M1 path for C01--C04 and the C02 exact replay. This removes
-the former unconditional post-construction stop. It does not itself authorize a
-run: the live flags and non-synthetic authorization, official-pricing and Human
-reviewer records must come from a separate authorization, and the disposable
-database must already have been created, migrated and seeded by the controlled
-evaluation lifecycle.
+adapter into the real M1 path for C01--C04 and the C02 exact replay. The guarded
+CLI owns the complete unique loopback PostgreSQL create, migrate, seed, verify,
+protected-snapshot, execute, compare, drop, stop and remove lifecycle. Run-scoped
+application settings keep AI_ADAPTER disabled, activate AI_TURN_PROVIDER only
+inside the isolated guarded runtime, and disable WhatsApp, CRM, payment, relance,
+scheduled-task and M1 MAPS effects before M1 is allowed to execute; the settings
+are restored during cleanup.
+
+The cumulative provider boundary shares an evaluation-owned stop latch with the
+stage. The latch is checked before every provider dispatch and is set by provider
+errors, the 12-second evaluation deadline, missing usage, budget exhaustion and
+deterministic or evidence hard-gate failures. M1 may finish its existing safe
+fallback and persistence path, but a latched stage cannot issue another provider
+request in that journey or a later canary. This changes no production M1 or
+AITurnService behavior.
+
+The CLI atomically writes redacted partial and final evidence outside both the
+repository and disposable database directory. Evidence includes run bindings,
+synthetic fixture truth, transcripts, capability/audit/ownership/handoff/replay
+state, protected snapshot hashes, per-call reservations, returned usage and
+latency, stop/skipped-case fields, and final cleanup. Absent usage remains null
+while its pre-call reservation is retained; late usage observed after a timeout
+is recorded without making the discarded completion eligible. Hidden reasoning,
+credentials and continuation state remain excluded. This does not itself
+authorize a run: live flags and non-synthetic authorization, official-pricing
+and assigned Human-reviewer records must still come from a fresh authorization
+bound to the final commit.
 
 Offline mocked-HTTP certification uses the same guarded stage function with an
 inert credential loader and records explicitly marked synthetic. All four cases

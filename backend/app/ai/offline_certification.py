@@ -158,6 +158,7 @@ class EvaluationDeadlineAdapter(ProviderTurnAdapter):
         clock: EvaluationClock,
         deadline_seconds: float = AI5B1_PROVIDER_DEADLINE_SECONDS,
         wall_clock: Callable[[], float] = time.monotonic,
+        on_timeout: Callable[[], None] | None = None,
     ) -> None:
         if deadline_seconds <= 0:
             raise ValueError("provider deadline must be positive")
@@ -165,6 +166,7 @@ class EvaluationDeadlineAdapter(ProviderTurnAdapter):
         self._clock = clock
         self._deadline_seconds = deadline_seconds
         self._wall_clock = wall_clock
+        self._on_timeout = on_timeout
         self.provider_name = adapter.provider_name
         self.model = adapter.model
         self.deadline_evidence: list[OfflineDeadlineEvidence] = []
@@ -194,6 +196,8 @@ class EvaluationDeadlineAdapter(ProviderTurnAdapter):
         )
         if deadline in done:
             cancellation_requested = operation.cancel()
+            if self._on_timeout is not None:
+                self._on_timeout()
             monitor = asyncio.create_task(self._observe_late_completion(operation))
             self._late_monitors.add(monitor)
             monitor.add_done_callback(self._late_monitors.discard)

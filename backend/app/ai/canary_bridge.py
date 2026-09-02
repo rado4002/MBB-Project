@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
 from enum import Enum
@@ -30,6 +31,7 @@ from app.ai.provider_contract import (
     ProviderTurnError,
     ProviderTurnRequest,
     ProviderTurnResult,
+    ProviderUsage,
 )
 
 AI5B2_BRIDGE_VERSION = "mbb-ai5b2-bridge-v1"
@@ -169,6 +171,35 @@ class AI5B2BridgeConfigurationError(RuntimeError):
     def __init__(self, safe_code: str) -> None:
         self.safe_code = safe_code
         super().__init__(f"ai5b2_bridge_configuration_error:{safe_code}")
+
+
+class CanaryStageStopLatch:
+    """Evaluation-owned stop state shared by the stage and provider boundary."""
+
+    def __init__(self) -> None:
+        self.current_case_id: str | None = None
+        self.stop_reason: str | None = None
+        self.failed_case_id: str | None = None
+        self.failed_request_index: int | None = None
+
+    @property
+    def stopped(self) -> bool:
+        return self.stop_reason is not None
+
+    def begin_case(self, case_id: str) -> None:
+        self.raise_if_stopped()
+        self.current_case_id = case_id
+
+    def stop(self, reason: str, *, request_index: int | None = None) -> None:
+        if self.stopped:
+            return
+        self.stop_reason = reason
+        self.failed_case_id = self.current_case_id
+        self.failed_request_index = request_index
+
+    def raise_if_stopped(self) -> None:
+        if self.stop_reason is not None:
+            raise AI5B2BridgeConfigurationError("stage_dispatch_stopped")
 
 
 class CanaryAuthorizationRecord(_StrictModel):
@@ -385,18 +416,26 @@ class CumulativeBudgetProvider(ProviderTurnAdapter):
         ledger: OfflineBudgetLedger,
         profile: AI5B2BudgetProfile,
         pricing: CanaryPricingVerificationRecord | None = None,
+        stop_latch: CanaryStageStopLatch | None = None,
+        wall_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._adapter = adapter
         self.ledger = ledger
         self.profile = profile
         self.pricing = pricing
+        self.stop_latch = stop_latch or CanaryStageStopLatch()
+        self._wall_clock = wall_clock
         self.provider_name = adapter.provider_name
         self.model = adapter.model
         self.dispatched_requests = 0
         self.results: list[ProviderTurnResult] = []
+        self.call_evidence: list[CanaryProviderCallEvidence] = []
+        self._call_started: dict[int, float] = {}
         self.missing_usage_failures = 0
 
     async def generate_turn(self, request: ProviderTurnRequest) -> ProviderTurnResult:
+        self.stop_latch.raise_if_stopped()
+        request_index = self.dispatched_requests + 1
         reserved_cost = (
             self.pricing.reserved_cost(
                 input_tokens=OFFLINE_RESERVED_INPUT_TOKENS_PER_CALL,
@@ -405,13 +444,54 @@ class CumulativeBudgetProvider(ProviderTurnAdapter):
             if self.pricing is not None
             else self.profile.fixture_reserved_cost_per_call
         )
-        self.ledger.reserve_provider_call(
-            max_output_tokens=request.max_output_tokens,
-            reserved_tokens=self.profile.reserved_tokens_per_call,
-            reserved_cost_usd=reserved_cost,
-        )
+        try:
+            self.ledger.reserve_provider_call(
+                max_output_tokens=request.max_output_tokens,
+                reserved_tokens=self.profile.reserved_tokens_per_call,
+                reserved_cost_usd=reserved_cost,
+            )
+        except Exception as exc:
+            budget_name = getattr(exc, "budget", type(exc).__name__)
+            self.stop_latch.stop(f"budget_{budget_name}", request_index=request_index)
+            raise
         self.dispatched_requests += 1
-        result = await self._adapter.generate_turn(request)
+        started = self._wall_clock()
+        self._call_started[request_index] = started
+        self.call_evidence.append(
+            CanaryProviderCallEvidence(
+                request_index=request_index,
+                case_id=self.stop_latch.current_case_id,
+                requested_max_output_tokens=request.max_output_tokens,
+                reserved_tokens=self.profile.reserved_tokens_per_call,
+                reserved_cost_usd=reserved_cost,
+                outcome="pending",
+            )
+        )
+        try:
+            result = await self._adapter.generate_turn(request)
+        except ProviderTurnError as exc:
+            self._finish_call(
+                request_index,
+                outcome="failed",
+                latency_ms=self._latency_ms(started),
+                failure_code=exc.safe_code,
+                provider_request_id=exc.provider_request_id,
+            )
+            self.stop_latch.stop(exc.safe_code, request_index=request_index)
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._finish_call(
+                request_index,
+                outcome="failed",
+                latency_ms=self._latency_ms(started),
+                failure_code=type(exc).__name__,
+            )
+            self.stop_latch.stop(
+                "provider_unexpected_failure", request_index=request_index
+            )
+            raise
         usage = result.usage
         if (
             usage is None
@@ -420,10 +500,124 @@ class CumulativeBudgetProvider(ProviderTurnAdapter):
             or usage.total_tokens is None
         ):
             self.missing_usage_failures += 1
+            self._finish_call(
+                request_index,
+                outcome="failed",
+                latency_ms=self._latency_ms(started),
+                failure_code="provider_missing_usage",
+                provider_request_id=result.provider_request_id,
+            )
+            self.stop_latch.stop("provider_missing_usage", request_index=request_index)
             raise ProviderTurnError(ProviderErrorCategory.malformed_response)
-        self.ledger.record_usage(usage)
+        try:
+            self.ledger.record_usage(usage)
+        except Exception as exc:
+            self._finish_call(
+                request_index,
+                outcome="failed",
+                latency_ms=self._latency_ms(started),
+                failure_code=f"budget_{getattr(exc, 'budget', type(exc).__name__)}",
+                usage=usage,
+                provider_request_id=result.provider_request_id,
+            )
+            self.stop_latch.stop(
+                f"budget_{getattr(exc, 'budget', type(exc).__name__)}",
+                request_index=request_index,
+            )
+            raise
         self.results.append(result)
+        self._finish_call(
+            request_index,
+            outcome="completed",
+            latency_ms=self._latency_ms(started),
+            finish_reason=result.finish_reason,
+            usage=usage,
+            provider_request_id=result.provider_request_id,
+        )
         return result
+
+    def mark_current_request_timed_out(self) -> None:
+        if not self.call_evidence:
+            return
+        current = self.call_evidence[-1]
+        if current.outcome != "pending":
+            return
+        self._finish_call(
+            current.request_index,
+            outcome="timed_out",
+            failure_code="provider_timeout",
+        )
+        self.stop_latch.stop("provider_timeout", request_index=current.request_index)
+
+    def _latency_ms(self, started: float) -> int:
+        return max(0, round((self._wall_clock() - started) * 1_000))
+
+    def _finish_call(
+        self,
+        request_index: int,
+        *,
+        outcome: Literal["completed", "failed", "timed_out"],
+        latency_ms: int | None = None,
+        failure_code: str | None = None,
+        finish_reason: ProviderFinishReason | None = None,
+        usage: ProviderUsage | None = None,
+        provider_request_id: str | None = None,
+    ) -> None:
+        index = request_index - 1
+        current = self.call_evidence[index]
+        if latency_ms is None and request_index in self._call_started:
+            latency_ms = self._latency_ms(self._call_started[request_index])
+        if current.outcome == "timed_out":
+            outcome = "timed_out"
+            failure_code = "provider_timeout"
+        estimated_cost = None
+        if usage is not None and self.pricing is not None:
+            estimated_cost = self.pricing.reserved_cost(
+                input_tokens=usage.input_tokens or 0,
+                output_tokens=usage.output_tokens or 0,
+            )
+        self.call_evidence[index] = current.model_copy(
+            update={
+                "outcome": outcome,
+                "latency_ms": latency_ms,
+                "failure_code": failure_code,
+                "finish_reason": finish_reason,
+                "input_tokens": usage.input_tokens if usage is not None else None,
+                "output_tokens": usage.output_tokens if usage is not None else None,
+                "total_tokens": usage.total_tokens if usage is not None else None,
+                "cache_hit_tokens": (
+                    usage.cache_hit_tokens if usage is not None else None
+                ),
+                "cache_miss_tokens": (
+                    usage.cache_miss_tokens if usage is not None else None
+                ),
+                "reasoning_tokens": (
+                    usage.reasoning_tokens if usage is not None else None
+                ),
+                "estimated_cost_usd": estimated_cost,
+                "provider_request_id": provider_request_id,
+            }
+        )
+
+
+class CanaryProviderCallEvidence(_StrictModel):
+    request_index: int = Field(ge=1)
+    case_id: str | None = None
+    requested_max_output_tokens: int = Field(ge=1, le=AI5B_MAX_OUTPUT_TOKENS)
+    reserved_tokens: int = Field(ge=0)
+    reserved_cost_usd: Decimal = Field(ge=0)
+    outcome: Literal["pending", "completed", "failed", "timed_out"]
+    latency_ms: int | None = Field(default=None, ge=0)
+    failure_code: str | None = None
+    finish_reason: ProviderFinishReason | None = None
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+    cache_hit_tokens: int | None = Field(default=None, ge=0)
+    cache_miss_tokens: int | None = Field(default=None, ge=0)
+    reasoning_tokens: int | None = Field(default=None, ge=0)
+    estimated_cost_usd: Decimal | None = Field(default=None, ge=0)
+    provider_request_id: str | None = None
 
 
 class CanaryTranscriptEntry(_StrictModel):
@@ -439,16 +633,27 @@ class CanaryCaseEvidence(_StrictModel):
     freshness_verified: bool
     persistence: dict[str, JsonValue]
     finish_reasons: tuple[ProviderFinishReason, ...]
-    deterministic_status: Literal["passed", "failed", "unknown"]
+    deterministic_status: Literal["passed", "failed", "partial", "skipped", "unknown"]
     failure_attribution: str | None = None
     manual_review_status: CanaryManualReviewStatus
     requires_drc_fluent_review: bool = False
+    provider_request_indexes: tuple[int, ...] = ()
+    m1_status: str | None = None
+    replay: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 class CanaryBridgeEvidence(_StrictModel):
     contract_version: Literal["mbb-ai5b-contract-v2"] = AI5B_CONTRACT_VERSION
     bridge_version: Literal["mbb-ai5b2-bridge-v1"] = AI5B2_BRIDGE_VERSION
     policy_version: Literal["mbb-ai-policy-v2-ai4-v3"] = AI_SYSTEM_POLICY_VERSION
+    run_id: str | None = None
+    baseline_commit: str | None = None
+    authorization_record_id: str | None = None
+    authorization_metadata: dict[str, JsonValue] = Field(default_factory=dict)
+    pricing_metadata: dict[str, JsonValue] = Field(default_factory=dict)
+    reviewer_assignment_metadata: dict[str, JsonValue] = Field(default_factory=dict)
+    external_effect_guards: dict[str, JsonValue] = Field(default_factory=dict)
+    limits: dict[str, JsonValue] = Field(default_factory=dict)
     evidence_label: CanaryProviderMode
     provider: str
     model: str
@@ -459,12 +664,23 @@ class CanaryBridgeEvidence(_StrictModel):
     configured_outer_watchdog_seconds: int
     configured_stage_ceiling_seconds: int
     reserved_provider_calls: int = Field(ge=0)
+    reserved_durable_actions: int = Field(default=0, ge=0)
     reserved_tokens: int = Field(ge=0)
     reserved_cost_usd: Decimal = Field(ge=0)
     observed_total_tokens: int = Field(ge=0)
     real_provider_network_calls: int = Field(default=0, ge=0)
-    actual_provider_api_tokens: int = Field(default=0, ge=0)
-    actual_provider_cost_usd: Decimal = Field(default=Decimal("0"), ge=0)
+    actual_provider_api_tokens: int | None = Field(default=0, ge=0)
+    actual_provider_cost_usd: Decimal | None = Field(default=Decimal("0"), ge=0)
+    provider_calls: tuple[CanaryProviderCallEvidence, ...] = ()
+    deadline_evidence: tuple[dict[str, JsonValue], ...] = ()
+    stop_reason: str | None = None
+    failed_case_id: str | None = None
+    failed_request_index: int | None = Field(default=None, ge=1)
+    skipped_case_ids: tuple[str, ...] = ()
+    replay_evidence: dict[str, JsonValue] = Field(default_factory=dict)
+    protected_snapshots: dict[str, JsonValue] = Field(default_factory=dict)
+    cleanup: dict[str, JsonValue] = Field(default_factory=dict)
+    evidence_state: Literal["partial", "final"] = "final"
     cases: tuple[CanaryCaseEvidence, ...]
     overall_decision: Literal[
         "offline_bridge_validated",
