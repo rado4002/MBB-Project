@@ -45,6 +45,8 @@ from app.ai.canary_bridge import (  # noqa: E402
     CanaryProviderMode,
     CanaryReviewerAssignmentRecord,
     CanaryStageStopLatch,
+    CanaryToolTraceRecord,
+    CanaryToolTraceRecorder,
     CanaryTranscriptEntry,
     CumulativeBudgetProvider,
     conservative_json_request_reservation,
@@ -116,6 +118,9 @@ class CanaryCLIOverrides:
     credential_loader: Callable[[], str]
     transport_builder: Callable[[str, CanaryBusinessTruth], Any]
     after_prepare: Callable[[DisposablePostgresRuntime], None] | None = None
+    tool_trace_persist_hook: (
+        Callable[[tuple[CanaryToolTraceRecord, ...], bool], None] | None
+    ) = None
     provider_mode: CanaryProviderMode = CanaryProviderMode.offline_mocked_http
 
 
@@ -541,6 +546,7 @@ def _closed_application_runtime(
     latch: CanaryStageStopLatch,
     budgeted: CumulativeBudgetProvider,
     runtime_evidence: CanaryRuntimeEvidence,
+    tool_trace_recorder: CanaryToolTraceRecorder,
 ) -> Iterator[None]:
     import app.adapters as adapters
     import app.ai.turn as turn_module
@@ -563,6 +569,7 @@ def _closed_application_runtime(
         "m1_settings": m1.settings,
         "require_offer": offer_service.require_product_offer,
         "turn_service": turn_module.get_ai_turn_service,
+        "capability_audit_summary": turn_module._capability_audit_summary,
     }
 
     def blocked(name: str):
@@ -581,7 +588,15 @@ def _closed_application_runtime(
 
     async def record_offer(session, sellable_item_id):
         runtime_evidence.terminal_offer_reads.append(sellable_item_id)
-        return await originals["require_offer"](session, sellable_item_id)
+        try:
+            offer = await originals["require_offer"](session, sellable_item_id)
+        except Exception:
+            if tool_trace_recorder.current_capability_name() == "request_human_handoff":
+                tool_trace_recorder.record_terminal_refresh_failure(sellable_item_id)
+            raise
+        if tool_trace_recorder.current_capability_name() == "request_human_handoff":
+            tool_trace_recorder.record_terminal_refresh(sellable_item_id, offer)
+        return offer
 
     handoff = AI_CAPABILITY_REGISTRY.resolve("request_human_handoff")
     assert handoff is not None and handoff.transactional_handler is not None
@@ -602,8 +617,18 @@ def _closed_application_runtime(
         for name in ("get_product_details", "request_human_handoff", "search_products")
     )
 
+    def recording_capability_audit_summary(tool_call, execution_result):
+        summary = originals["capability_audit_summary"](tool_call, execution_result)
+        tool_trace_recorder.record_execution(tool_call, execution_result)
+        return summary
+
+    class EvaluationAITurnService(turn_module.AITurnService):
+        async def generate_finalized(self, turn):
+            with tool_trace_recorder.turn_scope(turn.turn_id):
+                return await super().generate_finalized(turn)
+
     def get_budgeted_turn_service():
-        return turn_module.AITurnService(
+        return EvaluationAITurnService(
             provider,
             capability_registry=capability_registry,
             authority_checker=turn_module._ai_authority_is_current,
@@ -626,6 +651,7 @@ def _closed_application_runtime(
             m1_maps_fanout_enabled=False,
         )
         offer_service.require_product_offer = record_offer
+        turn_module._capability_audit_summary = recording_capability_audit_summary
         turn_module.get_ai_turn_service = get_budgeted_turn_service
         yield
     finally:
@@ -640,6 +666,7 @@ def _closed_application_runtime(
         m1.celery_app.send_task = originals["send_task"]
         m1.settings = originals["m1_settings"]
         offer_service.require_product_offer = originals["require_offer"]
+        turn_module._capability_audit_summary = originals["capability_audit_summary"]
         turn_module.get_ai_turn_service = originals["turn_service"]
 
 
@@ -650,9 +677,15 @@ async def _supervised_application_runtime(
     latch: CanaryStageStopLatch,
     budgeted: CumulativeBudgetProvider,
     runtime_evidence: CanaryRuntimeEvidence,
+    tool_trace_recorder: CanaryToolTraceRecorder,
 ) -> AsyncIterator[None]:
     with _closed_application_runtime(
-        provider, factory, latch, budgeted, runtime_evidence
+        provider,
+        factory,
+        latch,
+        budgeted,
+        runtime_evidence,
+        tool_trace_recorder,
     ):
         try:
             yield
@@ -878,6 +911,7 @@ async def _dispatch_authorized_canaries(
     profile: AI5B2BudgetProfile,
     selection: AI5B2ProviderSelection,
     snapshot_before: dict[str, str],
+    tool_trace_recorder: CanaryToolTraceRecorder,
 ) -> CanaryBridgeEvidence:
     from app.tasks import m1
 
@@ -887,7 +921,12 @@ async def _dispatch_authorized_canaries(
     started_at = datetime.now(timezone.utc)
     namespace = uuid.uuid5(uuid.NAMESPACE_URL, f"mbb-ai5b2:{run_id}")
     async with _supervised_application_runtime(
-        provider, factory, latch, budgeted, runtime_evidence
+        provider,
+        factory,
+        latch,
+        budgeted,
+        runtime_evidence,
+        tool_trace_recorder,
     ):
         for spec in AI5B2_CANARIES:
             if latch.stopped:
@@ -949,6 +988,7 @@ async def _dispatch_authorized_canaries(
                     "tickets_added": len(after_tickets) - len(before_tickets),
                 }
                 replay_evidence = replay
+                tool_trace_recorder.record_replay(case_id=spec.case_id, replay=replay)
                 if replay != {
                     "status": "duplicate_ignored",
                     "provider_requests_added": 0,
@@ -985,6 +1025,7 @@ async def _dispatch_authorized_canaries(
                         failure="stage_stopped_before_case",
                     )
                 )
+        tool_trace_recorder.assert_complete()
     snapshot_after = await _protected_snapshot(factory)
     snapshots_match = snapshot_after == snapshot_before
     if not snapshots_match:
@@ -1091,6 +1132,8 @@ async def _dispatch_authorized_canaries(
             else Decimal("0")
         ),
         provider_calls=tuple(budgeted.call_evidence),
+        tool_traces=tool_trace_recorder.records,
+        tool_trace_complete=tool_trace_recorder.complete,
         deadline_evidence=tuple(
             item.model_dump(mode="json") for item in provider.deadline_evidence
         ),
@@ -1160,6 +1203,7 @@ async def _execute_isolated_stage(
     args: argparse.Namespace,
     runtime: DisposablePostgresRuntime,
     overrides: CanaryCLIOverrides | None,
+    partial_evidence_path: Path,
 ) -> CanaryBridgeEvidence:
     engine, factory = await _install_database_runtime(runtime)
     try:
@@ -1184,6 +1228,38 @@ async def _execute_isolated_stage(
         )
         holder: dict[str, object] = {}
 
+        def persist_tool_trace(
+            records: tuple[CanaryToolTraceRecord, ...], complete: bool
+        ) -> None:
+            if overrides and overrides.tool_trace_persist_hook:
+                overrides.tool_trace_persist_hook(records, complete)
+            budgeted = holder.get("budgeted")
+            _write_atomic(
+                partial_evidence_path,
+                {
+                    "run_id": args.run_id,
+                    "baseline_commit": selection.current_baseline_commit,
+                    "evidence_state": "partial",
+                    "tool_traces": records,
+                    "tool_trace_complete": complete,
+                    "provider_calls": (
+                        budgeted.call_evidence
+                        if isinstance(budgeted, CumulativeBudgetProvider)
+                        else []
+                    ),
+                },
+            )
+
+        from app.ai.capabilities import AI_CAPABILITY_REGISTRY
+
+        tool_trace_recorder = CanaryToolTraceRecorder(
+            run_id=args.run_id or "invalid-run",
+            registry=AI_CAPABILITY_REGISTRY,
+            stop_latch=latch,
+            persist=persist_tool_trace,
+        )
+        holder["tool_trace_recorder"] = tool_trace_recorder
+
         def live_factory(credential: str) -> ProviderTurnAdapter:
             deepseek = DeepSeekAdapter(
                 api_key=credential,
@@ -1206,6 +1282,7 @@ async def _execute_isolated_stage(
                         max_output_tokens=request.max_output_tokens,
                     )
                 ),
+                tool_trace_recorder=tool_trace_recorder,
             )
             controller = EvaluationDeadlineAdapter(
                 budgeted,
@@ -1232,6 +1309,7 @@ async def _execute_isolated_stage(
                 profile=profile,
                 selection=selection,
                 snapshot_before=snapshot_before,
+                tool_trace_recorder=tool_trace_recorder,
             )
 
         try:
@@ -1247,6 +1325,7 @@ async def _execute_isolated_stage(
         except BaseException as exc:
             budgeted = holder.get("budgeted")
             controller = holder.get("controller")
+            trace_recorder = holder.get("tool_trace_recorder")
             if isinstance(budgeted, CumulativeBudgetProvider):
                 latch.stop(
                     exc.safe_code
@@ -1262,6 +1341,21 @@ async def _execute_isolated_stage(
                     "failed_case_id": latch.failed_case_id,
                     "failed_request_index": latch.failed_request_index,
                     "provider_calls": budgeted.call_evidence,
+                    "tool_traces": (
+                        trace_recorder.records
+                        if isinstance(trace_recorder, CanaryToolTraceRecorder)
+                        else []
+                    ),
+                    "tool_trace_complete": (
+                        trace_recorder.complete
+                        if isinstance(trace_recorder, CanaryToolTraceRecorder)
+                        else False
+                    ),
+                    "tool_trace_persistence_failed": (
+                        trace_recorder.persistence_failed
+                        if isinstance(trace_recorder, CanaryToolTraceRecorder)
+                        else False
+                    ),
                     "reserved_provider_calls": budgeted.ledger.provider_calls,
                     "reserved_durable_actions": budgeted.ledger.durable_actions,
                     "reserved_tokens": budgeted.ledger.reserved_tokens,
@@ -1329,7 +1423,12 @@ def main(
             _test_overrides.after_prepare(runtime)
         with _activated_runtime(runtime):
             report = asyncio.run(
-                _execute_isolated_stage(args, runtime, _test_overrides)
+                _execute_isolated_stage(
+                    args,
+                    runtime,
+                    _test_overrides,
+                    evidence_directory / "partial.json",
+                )
             )
         _write_atomic(evidence_directory / "partial.json", report)
     except BaseException as exc:

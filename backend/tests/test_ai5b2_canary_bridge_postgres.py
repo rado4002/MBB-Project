@@ -110,76 +110,130 @@ def _mocked_cli_transport(
     failure_index: int | None = None,
     missing_usage: bool = False,
     under_reservation_index: int | None = None,
+    outcome_probe: bool = False,
 ):
     def build(credential, truth):
-        response_tools = (
-            ("b2_c01_offer", "search_products", {"query": "air fryer"}),
+        response_tool_rounds = (
             (
-                "b2_c01_state",
-                "propose_commercial_state_update",
-                {
-                    "response_text": (
-                        "Le MBB Test Air Fryer 6L coûte 55 USD, est disponible "
-                        "et vendable maintenant."
-                    ),
-                    "state_update": {
-                        "selected_sellable_item_ids": [str(truth.available_item_id)],
-                        "purchase_intent": "considering",
-                        "next_objective": "clarify_choice",
+                ("b2_c01_offer", "search_products", {"query": "air fryer"}),
+                (
+                    "b2_c01_refined_offer",
+                    "search_products",
+                    {
+                        "query": "air fryer",
+                        "max_budget": 55,
+                        "budget_currency": "USD",
                     },
-                },
+                ),
             ),
             (
-                "b2_c02_handoff",
-                "request_human_handoff",
-                {
-                    "reason_category": "qualified_purchase_intent",
-                    "selected_sellable_item_id": str(truth.available_item_id),
-                    "purchase_intent": "ready",
-                },
-            ),
-            (
-                "b2_c03_offer",
-                "get_product_details",
-                {"sellable_item_id": str(truth.unavailable_item_id)},
-            ),
-            (
-                "b2_c03_state",
-                "propose_commercial_state_update",
-                {
-                    "response_text": (
-                        "Le modèle 8L est en rupture de stock; je ne peux pas le "
-                        "déclarer disponible."
-                    ),
-                    "state_update": {"next_objective": "retrieve_options"},
-                },
-            ),
-            (
-                "b2_c04_offer",
-                "search_products",
-                {
-                    "query": "air fryer",
-                    "max_budget": 45,
-                    "budget_currency": "USD",
-                },
-            ),
-            (
-                "b2_c04_state",
-                "propose_commercial_state_update",
-                {
-                    "response_text": (
-                        "Na budget ya 45 dollars, option moins chère ezali te na "
-                        "offre actuelle."
-                    ),
-                    "state_update": {
-                        "current_goal": "Trouver un air fryer moins cher",
-                        "decision_constraints": [{"kind": "budget", "value": "45 USD"}],
-                        "purchase_intent": "considering",
-                        "next_objective": "retrieve_options",
+                (
+                    "b2_c01_state",
+                    "propose_commercial_state_update",
+                    {
+                        "response_text": (
+                            "Le MBB Test Air Fryer 6L coûte 55 USD, est disponible "
+                            "et vendable maintenant."
+                        ),
+                        "state_update": {
+                            "selected_sellable_item_ids": [
+                                str(truth.available_item_id)
+                            ],
+                            "purchase_intent": "considering",
+                            "next_objective": "clarify_choice",
+                        },
                     },
-                },
+                ),
+            ),
+            (
+                (
+                    "b2_c02_handoff",
+                    "request_human_handoff",
+                    {
+                        "reason_category": "qualified_purchase_intent",
+                        "selected_sellable_item_id": str(truth.available_item_id),
+                        "purchase_intent": "ready",
+                    },
+                ),
+                (
+                    "b2_c02_after_terminal",
+                    "search_products",
+                    {"query": "must not execute after terminal handoff"},
+                ),
+            ),
+            (
+                (
+                    "b2_c03_offer",
+                    "get_product_details",
+                    {"sellable_item_id": str(truth.unavailable_item_id)},
+                ),
+            ),
+            (
+                (
+                    "b2_c03_state",
+                    "propose_commercial_state_update",
+                    {
+                        "response_text": (
+                            "Le modèle 8L est en rupture de stock; je ne peux pas le "
+                            "déclarer disponible."
+                        ),
+                        "state_update": {"next_objective": "retrieve_options"},
+                    },
+                ),
+            ),
+            (
+                (
+                    "b2_c04_offer",
+                    "search_products",
+                    {
+                        "query": "air fryer",
+                        "max_budget": 45,
+                        "budget_currency": "USD",
+                    },
+                ),
+                (
+                    "b2_c04_offer_repeat",
+                    "search_products",
+                    {
+                        "query": "air fryer",
+                        "max_budget": 45,
+                        "budget_currency": "USD",
+                    },
+                ),
+            ),
+            (
+                (
+                    "b2_c04_state",
+                    "propose_commercial_state_update",
+                    {
+                        "response_text": (
+                            "Na budget ya 45 dollars, option moins chère ezali te na "
+                            "offre actuelle."
+                        ),
+                        "state_update": {
+                            "current_goal": "Trouver un air fryer moins cher",
+                            "decision_constraints": [
+                                {"kind": "budget", "value": "45 USD"}
+                            ],
+                            "purchase_intent": "considering",
+                            "next_objective": "retrieve_options",
+                        },
+                    },
+                ),
             ),
         )
+        if outcome_probe:
+            response_tool_rounds = (
+                (
+                    ("b2_denied", "unregistered_capability", {"secret": "omit"}),
+                    (
+                        "b2_failed",
+                        "get_product_details",
+                        {"sellable_item_id": str(uuid.uuid4())},
+                    ),
+                ),
+                *response_tool_rounds[1:],
+            )
 
         def handler(request: httpx.Request) -> httpx.Response:
             assert request.headers["Authorization"] == f"Bearer {credential}"
@@ -187,7 +241,7 @@ def _mocked_cli_transport(
             index = len(payloads) - 1
             if failure_index == index and not missing_usage:
                 return httpx.Response(200, json={"malformed": True})
-            call_id, tool_name, arguments = response_tools[index]
+            tool_calls = response_tool_rounds[index]
             response = {
                 "id": f"chatcmpl_cli_{index}",
                 "object": "chat.completion",
@@ -210,6 +264,7 @@ def _mocked_cli_transport(
                                         "arguments": json.dumps(arguments),
                                     },
                                 }
+                                for call_id, tool_name, arguments in tool_calls
                             ],
                         },
                         "finish_reason": "tool_calls",
@@ -901,9 +956,66 @@ def test_actual_cli_orchestrates_complete_mocked_stage_and_cleanup(
     assert "55 USD" in evidence["cases"][0]["transcript"][1]["content"]
     assert evidence["cases"][0]["commercial_evaluation"]["status"] == "passed"
     assert all(
-        call["reservation_method"] == "utf8_wire_bytes_plus_json_nodes_v1"
+        call["reservation_method"] == "utf8_wire_bytes_plus_json_nodes_estimate_v1"
         for call in evidence["provider_calls"]
     )
+    assert evidence["tool_trace_complete"] is True
+    traces = evidence["tool_traces"]
+    assert [item["sequence"] for item in traces] == list(range(1, len(traces) + 1))
+    c01_searches = [
+        item
+        for item in traces
+        if item["case_id"] == "B2-C01-FR-FRESH-P6"
+        and item["capability_name"] == "search_products"
+    ]
+    assert [item["search_relationship"] for item in c01_searches] == [
+        "first_search",
+        "refined_search",
+    ]
+    assert c01_searches[0]["provider_request_index"] == 1
+    assert c01_searches[1]["provider_request_index"] == 1
+    assert c01_searches[0]["tool_call_id"] != c01_searches[1]["tool_call_id"]
+    assert c01_searches[0]["validated_arguments"]["max_budget"] is None
+    assert c01_searches[1]["validated_arguments"]["max_budget"] == "55"
+    assert (
+        c01_searches[0]["authoritative_result"]["items"][0]["current_usd_price"]
+        == "55.00"
+    )
+    assert (
+        c01_searches[0]["authoritative_result"]["items"][0]["availability"]
+        == "available"
+    )
+    c04_searches = [
+        item
+        for item in traces
+        if item["case_id"] == "B2-C04-SW-FR-BUDGET"
+        and item["capability_name"] == "search_products"
+    ]
+    assert [item["search_relationship"] for item in c04_searches] == [
+        "first_search",
+        "repeated_identical_search",
+    ]
+    refresh = next(item for item in traces if item["event_type"] == "terminal_refresh")
+    handoff = next(
+        item for item in traces if item["capability_name"] == "request_human_handoff"
+    )
+    assert refresh["tool_call_id"] == handoff["tool_call_id"]
+    assert refresh["authoritative_result"]["read_at"]
+    assert refresh["authoritative_result"]["inventory_updated_at"]
+    assert refresh["authoritative_result"]["price_effective_at"]
+    assert refresh["authoritative_result"]["is_sellable_now"] is True
+    after_terminal = next(
+        item for item in traces if item["tool_call_id"] == "b2_c02_after_terminal"
+    )
+    assert after_terminal["outcome"] == "not_executed"
+    assert after_terminal["safe_error_category"] is None
+    assert after_terminal["safe_error_code"] == "terminal_capability_succeeded"
+    assert after_terminal["validated_arguments"] is None
+    replay_trace = next(
+        item for item in traces if item["event_type"] == "replay_suppression"
+    )
+    assert replay_trace["outcome"] == "suppressed"
+    assert replay_trace["authoritative_result"]["provider_requests_added"] == 0
     assert evidence["cases"][1]["persistence"]["ticket_count"] == 1
     assert evidence["cases"][1]["persistence"]["audit_transitions"]
     assert "rupture" in evidence["cases"][2]["transcript"][1]["content"]
@@ -924,6 +1036,76 @@ def test_actual_cli_orchestrates_complete_mocked_stage_and_cleanup(
     assert "CLI_HIDDEN_REASONING_MUST_NOT_PERSIST" not in evidence_path.read_text(
         encoding="utf-8"
     )
+    assert '"secret":"omit"' not in evidence_path.read_text(encoding="utf-8")
+
+
+def test_actual_cli_distinguishes_denied_and_failed_capabilities(
+    tmp_path, capsys
+) -> None:
+    run_id = "synthetic-cli-tool-outcomes-ai5b2"
+    payloads: list[dict] = []
+    result = bridge_main(
+        _cli_arguments(tmp_path, run_id),
+        _test_overrides=CanaryCLIOverrides(
+            credential_loader=lambda: "inert-cli-test-credential",
+            transport_builder=_mocked_cli_transport(payloads, outcome_probe=True),
+        ),
+    )
+    capsys.readouterr()
+    evidence = json.loads(
+        (tmp_path / run_id / "evidence.json").read_text(encoding="utf-8")
+    )
+
+    assert result == 1 and len(payloads) == 2
+    outcomes = {
+        item["tool_call_id"]: item
+        for item in evidence["tool_traces"]
+        if item["event_type"] == "capability_execution"
+    }
+    assert outcomes["b2_denied"]["outcome"] == "denied"
+    assert outcomes["b2_denied"]["safe_error_category"] == "unknown_tool"
+    assert outcomes["b2_denied"]["validated_arguments"] is None
+    assert outcomes["b2_failed"]["outcome"] == "failed"
+    assert outcomes["b2_failed"]["safe_error_category"] == "execution_failed"
+    assert outcomes["b2_failed"]["safe_error_code"] == "sellable_item_not_found"
+    assert outcomes["b2_failed"]["validated_arguments"]["sellable_item_id"]
+    serialized = json.dumps(evidence)
+    assert "omit" not in serialized
+    assert evidence["tool_trace_complete"] is True
+    assert evidence["cleanup"]["database_dropped"] is True
+    _assert_cleanup_observed(evidence["cleanup"])
+
+
+def test_actual_cli_trace_persistence_failure_stops_dispatch_and_survives_cleanup(
+    tmp_path, capsys
+) -> None:
+    run_id = "synthetic-cli-trace-failure-ai5b2"
+    payloads: list[dict] = []
+
+    def fail_trace_persistence(_records, _complete) -> None:
+        raise OSError("synthetic trace persistence failure")
+
+    result = bridge_main(
+        _cli_arguments(tmp_path, run_id),
+        _test_overrides=CanaryCLIOverrides(
+            credential_loader=lambda: "inert-cli-test-credential",
+            transport_builder=_mocked_cli_transport(payloads),
+            tool_trace_persist_hook=fail_trace_persistence,
+        ),
+    )
+    capsys.readouterr()
+    evidence_path = tmp_path / run_id / "evidence.json"
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+
+    assert result == 1 and len(payloads) == 1
+    assert evidence["stop_reason"] == "tool_trace_persistence_failed"
+    assert evidence["failed_request_index"] == 1
+    assert evidence["tool_trace_complete"] is False
+    assert evidence["tool_trace_persistence_failed"] is True
+    assert evidence["evidence_state"] == "final"
+    assert evidence["database_lifecycle"]["database_dropped"] is True
+    assert evidence["database_lifecycle"]["temporary_directory_removed"] is True
+    _assert_cleanup_observed(evidence["database_lifecycle"])
 
 
 @pytest.mark.parametrize(

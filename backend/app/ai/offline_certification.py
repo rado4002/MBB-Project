@@ -584,6 +584,8 @@ def redact_evidence(value: object) -> object:
     """Remove secret/hidden-reasoning fields while preserving synthetic Unicode."""
     if isinstance(value, BaseModel):
         value = value.model_dump(mode="json")
+    if isinstance(value, Decimal):
+        return str(value)
     if isinstance(value, Mapping):
         return {
             str(key): redact_evidence(item)

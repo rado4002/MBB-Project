@@ -239,6 +239,33 @@ def test_live_validation_precedes_credentials_and_dispatch() -> None:
     assert synthetic_live.value.safe_code == "synthetic_record_forbidden_in_live_mode"
     assert credential_loads == 1 and constructions == 1
 
+    live_records = _synthetic_dispatch_records()
+    live_records["authorization"] = live_records["authorization"].model_copy(
+        update={"synthetic": False}
+    )
+    live_records["pricing_verification"] = live_records[
+        "pricing_verification"
+    ].model_copy(update={"synthetic": False})
+    live_records["reviewer_assignment"] = live_records[
+        "reviewer_assignment"
+    ].model_copy(update={"synthetic": False})
+    with pytest.raises(AI5B2BridgeConfigurationError) as budget_decision:
+        select_canary_provider(
+            AI5B2ProviderSelection(
+                mode=CanaryProviderMode.live,
+                explicit_live_opt_in=True,
+                run_id="synthetic-ai5b2-run",
+                **live_records,
+            ),
+            offline_factory=lambda: _SequenceAdapter(_result()),
+            credential_loader=load_credential,
+            live_factory=construct,
+        )
+    assert budget_decision.value.safe_code == (
+        "human_budget_contract_decision_required"
+    )
+    assert credential_loads == 1 and constructions == 1
+
 
 @pytest.mark.asyncio
 async def test_run_budget_is_cumulative_and_missing_usage_fails_safely() -> None:
@@ -491,6 +518,9 @@ def test_request_reservation_grows_with_tools_results_and_continuation() -> None
     )
     assert second.input_tokens > first.input_tokens
     assert second.total_tokens == second.input_tokens + 512
+    assert second.version == "mbb-ai5b2-request-estimate-v3"
+    assert second.method == "utf8_wire_bytes_plus_json_nodes_estimate_v1"
+    assert second.basis == "admission_estimate_not_verified_maximum"
     assert "hidden" not in second.model_dump_json()
 
     continuation_request = ProviderTurnRequest(

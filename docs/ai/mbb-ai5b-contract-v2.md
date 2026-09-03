@@ -21,25 +21,64 @@ sellable item, fresh availability/sellability, authoritative USD/CDF prices,
 negation, contradictions and unsupported commercial additions. Proven false
 claims fail; unrecognized formulations require review and cannot pass.
 
-`mbb-ai5b2-request-reservation-v2` replaces the fixed 2,048-input-token
-assumption. Immediately before each transport dispatch, the bridge builds the
-complete DeepSeek request, including policy, messages, tool schemas/results,
-history and transient provider continuation content. The reservation uses the
-UTF-8 byte length of that JSON plus one token for every serialized JSON
-key/value/container and two request-boundary tokens, then adds the full
-requested output allowance. This bound assumes byte-fallback tokenization and
-no more than one provider framing token per serialized node plus the two
-boundaries; the bridge records the method and detects any returned-usage
-overrun rather than treating the assumption as proven by a successful call.
-Continuation content is counted only in memory and is not retained.
+AI-5B2-R2 corrects the unsupported maximum-token claim and adds evaluation-owned
+tool traces. The original `mbb-ai5b2-request-reservation-v2` framing allowance
+had no verified DeepSeek basis. Its replacement,
+`mbb-ai5b2-request-estimate-v3`, builds the complete DeepSeek client request,
+including policy, messages, tool schemas/results, history and transient
+provider continuation content. It records UTF-8 JSON bytes plus JSON nodes and
+the full requested output allowance as
+`utf8_wire_bytes_plus_json_nodes_estimate_v1`. This is an admission estimate,
+not a tokenizer result, proven maximum, pre-billing guarantee or provider quota.
+Continuation content is measured only in memory and is not retained.
 
-Known complete usage settles its request reservation before another request
-may reserve capacity. Ceiling checks use settled actual usage/cost plus all
-unresolved reservations plus the proposed reservation, without double
-counting. Missing, inconsistent, timed-out or otherwise uncertain usage keeps
-its reservation. A returned total or conservatively calculated cost above its
-reservation records a reservation violation, latches the stage and prevents
-later dispatch.
+The bounded official-source investigation on 2026-09-03 checked:
+
+- DeepSeek API **Token & Token Usage**, current page, which gives approximate
+  character ratios, warns that tokenization varies by model, provides the
+  `deepseek_v4_tokenizer.zip` offline demo, and identifies usage returned by the
+  API as the actual count:
+  <https://api-docs.deepseek.com/quick_start/token_usage/>;
+- DeepSeek API **Models & Pricing**, current page, which maps hosted alias
+  `deepseek-v4-flash` to `DeepSeek-V4-Flash-0731`, confirms tool calling and
+  bills model input and output tokens:
+  <https://api-docs.deepseek.com/quick_start/pricing/>;
+- the official `deepseek-ai/DeepSeek-V4-Flash` model resource and its encoding
+  README at revision `a7aaed80dd2df27620eb534454253ea25eb11c7a`, which
+  supplies a local tokenizer plus an
+  OpenAI-message renderer covering multi-turn, thinking, tool definitions,
+  tool calls and tool results:
+  <https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash> and
+  <https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/a7aaed80dd2df27620eb534454253ea25eb11c7a/encoding/README.md>.
+
+These sources establish a relevant local model tokenizer/renderer and
+post-response usage accounting. They do not document a hosted preflight token
+count endpoint, state that the hosted Chat Completions service uses that exact
+renderer without additional server framing, or give a hard upper bound for the
+complete hosted prompt. Local tokenizer parity, raw JSON size and HTTPX wire
+serialization therefore cannot establish the required pre-dispatch maximum.
+The 512-token limit bounds requested completion only, not input.
+
+Known complete returned usage settles its request estimate before another
+request may be admitted. Ceiling checks use settled returned usage/cost plus
+all unresolved estimates plus the proposed estimate, without double counting.
+Missing, inconsistent, timed-out or otherwise uncertain usage keeps its
+estimate unresolved. Returned usage or calculated cost above its estimate
+records an under-reservation violation, latches the stage and prevents later
+dispatch. That stop cannot undo tokens already consumed or billed by the
+request that exposed the under-reservation.
+
+Live readiness is blocked pending one Human decision on this proposed budget
+contract: retain the 21-request, 40,000 prompt-plus-completion token, USD 0.05,
+512 completion-token, zero-retry and existing durable-action ceilings; use the
+complete-client-payload estimate only for admission; settle from complete API
+usage when returned; retain unresolved estimates and stop on missing or
+uncertain usage; and stop after an under-reservation while acknowledging that
+one already-accepted request can exceed the token or calculated-cost ceiling.
+Approval means accepting that single-request overrun risk, not reclassifying
+the estimate as a guarantee. Otherwise a compatible provider-enforced
+preflight count or quota is required. No live run may load a credential or
+dispatch while this decision remains unresolved.
 
 The same run's `154 000 FC` claim is supported by the disposable fixture's
 USD 55.00 price and current USD-to-CDF rate of 2,800, the existing
@@ -48,6 +87,10 @@ by `search_products`. This is fixture-backed provenance, not a substituted
 market rate. The retained evidence records two successful `search_products`
 executions but not their arguments or result bodies, so whether the second
 search refined or duplicated the first is unverifiable from retained evidence.
+That source result remains immutable. Its separate
+`mbb-ai5b2-truth-evaluator-v2` re-evaluation passed, and the project owner
+accepted that exact historical response. No numeric Human score is inferred;
+C02--C04 and future responses remain unreviewed.
 
 ## Authority and boundaries
 
@@ -195,6 +238,26 @@ multilingual transcript evidence may retain the exact synthetic text.
 Redaction removes secret, credential, authorization, reasoning-content and
 continuation fields before serialization.
 
+AI-5B2-R2 additionally records an ordered evaluation-only tool trace. Each
+capability record carries the run, case, turn, provider-request, tool-round and
+tool-call identifiers that are actually available; the global sequence;
+validated allowlisted arguments; success, safe failure, denial or intentional
+non-execution; and allowlisted authoritative result fields actually exposed to
+the model. Product results include identity, current USD/CDF quote fields,
+availability, offer status and sellability. The trace states when authoritative
+timestamps are not part of the model-visible projection. A separate
+transaction-owned terminal-refresh record captures the Product Offer's read,
+price, inventory and exchange-rate timestamps delivered to the handoff handler.
+Exact inbound replay suppression is a separate evaluation-control event.
+
+The recorder observes the real capability execution result; it does not
+re-execute a tool or reconstruct output from a later database snapshot. It is
+installed only in the guarded evaluation runtime, leaving production audit
+privacy exclusions unchanged. Every trace update is redacted and atomically
+written to partial evidence outside the repository and disposable database.
+A collection, association or persistence failure latches the stage before a
+subsequent provider dispatch and marks trace completeness false.
+
 Deadline-expiry evidence is separate from scripted-call latency evidence. It
 contains the enforced per-request deadline, virtual start and expiry times,
 virtual elapsed time, independently measured wall-clock time, normalized
@@ -239,9 +302,15 @@ longer evidenced merely by classifying the number 60,000.
 
 ## Budgets and stop rules
 
-All ceilings are reserved before the next provider call or durable action.
-Crossing a call, output-token, total-token, cost, wall-clock or durable-action
-ceiling stops before that activity. Automatic provider retries are zero.
+AI-5B1 synthetic ceilings are reserved before the next scripted provider call
+or durable action. Its deterministic token/cost fixtures can stop before their
+synthetic ceilings. Automatic provider retries are zero.
+
+For future AI-5B2, provider-call, requested-output and durable-action ceilings
+can stop before dispatch/action. Input-token, total-token and cost admission use
+the explicitly labeled estimate described above; without the pending Human
+decision or a provider-enforced mechanism, they are not guaranteed pre-billing
+caps. Returned usage can stop only subsequent dispatches.
 
 AI-5B1 synthetic accounting uses a maximum of 21 scripted provider calls,
 40,000 synthetic prompt-plus-completion tokens, USD 0.05 reserved synthetic
@@ -326,10 +395,11 @@ create/migrate/seed/test/drop/stop/remove lifecycle:
 python scripts/run_ai5b2_canary_bridge.py --offline-postgres
 ```
 
-Ambient credentials never activate live mode. Future live provider selection
-requires an explicit live flag, safe run identifier, exact frozen case set,
-validated cumulative budget, disabled business effects, newly verified
-official pricing and an assigned Human reviewer before credential loading.
+Ambient credentials never activate live mode. Live selection is currently
+blocked by `human_budget_contract_decision_required`. After that decision, a
+future selection would still require an explicit live flag, safe run identifier,
+exact frozen case set, disabled business effects, newly verified official
+pricing and an assigned Human reviewer before credential loading.
 The authorization record is bound to the run identifier, current Git baseline
 and exact frozen case set. Pricing-verification and reviewer-assignment records
 are explicit metadata; reviewer assignment is not completed review. Live mode
@@ -360,14 +430,16 @@ AITurnService behavior.
 The CLI atomically writes redacted partial and final evidence outside both the
 repository and disposable database directory. Evidence includes run bindings,
 synthetic fixture truth, transcripts, capability/audit/ownership/handoff/replay
-state, protected snapshot hashes, per-call reservations, returned usage and
-latency, stop/skipped-case fields, and final cleanup. Absent usage remains null
-while its pre-call reservation is retained; late usage observed after a timeout
-is recorded without making the discarded completion eligible. Hidden reasoning,
+state, protected snapshot hashes, per-call admission estimates, returned usage,
+ordered tool traces and latency, stop/skipped-case fields, and final cleanup.
+Absent usage remains null while its pre-call estimate is retained; late usage
+observed after a timeout is recorded without making the discarded completion
+eligible. Hidden reasoning,
 credentials and continuation state remain excluded. This does not itself
-authorize a run: live flags and non-synthetic authorization, official-pricing
-and assigned Human-reviewer records must still come from a fresh authorization
-bound to the final commit.
+authorize a run: the budget-contract decision remains unresolved, and later
+live flags plus non-synthetic authorization, official-pricing and assigned
+Human-reviewer records must come from a fresh authorization bound to the final
+commit.
 
 Offline mocked-HTTP certification uses the same guarded stage function with an
 inert credential loader and records explicitly marked synthetic. All four cases
@@ -377,11 +449,11 @@ runner-owned disposable PostgreSQL database. Those seven mocked HTTP dispatches
 remain zero real provider network calls, zero provider API tokens and zero
 provider cost.
 
-Offline reservation tests use clearly synthetic fixture rates of USD 0.50 per
-million input tokens and USD 1.00 per million output tokens. Request-sized
-input reservations and the full 512-token output allowance are costed at
-those rates. These figures are not DeepSeek pricing and cannot be reused for
-live cost authorization.
+Offline admission-estimate tests use clearly synthetic fixture rates of USD
+0.50 per million input tokens and USD 1.00 per million output tokens.
+Request-sized input estimates and the full 512-token output allowance are
+costed at those rates. These figures are not DeepSeek pricing and cannot be
+reused for live cost authorization.
 
 The 12-second bridge deadline is evaluation-owned and applies separately to
 each provider request. The 60-second watchdog supervises one evaluation-owned

@@ -8,9 +8,12 @@ import re
 import time
 import unicodedata
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
-from typing import Literal, TypeVar
+from typing import Iterator, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -24,12 +27,20 @@ from app.ai.offline_certification import (
     OfflineBudgetLimits,
     redacted_evidence_json,
 )
+from app.ai.capabilities import (
+    CapabilityErrorCategory,
+    CapabilityExecutionResult,
+    CapabilityFailure,
+    CapabilityRegistry,
+    CapabilitySuccess,
+)
 from app.ai.policy import AI_SYSTEM_POLICY_VERSION
 from app.ai.provider_contract import (
     JsonValue,
     ProviderErrorCategory,
     ProviderFinishReason,
     ProviderReasoningProfile,
+    ProviderToolCall,
     ProviderTurnError,
     ProviderTurnRequest,
     ProviderTurnResult,
@@ -38,7 +49,7 @@ from app.ai.provider_contract import (
 
 AI5B2_BRIDGE_VERSION = "mbb-ai5b2-bridge-v2"
 AI5B2_TRUTH_EVALUATOR_VERSION = "mbb-ai5b2-truth-evaluator-v2"
-AI5B2_REQUEST_RESERVATION_VERSION = "mbb-ai5b2-request-reservation-v2"
+AI5B2_REQUEST_RESERVATION_VERSION = "mbb-ai5b2-request-estimate-v3"
 AI5B2_STAGE_CEILING_SECONDS = 600
 AI5B2_MAX_PROVIDER_CALLS = 21
 AI5B2_MAX_TOTAL_TOKENS = 40_000
@@ -136,11 +147,14 @@ class C01CommercialEvaluation(_StrictModel):
 
 
 class CanaryRequestReservation(_StrictModel):
-    version: Literal["mbb-ai5b2-request-reservation-v2"] = (
+    version: Literal["mbb-ai5b2-request-estimate-v3"] = (
         AI5B2_REQUEST_RESERVATION_VERSION
     )
-    method: Literal["utf8_wire_bytes_plus_json_nodes_v1"] = (
-        "utf8_wire_bytes_plus_json_nodes_v1"
+    method: Literal["utf8_wire_bytes_plus_json_nodes_estimate_v1"] = (
+        "utf8_wire_bytes_plus_json_nodes_estimate_v1"
+    )
+    basis: Literal["admission_estimate_not_verified_maximum"] = (
+        "admission_estimate_not_verified_maximum"
     )
     input_tokens: int = Field(ge=1)
     output_tokens: int = Field(ge=1, le=AI5B_MAX_OUTPUT_TOKENS)
@@ -328,16 +342,16 @@ def conservative_json_request_reservation(
     *,
     max_output_tokens: int,
 ) -> CanaryRequestReservation:
-    """Bound request tokens from complete wire data without retaining its content."""
+    """Estimate request tokens from complete wire data without retaining content."""
     serialized = json.dumps(
         payload,
         ensure_ascii=True,
         allow_nan=False,
     ).encode("utf-8")
     structural_nodes = _json_structural_nodes(payload)
-    # A byte-fallback tokenizer cannot produce more content tokens than bytes.
-    # One extra token per JSON key/value/container plus two request boundaries
-    # explicitly covers provider chat/tool framing without a text-length average.
+    # UTF-8 bytes and JSON nodes cover the complete client payload, including tool
+    # schemas/results and continuation. DeepSeek does not document this multiplier
+    # as a maximum for its hosted chat/tool framing, so this remains an estimate.
     input_tokens = len(serialized) + structural_nodes + 2
     return CanaryRequestReservation(
         input_tokens=input_tokens,
@@ -365,6 +379,551 @@ def provider_neutral_request_reservation(
         payload,
         max_output_tokens=request.max_output_tokens,
     )
+
+
+class CanaryToolTraceRecord(_StrictModel):
+    sequence: int = Field(ge=1)
+    event_type: Literal[
+        "capability_execution", "terminal_refresh", "replay_suppression"
+    ]
+    run_id: str
+    case_id: str
+    turn_id: str | None = None
+    provider_request_index: int | None = Field(default=None, ge=1)
+    provider_request_id: str | None = None
+    round_index: int | None = Field(default=None, ge=1)
+    tool_call_id: str | None = None
+    capability_name: str
+    validated_arguments: dict[str, JsonValue] | None = None
+    outcome: Literal["success", "failed", "denied", "not_executed", "suppressed"]
+    safe_error_category: str | None = None
+    safe_error_code: str | None = None
+    authoritative_result: dict[str, JsonValue] | None = None
+    result_destination: Literal[
+        "returned_to_model",
+        "terminal_turn_result",
+        "terminal_handoff_handler",
+        "evaluation_control",
+    ]
+    freshness_provenance: dict[str, JsonValue] = Field(default_factory=dict)
+    search_relationship: (
+        Literal[
+            "first_search",
+            "refined_search",
+            "different_search",
+            "repeated_identical_search",
+        ]
+        | None
+    ) = None
+
+
+@dataclass(frozen=True)
+class _PendingToolTrace:
+    case_id: str
+    provider_request_index: int
+    provider_request_id: str | None
+    round_index: int
+    tool_call: ProviderToolCall
+
+
+ToolTracePersistence = Callable[[tuple[CanaryToolTraceRecord, ...], bool], None]
+
+
+class CanaryToolTraceRecorder:
+    """Evaluation-owned observer for real capability results and replay control."""
+
+    _MODEL_FINALIZER = "propose_commercial_state_update"
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        registry: CapabilityRegistry,
+        stop_latch: CanaryStageStopLatch,
+        persist: ToolTracePersistence | None = None,
+    ) -> None:
+        self.run_id = run_id
+        self._registry = registry
+        self._stop_latch = stop_latch
+        self._persist_callback = persist
+        self._records: list[CanaryToolTraceRecord] = []
+        self._pending: list[_PendingToolTrace] = []
+        self._rounds_by_case: dict[str, int] = {}
+        self._turn_id: ContextVar[str | None] = ContextVar(
+            f"ai5b2_tool_trace_turn_{id(self)}", default=None
+        )
+        self.persistence_failed = False
+
+    @property
+    def records(self) -> tuple[CanaryToolTraceRecord, ...]:
+        return tuple(self._records)
+
+    @property
+    def complete(self) -> bool:
+        return not self._pending and not self.persistence_failed
+
+    @contextmanager
+    def turn_scope(self, turn_id: object) -> Iterator[None]:
+        token = self._turn_id.set(str(turn_id))
+        try:
+            yield
+        finally:
+            self._turn_id.reset(token)
+
+    def observe_provider_result(
+        self,
+        *,
+        case_id: str | None,
+        provider_request_index: int,
+        provider_request_id: str | None,
+        tool_calls: tuple[ProviderToolCall, ...],
+    ) -> None:
+        traceable = tuple(
+            call for call in tool_calls if call.capability_name != self._MODEL_FINALIZER
+        )
+        if not traceable:
+            return
+        if case_id is None:
+            self._fail("tool_trace_case_missing", provider_request_index)
+        assert case_id is not None
+        round_index = self._rounds_by_case.get(case_id, 0) + 1
+        self._rounds_by_case[case_id] = round_index
+        self._pending.extend(
+            _PendingToolTrace(
+                case_id=case_id,
+                provider_request_index=provider_request_index,
+                provider_request_id=provider_request_id,
+                round_index=round_index,
+                tool_call=call,
+            )
+            for call in traceable
+        )
+        self._persist(complete=False, request_index=provider_request_index)
+
+    def current_capability_name(self) -> str | None:
+        case_id = self._stop_latch.current_case_id
+        pending = next(
+            (item for item in self._pending if item.case_id == case_id), None
+        )
+        return None if pending is None else pending.tool_call.capability_name
+
+    def record_execution(
+        self,
+        tool_call: ProviderToolCall,
+        result: CapabilityExecutionResult,
+    ) -> None:
+        pending = next(
+            (
+                item
+                for item in self._pending
+                if item.case_id == self._stop_latch.current_case_id
+                and item.tool_call.call_id == tool_call.call_id
+                and item.tool_call.capability_name == tool_call.capability_name
+            ),
+            None,
+        )
+        if pending is None:
+            self._fail("tool_trace_association_missing", None)
+        assert pending is not None
+        self._pending.remove(pending)
+
+        validated_arguments = None
+        if isinstance(result, CapabilitySuccess) or (
+            isinstance(result, CapabilityFailure)
+            and result.error == CapabilityErrorCategory.execution_failed
+        ):
+            definition = self._registry.resolve(tool_call.capability_name)
+            if definition is None:
+                self._fail(
+                    "tool_trace_definition_missing", pending.provider_request_index
+                )
+            assert definition is not None
+            try:
+                validated = definition.input_model.model_validate(
+                    tool_call.arguments, strict=True
+                )
+                validated_arguments = validated.model_dump(mode="json")
+            except Exception:
+                self._fail(
+                    "tool_trace_validated_arguments_missing",
+                    pending.provider_request_index,
+                )
+
+        if isinstance(result, CapabilitySuccess):
+            outcome = "success"
+            safe_error_category = None
+            safe_error_code = None
+            authoritative_result = _trace_capability_output(
+                tool_call.capability_name, result.output
+            )
+        else:
+            outcome = (
+                "failed"
+                if result.error == CapabilityErrorCategory.execution_failed
+                else "denied"
+            )
+            safe_error_category = result.error.value
+            safe_error_code = result.safe_code
+            authoritative_result = None
+
+        record = self._record(
+            event_type="capability_execution",
+            case_id=pending.case_id,
+            turn_id=self._turn_id.get(),
+            provider_request_index=pending.provider_request_index,
+            provider_request_id=pending.provider_request_id,
+            round_index=pending.round_index,
+            tool_call_id=tool_call.call_id,
+            capability_name=tool_call.capability_name,
+            validated_arguments=validated_arguments,
+            outcome=outcome,
+            safe_error_category=safe_error_category,
+            safe_error_code=safe_error_code,
+            authoritative_result=authoritative_result,
+            result_destination=(
+                "terminal_turn_result"
+                if tool_call.capability_name == "request_human_handoff"
+                and isinstance(result, CapabilitySuccess)
+                else "returned_to_model"
+            ),
+            freshness_provenance=_capability_freshness_provenance(
+                tool_call.capability_name
+            ),
+            search_relationship=self._search_relationship(
+                tool_call.capability_name, validated_arguments
+            ),
+        )
+        self._append(record, request_index=pending.provider_request_index)
+
+        if (
+            isinstance(result, CapabilitySuccess)
+            and tool_call.capability_name == "request_human_handoff"
+        ):
+            remaining = [
+                item
+                for item in self._pending
+                if item.case_id == pending.case_id
+                and item.provider_request_index == pending.provider_request_index
+                and item.round_index == pending.round_index
+            ]
+            for skipped in remaining:
+                self._pending.remove(skipped)
+                self._append(
+                    self._record(
+                        event_type="capability_execution",
+                        case_id=skipped.case_id,
+                        turn_id=self._turn_id.get(),
+                        provider_request_index=skipped.provider_request_index,
+                        provider_request_id=skipped.provider_request_id,
+                        round_index=skipped.round_index,
+                        tool_call_id=skipped.tool_call.call_id,
+                        capability_name=skipped.tool_call.capability_name,
+                        validated_arguments=None,
+                        outcome="not_executed",
+                        safe_error_category=None,
+                        safe_error_code="terminal_capability_succeeded",
+                        authoritative_result=None,
+                        result_destination="returned_to_model",
+                    ),
+                    request_index=skipped.provider_request_index,
+                )
+
+    def record_terminal_refresh(self, sellable_item_id: object, offer: object) -> None:
+        pending = self._current_handoff_pending()
+        if pending is None:
+            return
+        self._append(
+            self._record(
+                event_type="terminal_refresh",
+                case_id=pending.case_id,
+                turn_id=self._turn_id.get(),
+                provider_request_index=pending.provider_request_index,
+                provider_request_id=pending.provider_request_id,
+                round_index=pending.round_index,
+                tool_call_id=pending.tool_call.call_id,
+                capability_name="product_offer_terminal_refresh",
+                validated_arguments={"sellable_item_id": str(sellable_item_id)},
+                outcome="success",
+                safe_error_category=None,
+                safe_error_code=None,
+                authoritative_result=_trace_product_offer(offer),
+                result_destination="terminal_handoff_handler",
+                freshness_provenance={
+                    "basis": "transaction_owned_product_offer_refresh",
+                    "observed_during_current_turn": True,
+                    "timestamps_captured_from_authoritative_read": True,
+                },
+            ),
+            request_index=pending.provider_request_index,
+        )
+
+    def record_terminal_refresh_failure(self, sellable_item_id: object) -> None:
+        pending = self._current_handoff_pending()
+        if pending is None:
+            return
+        self._append(
+            self._record(
+                event_type="terminal_refresh",
+                case_id=pending.case_id,
+                turn_id=self._turn_id.get(),
+                provider_request_index=pending.provider_request_index,
+                provider_request_id=pending.provider_request_id,
+                round_index=pending.round_index,
+                tool_call_id=pending.tool_call.call_id,
+                capability_name="product_offer_terminal_refresh",
+                validated_arguments={"sellable_item_id": str(sellable_item_id)},
+                outcome="failed",
+                safe_error_category="execution_failed",
+                safe_error_code="product_offer_refresh_failed",
+                authoritative_result=None,
+                result_destination="terminal_handoff_handler",
+                freshness_provenance={
+                    "basis": "transaction_owned_product_offer_refresh",
+                    "observed_during_current_turn": True,
+                },
+            ),
+            request_index=pending.provider_request_index,
+        )
+
+    def record_replay(self, *, case_id: str, replay: Mapping[str, object]) -> None:
+        suppressed = replay == {
+            "status": "duplicate_ignored",
+            "provider_requests_added": 0,
+            "messages_added": 0,
+            "audits_added": 0,
+            "tickets_added": 0,
+        }
+        self._append(
+            self._record(
+                event_type="replay_suppression",
+                case_id=case_id,
+                turn_id=None,
+                provider_request_index=None,
+                provider_request_id=None,
+                round_index=None,
+                tool_call_id=None,
+                capability_name="inbound_replay_guard",
+                validated_arguments=None,
+                outcome="suppressed" if suppressed else "failed",
+                safe_error_category=None if suppressed else "evaluation_failure",
+                safe_error_code=None if suppressed else "replay_not_suppressed",
+                authoritative_result={
+                    str(key): value  # type: ignore[dict-item]
+                    for key, value in replay.items()
+                    if key
+                    in {
+                        "status",
+                        "provider_requests_added",
+                        "messages_added",
+                        "audits_added",
+                        "tickets_added",
+                    }
+                },
+                result_destination="evaluation_control",
+            ),
+            request_index=None,
+        )
+
+    def assert_complete(self) -> None:
+        if self._pending:
+            request_index = self._pending[0].provider_request_index
+            for pending in tuple(self._pending):
+                self._pending.remove(pending)
+                self._records.append(
+                    self._record(
+                        event_type="capability_execution",
+                        case_id=pending.case_id,
+                        turn_id=self._turn_id.get(),
+                        provider_request_index=pending.provider_request_index,
+                        provider_request_id=pending.provider_request_id,
+                        round_index=pending.round_index,
+                        tool_call_id=pending.tool_call.call_id,
+                        capability_name=pending.tool_call.capability_name,
+                        validated_arguments=None,
+                        outcome="not_executed",
+                        safe_error_category="evidence_failure",
+                        safe_error_code="execution_outcome_unavailable",
+                        authoritative_result=None,
+                        result_destination="returned_to_model",
+                    )
+                )
+            self._stop_latch.stop("tool_trace_incomplete", request_index=request_index)
+            self._persist(complete=False, request_index=request_index)
+            raise AI5B2BridgeConfigurationError("tool_trace_incomplete")
+        self._persist(complete=True, request_index=None)
+
+    def _current_handoff_pending(self) -> _PendingToolTrace | None:
+        case_id = self._stop_latch.current_case_id
+        return next(
+            (
+                item
+                for item in self._pending
+                if item.case_id == case_id
+                and item.tool_call.capability_name == "request_human_handoff"
+            ),
+            None,
+        )
+
+    def _search_relationship(
+        self,
+        capability_name: str,
+        arguments: dict[str, JsonValue] | None,
+    ) -> str | None:
+        if capability_name != "search_products" or arguments is None:
+            return None
+        prior = next(
+            (
+                item
+                for item in reversed(self._records)
+                if item.case_id == self._stop_latch.current_case_id
+                and item.capability_name == "search_products"
+                and item.validated_arguments is not None
+            ),
+            None,
+        )
+        if prior is None:
+            return "first_search"
+        previous = prior.validated_arguments
+        if previous == arguments:
+            return "repeated_identical_search"
+        previous_query = previous.get("query")
+        current_query = arguments.get("query")
+        query_refined = (
+            isinstance(previous_query, str)
+            and isinstance(current_query, str)
+            and current_query.lower().startswith(previous_query.lower() + " ")
+        )
+        budget_refined = (
+            previous_query == current_query
+            and previous.get("max_budget") is None
+            and arguments.get("max_budget") is not None
+        )
+        return (
+            "refined_search" if query_refined or budget_refined else "different_search"
+        )
+
+    def _record(self, **values: object) -> CanaryToolTraceRecord:
+        return CanaryToolTraceRecord(
+            sequence=len(self._records) + 1,
+            run_id=self.run_id,
+            **values,
+        )
+
+    def _append(
+        self, record: CanaryToolTraceRecord, *, request_index: int | None
+    ) -> None:
+        self._records.append(record)
+        self._persist(complete=False, request_index=request_index)
+
+    def _persist(self, *, complete: bool, request_index: int | None) -> None:
+        if self._persist_callback is None:
+            return
+        try:
+            self._persist_callback(self.records, complete)
+        except Exception:
+            self.persistence_failed = True
+            self._stop_latch.stop(
+                "tool_trace_persistence_failed", request_index=request_index
+            )
+            raise AI5B2BridgeConfigurationError(
+                "tool_trace_persistence_failed"
+            ) from None
+
+    def _fail(self, code: str, request_index: int | None) -> None:
+        self._stop_latch.stop(code, request_index=request_index)
+        raise AI5B2BridgeConfigurationError(code)
+
+
+def _trace_capability_output(
+    capability_name: str, output: object
+) -> dict[str, JsonValue]:
+    if not isinstance(output, BaseModel):
+        raise AI5B2BridgeConfigurationError("tool_trace_output_invalid")
+    value = output.model_dump(mode="json")
+    if capability_name == "search_products":
+        return {"items": [_trace_product_item(item) for item in value["items"]]}
+    if capability_name == "get_product_details":
+        return {"product": _trace_product_item(value["product"])}
+    if capability_name == "request_human_handoff":
+        allowed = {
+            "state",
+            "replayed",
+            "handoff_reason",
+            "commercial_state_revision_after",
+            "commercial_state_changed_fields",
+        }
+        return {key: item for key, item in value.items() if key in allowed}
+    raise AI5B2BridgeConfigurationError("tool_trace_output_capability_unknown")
+
+
+def _trace_product_item(value: Mapping[str, object]) -> dict[str, JsonValue]:
+    allowed = {
+        "product_id",
+        "sellable_item_id",
+        "name",
+        "model_label",
+        "current_usd_price",
+        "price_currency",
+        "cdf_quote_status",
+        "derived_cdf_quote",
+        "availability",
+        "offer_status",
+        "is_sellable_now",
+    }
+    return {key: item for key, item in value.items() if key in allowed}  # type: ignore[return-value]
+
+
+def _trace_product_offer(offer: object) -> dict[str, JsonValue]:
+    quote = getattr(offer, "derived_cdf_quote", None)
+    return {
+        "product_id": str(getattr(offer, "product_id")),
+        "sellable_item_id": str(getattr(offer, "sellable_item_id")),
+        "name": str(getattr(offer, "product_name")),
+        "model_label": getattr(offer, "model_label"),
+        "current_usd_price": (
+            None
+            if getattr(offer, "current_usd_price") is None
+            else str(getattr(offer, "current_usd_price"))
+        ),
+        "price_currency": getattr(offer, "price_currency"),
+        "price_effective_at": _trace_datetime(getattr(offer, "price_effective_at")),
+        "cdf_quote_status": getattr(offer, "cdf_quote_status"),
+        "derived_cdf_quote": (
+            None
+            if quote is None
+            else {
+                "currency": getattr(quote, "currency"),
+                "amount": str(getattr(quote, "cdf_amount")),
+                "exchange_rate_id": str(getattr(quote, "exchange_rate_id")),
+                "usd_to_cdf_rate": str(getattr(quote, "usd_to_cdf_rate")),
+                "exchange_rate_effective_at": _trace_datetime(
+                    getattr(quote, "exchange_rate_effective_at")
+                ),
+            }
+        ),
+        "availability": getattr(offer, "inventory_status"),
+        "inventory_updated_at": _trace_datetime(getattr(offer, "inventory_updated_at")),
+        "offer_status": getattr(offer, "offer_status"),
+        "is_sellable_now": getattr(offer, "is_sellable_now"),
+        "reason_code": getattr(offer, "reason_code"),
+        "read_at": _trace_datetime(getattr(offer, "read_at")),
+    }
+
+
+def _trace_datetime(value: object) -> str | None:
+    return None if value is None else value.isoformat()  # type: ignore[union-attr]
+
+
+def _capability_freshness_provenance(
+    capability_name: str,
+) -> dict[str, JsonValue]:
+    if capability_name not in {"search_products", "get_product_details"}:
+        return {}
+    return {
+        "basis": "current_turn_registered_product_offer_capability",
+        "observed_during_current_turn": True,
+        "authoritative_timestamps_returned_to_model": False,
+    }
 
 
 class AI5B2BudgetProfile(_StrictModel):
@@ -602,6 +1161,8 @@ def _validate_live_selection(selection: AI5B2ProviderSelection) -> None:
         records_are_synthetic
     ):
         raise AI5B2BridgeConfigurationError("offline_records_must_be_synthetic")
+    if selection.mode == CanaryProviderMode.live:
+        raise AI5B2BridgeConfigurationError("human_budget_contract_decision_required")
 
 
 _StageResult = TypeVar("_StageResult")
@@ -644,6 +1205,7 @@ class CumulativeBudgetProvider(ProviderTurnAdapter):
         request_reservation: Callable[
             [ProviderTurnRequest], CanaryRequestReservation
         ] = provider_neutral_request_reservation,
+        tool_trace_recorder: CanaryToolTraceRecorder | None = None,
         wall_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._adapter = adapter
@@ -652,6 +1214,7 @@ class CumulativeBudgetProvider(ProviderTurnAdapter):
         self.pricing = pricing
         self.stop_latch = stop_latch or CanaryStageStopLatch()
         self._request_reservation = request_reservation
+        self._tool_trace_recorder = tool_trace_recorder
         self._wall_clock = wall_clock
         self.provider_name = adapter.provider_name
         self.model = adapter.model
@@ -819,6 +1382,13 @@ class CumulativeBudgetProvider(ProviderTurnAdapter):
             provider_request_id=result.provider_request_id,
             reservation_settled=True,
         )
+        if self._tool_trace_recorder is not None:
+            self._tool_trace_recorder.observe_provider_result(
+                case_id=self.stop_latch.current_case_id,
+                provider_request_index=request_index,
+                provider_request_id=result.provider_request_id,
+                tool_calls=result.tool_calls,
+            )
         return result
 
     def mark_current_request_timed_out(self) -> None:
@@ -1000,6 +1570,8 @@ class CanaryBridgeEvidence(_StrictModel):
     actual_provider_api_tokens: int | None = Field(default=0, ge=0)
     actual_provider_cost_usd: Decimal | None = Field(default=Decimal("0"), ge=0)
     provider_calls: tuple[CanaryProviderCallEvidence, ...] = ()
+    tool_traces: tuple[CanaryToolTraceRecord, ...] = ()
+    tool_trace_complete: bool = False
     deadline_evidence: tuple[dict[str, JsonValue], ...] = ()
     stop_reason: str | None = None
     failed_case_id: str | None = None
