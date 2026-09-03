@@ -13,6 +13,42 @@ late completion. AI-5B1-R1 requires timer-driven expiry and an actually
 produced, observed and discarded late completion. The correction does not
 change production AI behavior or timeout configuration.
 
+AI-5B2-R1 adds evaluation-only corrections after the live run
+`ai5b2-live-20260902T223100Z-196b9572`. The historical run and its failed C01
+result remain unchanged. `mbb-ai5b2-truth-evaluator-v2` replaces C01's literal
+`disponible` substring check with bounded checks for the frozen product,
+sellable item, fresh availability/sellability, authoritative USD/CDF prices,
+negation, contradictions and unsupported commercial additions. Proven false
+claims fail; unrecognized formulations require review and cannot pass.
+
+`mbb-ai5b2-request-reservation-v2` replaces the fixed 2,048-input-token
+assumption. Immediately before each transport dispatch, the bridge builds the
+complete DeepSeek request, including policy, messages, tool schemas/results,
+history and transient provider continuation content. The reservation uses the
+UTF-8 byte length of that JSON plus one token for every serialized JSON
+key/value/container and two request-boundary tokens, then adds the full
+requested output allowance. This bound assumes byte-fallback tokenization and
+no more than one provider framing token per serialized node plus the two
+boundaries; the bridge records the method and detects any returned-usage
+overrun rather than treating the assumption as proven by a successful call.
+Continuation content is counted only in memory and is not retained.
+
+Known complete usage settles its request reservation before another request
+may reserve capacity. Ceiling checks use settled actual usage/cost plus all
+unresolved reservations plus the proposed reservation, without double
+counting. Missing, inconsistent, timed-out or otherwise uncertain usage keeps
+its reservation. A returned total or conservatively calculated cost above its
+reservation records a reservation violation, latches the stage and prevents
+later dispatch.
+
+The same run's `154 000 FC` claim is supported by the disposable fixture's
+USD 55.00 price and current USD-to-CDF rate of 2,800, the existing
+`calculate_cdf_amount` Product Offer rule, and the `derived_cdf_quote` exposed
+by `search_products`. This is fixture-backed provenance, not a substituted
+market rate. The retained evidence records two successful `search_products`
+executions but not their arguments or result bodies, so whether the second
+search refined or duplicated the first is unverifiable from retained evidence.
+
 ## Authority and boundaries
 
 Current repository behavior and tests are authoritative for implementation.
@@ -342,9 +378,10 @@ remain zero real provider network calls, zero provider API tokens and zero
 provider cost.
 
 Offline reservation tests use clearly synthetic fixture rates of USD 0.50 per
-million input tokens and USD 1.00 per million output tokens, reserving 2,048
-input plus 512 output tokens before each request. These figures are not
-DeepSeek pricing and cannot be reused for live cost authorization.
+million input tokens and USD 1.00 per million output tokens. Request-sized
+input reservations and the full 512-token output allowance are costed at
+those rates. These figures are not DeepSeek pricing and cannot be reused for
+live cost authorization.
 
 The 12-second bridge deadline is evaluation-owned and applies separately to
 each provider request. The 60-second watchdog supervises one evaluation-owned

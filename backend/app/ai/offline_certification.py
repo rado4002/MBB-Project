@@ -345,10 +345,30 @@ class OfflineBudgetLedger:
     def __init__(self, limits: OfflineBudgetLimits = OfflineBudgetLimits()) -> None:
         self.limits = limits
         self.provider_calls = 0
+        # Cumulative reservation totals are retained for evidence. Ceiling checks use
+        # settled actuals plus unresolved reservations so the same request is never
+        # counted twice.
         self.reserved_tokens = 0
         self.observed_tokens = 0
         self.reserved_cost_usd = Decimal("0")
+        self.observed_cost_usd = Decimal("0")
+        self.unresolved_reserved_tokens = 0
+        self.unresolved_reserved_cost_usd = Decimal("0")
         self.durable_actions = 0
+        self.reservation_violations = 0
+        self._next_reservation_id = 1
+        self._unresolved_reservations: dict[int, tuple[int, Decimal]] = {}
+
+    @property
+    def committed_tokens(self) -> int:
+        return self.observed_tokens + self.unresolved_reserved_tokens
+
+    @property
+    def committed_cost_usd(self) -> Decimal:
+        return self.observed_cost_usd + self.unresolved_reserved_cost_usd
+
+    def reservation_is_unresolved(self, reservation_id: int) -> bool:
+        return reservation_id in self._unresolved_reservations
 
     def reserve_provider_call(
         self,
@@ -356,28 +376,72 @@ class OfflineBudgetLedger:
         max_output_tokens: int,
         reserved_tokens: int,
         reserved_cost_usd: Decimal,
-    ) -> None:
+    ) -> int:
+        if reserved_tokens < 0 or reserved_cost_usd < 0:
+            raise ValueError("provider reservation cannot be negative")
         if max_output_tokens > self.limits.max_output_tokens_per_call:
             raise OfflineBudgetExceeded("max_output_tokens_per_call")
         if self.provider_calls + 1 > self.limits.max_provider_calls:
             raise OfflineBudgetExceeded("provider_calls")
-        if self.reserved_tokens + reserved_tokens > self.limits.max_total_tokens:
+        if self.committed_tokens + reserved_tokens > self.limits.max_total_tokens:
             raise OfflineBudgetExceeded("total_tokens")
         if (
-            self.reserved_cost_usd + reserved_cost_usd
+            self.committed_cost_usd + reserved_cost_usd
             > self.limits.max_reserved_cost_usd
         ):
             raise OfflineBudgetExceeded("reserved_cost_usd")
+        reservation_id = self._next_reservation_id
+        self._next_reservation_id += 1
         self.provider_calls += 1
         self.reserved_tokens += reserved_tokens
         self.reserved_cost_usd += reserved_cost_usd
+        self.unresolved_reserved_tokens += reserved_tokens
+        self.unresolved_reserved_cost_usd += reserved_cost_usd
+        self._unresolved_reservations[reservation_id] = (
+            reserved_tokens,
+            reserved_cost_usd,
+        )
+        return reservation_id
 
-    def record_usage(self, usage: ProviderUsage | None) -> None:
+    def record_usage(
+        self,
+        usage: ProviderUsage | None,
+        *,
+        reservation_id: int | None = None,
+        actual_cost_usd: Decimal | None = None,
+    ) -> None:
         if usage is None or usage.total_tokens is None:
             return
-        if self.observed_tokens + usage.total_tokens > self.limits.max_total_tokens:
-            raise OfflineBudgetExceeded("observed_total_tokens")
+        if reservation_id is None:
+            try:
+                reservation_id = next(iter(self._unresolved_reservations))
+            except StopIteration:
+                raise ValueError("no unresolved provider reservation") from None
+        try:
+            reserved_tokens, reserved_cost = self._unresolved_reservations[
+                reservation_id
+            ]
+        except KeyError:
+            raise ValueError("provider reservation is not unresolved") from None
+
+        settled_cost = reserved_cost if actual_cost_usd is None else actual_cost_usd
+        if settled_cost < 0:
+            raise ValueError("settled provider cost cannot be negative")
+        self._unresolved_reservations.pop(reservation_id)
+        self.unresolved_reserved_tokens -= reserved_tokens
+        self.unresolved_reserved_cost_usd -= reserved_cost
         self.observed_tokens += usage.total_tokens
+        self.observed_cost_usd += settled_cost
+
+        violation = usage.total_tokens > reserved_tokens or settled_cost > reserved_cost
+        if violation:
+            self.reservation_violations += 1
+        if self.committed_tokens > self.limits.max_total_tokens:
+            raise OfflineBudgetExceeded("observed_total_tokens")
+        if self.committed_cost_usd > self.limits.max_reserved_cost_usd:
+            raise OfflineBudgetExceeded("observed_cost_usd")
+        if violation:
+            raise OfflineBudgetExceeded("reservation_violation")
 
     def reserve_durable_action(self) -> None:
         if self.durable_actions + 1 > self.limits.max_durable_actions:

@@ -15,6 +15,8 @@ from app.ai.canary_bridge import (
     AI5B2BridgeConfigurationError,
     AI5B2BudgetProfile,
     AI5B2ProviderSelection,
+    C01CommercialFacts,
+    CanaryRequestReservation,
     CanaryAuthorizationRecord,
     CanaryBridgeEvidence,
     CanaryCaseEvidence,
@@ -24,7 +26,10 @@ from app.ai.canary_bridge import (
     CanaryReviewerAssignmentRecord,
     CanaryTranscriptEntry,
     CumulativeBudgetProvider,
+    conservative_json_request_reservation,
     dry_run_manifest,
+    evaluate_c01_commercial_response,
+    provider_neutral_request_reservation,
     select_canary_provider,
 )
 from app.ai.offline_certification import (
@@ -36,6 +41,7 @@ from app.ai.offline_certification import (
 )
 from app.ai.provider_contract import (
     ProviderErrorCategory,
+    ProviderContinuationState,
     ProviderFinishReason,
     ProviderMessage,
     ProviderReasoningProfile,
@@ -107,6 +113,18 @@ def _result(*, usage: ProviderUsage | None = None) -> ProviderTurnResult:
         text="Synthetic result",
         finish_reason=ProviderFinishReason.completed,
         usage=usage,
+    )
+
+
+def _c01_facts(*, freshness_verified: bool = True) -> C01CommercialFacts:
+    return C01CommercialFacts(
+        product_name="MBB Test Air Fryer",
+        sellable_model_label="6L",
+        usd_price=Decimal("55.00"),
+        cdf_price=Decimal("154000.00"),
+        availability="available",
+        is_sellable_now=True,
+        freshness_verified=freshness_verified,
     )
 
 
@@ -240,8 +258,10 @@ async def test_run_budget_is_cumulative_and_missing_usage_fails_safely() -> None
     assert adapter.dispatched_requests == 1
     assert ledger.provider_calls == 1
     assert ledger.observed_tokens == 25
-    assert ledger.reserved_tokens == profile.reserved_tokens_per_call
-    assert ledger.reserved_cost_usd == profile.fixture_reserved_cost_per_call
+    reservation = provider_neutral_request_reservation(_request())
+    assert ledger.reserved_tokens == reservation.total_tokens
+    assert ledger.unresolved_reserved_tokens == 0
+    assert ledger.committed_tokens == 25
 
     missing_profile = AI5B2BudgetProfile()
     missing_ledger = OfflineBudgetLedger(missing_profile.offline_limits())
@@ -258,7 +278,9 @@ async def test_run_budget_is_cumulative_and_missing_usage_fails_safely() -> None
     assert missing.missing_usage_failures == 1
     assert missing_ledger.provider_calls == 1
     assert missing_ledger.observed_tokens == 0
-    assert missing_ledger.reserved_tokens == missing_profile.reserved_tokens_per_call
+    assert missing_ledger.reserved_tokens == reservation.total_tokens
+    assert missing_ledger.unresolved_reserved_tokens == reservation.total_tokens
+    assert missing_ledger.committed_tokens == reservation.total_tokens
     assert missing.call_evidence[0].outcome == "failed"
     assert missing.call_evidence[0].total_tokens is None
     assert missing.call_evidence[0].estimated_cost_usd is None
@@ -349,12 +371,237 @@ async def test_malformed_provider_failure_keeps_precall_reservation() -> None:
     assert malformed.value.category == ProviderErrorCategory.malformed_response
     assert adapter.dispatched_requests == 1
     assert ledger.provider_calls == 1
-    assert ledger.reserved_tokens == profile.reserved_tokens_per_call
-    assert ledger.reserved_cost_usd == profile.fixture_reserved_cost_per_call
+    reservation = provider_neutral_request_reservation(_request())
+    assert ledger.reserved_tokens == reservation.total_tokens
+    assert ledger.unresolved_reserved_tokens == reservation.total_tokens
+    assert ledger.committed_tokens == reservation.total_tokens
     assert adapter.call_evidence[0].outcome == "failed"
     with pytest.raises(AI5B2BridgeConfigurationError, match="stage_dispatch_stopped"):
         await adapter.generate_turn(_request())
     assert inner.calls == 1
+
+
+@pytest.mark.parametrize(
+    "response",
+    (
+        "Le MBB Test Air Fryer 6L est dispo à 55 USD.",
+        "Le MBB Test Air Fryer 6L est disponible à 55 dollars.",
+        (
+            "Oui, le MBB Test Air Fryer 6L est dispo ✅ à 55 $ "
+            "(154 000 FC). Tu veux plus d'infos dessus ?"
+        ),
+    ),
+)
+def test_c01_truth_evaluator_accepts_supported_paraphrases(response) -> None:
+    result = evaluate_c01_commercial_response(response, facts=_c01_facts())
+    assert result.status == "passed"
+    assert result.false_claims == ()
+    assert result.review_reasons == ()
+
+
+@pytest.mark.parametrize(
+    ("response", "reason"),
+    (
+        (
+            "Le MBB Test Air Fryer 6L n'est pas dispo à 55 USD.",
+            "false_unavailability",
+        ),
+        (
+            "Le MBB Test Air Fryer 6L est indisponible à 55 USD.",
+            "false_unavailability",
+        ),
+        (
+            "Le MBB Test Air Fryer 6L est disponible mais pas dispo à 55 USD.",
+            "contradictory_availability",
+        ),
+        (
+            "Le MBB Test Air Fryer 8L est disponible à 55 USD.",
+            "wrong_product_model",
+        ),
+        (
+            "Le MBB Test Air Fryer 6L est disponible à 54 USD.",
+            "wrong_usd_price",
+        ),
+        (
+            "Le MBB Test Air Fryer 6L est disponible à 55 CDF.",
+            "wrong_cdf_price",
+        ),
+        (
+            "Le MBB Test Air Fryer 6L est disponible à 55 USD et 50 EUR.",
+            "unsupported_currency_claim",
+        ),
+        (
+            "Le MBB Test Air Fryer 6L est disponible à 55 USD avec 10 % de remise.",
+            "unsupported_discount_or_concession",
+        ),
+        (
+            "Le MBB Test Air Fryer 6L est disponible à 55 USD; je vous rappelle demain.",
+            "unsupported_follow_up_commitment",
+        ),
+    ),
+)
+def test_c01_truth_evaluator_rejects_proven_false_claims(response, reason) -> None:
+    result = evaluate_c01_commercial_response(response, facts=_c01_facts())
+    assert result.status == "failed"
+    assert reason in result.false_claims
+
+
+def test_c01_truth_evaluator_requires_review_for_unrecognized_formulation() -> None:
+    result = evaluate_c01_commercial_response(
+        "Le MBB Test Air Fryer 6L peut partir pour cinquante-cinq dollars.",
+        facts=_c01_facts(),
+    )
+    assert result.status == "needs_review"
+    assert "availability_formulation_unrecognized" in result.review_reasons
+
+
+def test_c01_truth_evaluator_rejects_missing_freshness() -> None:
+    result = evaluate_c01_commercial_response(
+        "Le MBB Test Air Fryer 6L est dispo à 55 USD.",
+        facts=_c01_facts(freshness_verified=False),
+    )
+    assert result.status == "failed"
+    assert "fresh_product_offer_missing" in result.hard_gate_failures
+
+
+def test_request_reservation_grows_with_tools_results_and_continuation() -> None:
+    first = conservative_json_request_reservation(
+        {"messages": [{"role": "user", "content": "x"}]},
+        max_output_tokens=512,
+    )
+    growing_payload = {
+        "messages": [
+            {"role": "user", "content": "x" * 2_000},
+            {"role": "assistant", "reasoning_content": "hidden" * 500},
+            {"role": "tool", "content": "result" * 500},
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_products",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+    }
+    second = conservative_json_request_reservation(
+        growing_payload,
+        max_output_tokens=512,
+    )
+    assert second.input_tokens > first.input_tokens
+    assert second.total_tokens == second.input_tokens + 512
+    assert "hidden" not in second.model_dump_json()
+
+    continuation_request = ProviderTurnRequest(
+        messages=(ProviderMessage(role="user", content="Synthetic"),),
+        system_instruction="System",
+        max_output_tokens=512,
+        continuation_state=ProviderContinuationState(
+            value={"opaque": "sensitive-continuation" * 100}
+        ),
+    )
+    without_continuation = continuation_request.model_copy(
+        update={"continuation_state": None}
+    )
+    assert (
+        provider_neutral_request_reservation(continuation_request).input_tokens
+        > provider_neutral_request_reservation(without_continuation).input_tokens
+    )
+
+
+@pytest.mark.asyncio
+async def test_request_over_remaining_capacity_is_blocked_before_transport() -> None:
+    proposal = provider_neutral_request_reservation(_request())
+    profile = AI5B2BudgetProfile(max_total_tokens=proposal.total_tokens - 1)
+    ledger = OfflineBudgetLedger(profile.offline_limits())
+    inner = _SequenceAdapter(
+        _result(usage=ProviderUsage(input_tokens=20, output_tokens=5, total_tokens=25))
+    )
+    adapter = CumulativeBudgetProvider(inner, ledger=ledger, profile=profile)
+
+    with pytest.raises(OfflineBudgetExceeded, match="total_tokens"):
+        await adapter.generate_turn(_request())
+    assert inner.calls == 0
+    assert adapter.dispatched_requests == 0
+    assert ledger.provider_calls == 0
+    assert adapter.call_evidence[0].transport_dispatched is False
+    assert adapter.call_evidence[0].reserved_tokens == proposal.total_tokens
+    assert adapter.stop_latch.stop_reason == "budget_total_tokens"
+
+
+@pytest.mark.asyncio
+async def test_known_usage_settles_without_double_counting_next_reservation() -> None:
+    proposal = provider_neutral_request_reservation(_request())
+    usage = ProviderUsage(input_tokens=20, output_tokens=5, total_tokens=25)
+    profile = AI5B2BudgetProfile(
+        max_provider_calls=2,
+        max_total_tokens=proposal.total_tokens + usage.total_tokens,
+    )
+    ledger = OfflineBudgetLedger(profile.offline_limits())
+    inner = _SequenceAdapter(_result(usage=usage), _result(usage=usage))
+    adapter = CumulativeBudgetProvider(inner, ledger=ledger, profile=profile)
+
+    await adapter.generate_turn(_request())
+    await adapter.generate_turn(_request())
+
+    assert inner.calls == 2
+    assert ledger.reserved_tokens == proposal.total_tokens * 2
+    assert ledger.observed_tokens == 50
+    assert ledger.unresolved_reserved_tokens == 0
+    assert ledger.committed_tokens == 50
+
+
+@pytest.mark.asyncio
+async def test_under_reservation_settles_usage_and_latches_stage() -> None:
+    usage = ProviderUsage(input_tokens=100, output_tokens=500, total_tokens=600)
+    profile = AI5B2BudgetProfile()
+    ledger = OfflineBudgetLedger(profile.offline_limits())
+    inner = _SequenceAdapter(_result(usage=usage), _result(usage=usage))
+
+    def insufficient(_request: ProviderTurnRequest) -> CanaryRequestReservation:
+        return CanaryRequestReservation(
+            input_tokens=1,
+            output_tokens=512,
+            serialized_utf8_bytes=1,
+            structural_nodes=1,
+        )
+
+    adapter = CumulativeBudgetProvider(
+        inner,
+        ledger=ledger,
+        profile=profile,
+        request_reservation=insufficient,
+    )
+    with pytest.raises(OfflineBudgetExceeded, match="reservation_violation"):
+        await adapter.generate_turn(_request())
+    assert ledger.observed_tokens == 600
+    assert ledger.unresolved_reserved_tokens == 0
+    assert ledger.reservation_violations == 1
+    assert adapter.call_evidence[0].reservation_settled is True
+    assert adapter.call_evidence[0].reservation_violation is True
+    assert adapter.stop_latch.stop_reason == "budget_reservation_violation"
+    with pytest.raises(AI5B2BridgeConfigurationError, match="stage_dispatch_stopped"):
+        await adapter.generate_turn(_request())
+    assert inner.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_inconsistent_usage_retains_reservation_and_stops() -> None:
+    usage = ProviderUsage(input_tokens=20, output_tokens=5, total_tokens=30)
+    profile = AI5B2BudgetProfile()
+    ledger = OfflineBudgetLedger(profile.offline_limits())
+    inner = _SequenceAdapter(_result(usage=usage))
+    adapter = CumulativeBudgetProvider(inner, ledger=ledger, profile=profile)
+    proposal = provider_neutral_request_reservation(_request())
+
+    with pytest.raises(ProviderTurnError) as failure:
+        await adapter.generate_turn(_request())
+    assert failure.value.category == ProviderErrorCategory.malformed_response
+    assert ledger.observed_tokens == 0
+    assert ledger.unresolved_reserved_tokens == proposal.total_tokens
+    assert adapter.stop_latch.stop_reason == "provider_usage_inconsistent"
+    assert adapter.call_evidence[0].failure_code == "provider_usage_inconsistent"
 
 
 def test_evidence_redaction_and_live_manual_review_gate() -> None:

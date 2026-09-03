@@ -36,6 +36,7 @@ from app.ai.canary_bridge import (  # noqa: E402
     AI5B2BridgeConfigurationError,
     AI5B2BudgetProfile,
     AI5B2ProviderSelection,
+    C01CommercialFacts,
     CanaryAuthorizationRecord,
     CanaryBridgeEvidence,
     CanaryCaseEvidence,
@@ -46,8 +47,10 @@ from app.ai.canary_bridge import (  # noqa: E402
     CanaryStageStopLatch,
     CanaryTranscriptEntry,
     CumulativeBudgetProvider,
+    conservative_json_request_reservation,
     dispatch_guarded_canary_stage,
     dry_run_manifest,
+    evaluate_c01_commercial_response,
 )
 from app.ai.offline_certification import (  # noqa: E402
     EvaluationDeadlineAdapter,
@@ -81,12 +84,19 @@ class CanaryBusinessTruth:
     operator_account_id: uuid.UUID
     available_item_id: uuid.UUID
     unavailable_item_id: uuid.UUID
+    available_product_name: str
+    available_model_label: str
+    available_usd_price: Decimal
+    available_cdf_price: Decimal
+    available_is_sellable_now: bool
 
-    def evidence(self) -> dict[str, str]:
+    def evidence(self) -> dict[str, object]:
         return {
             "P6_sellable_item_id": str(self.available_item_id),
-            "P6_price_usd": "55.00",
+            "P6_price_usd": str(self.available_usd_price),
+            "P6_price_cdf": str(self.available_cdf_price),
             "P6_availability": "available",
+            "P6_is_sellable_now": self.available_is_sellable_now,
             "P8_sellable_item_id": str(self.unavailable_item_id),
             "P8_price_usd": "70.00",
             "P8_availability": "out_of_stock",
@@ -259,6 +269,84 @@ def _write_atomic(path: Path, value: object) -> None:
     temporary.replace(path)
 
 
+def build_c01_reevaluation(source_path: Path) -> dict[str, object]:
+    """Re-evaluate immutable C01 evidence against its frozen authoritative facts."""
+    source_bytes = source_path.read_bytes()
+    source_hash = hashlib.sha256(source_bytes).hexdigest()
+    source = json.loads(source_bytes)
+    cases = source.get("cases")
+    if not isinstance(cases, list):
+        raise AI5B2BridgeConfigurationError("reevaluation_cases_missing")
+    case = next(
+        (
+            item
+            for item in cases
+            if isinstance(item, dict) and item.get("case_id") == "B2-C01-FR-FRESH-P6"
+        ),
+        None,
+    )
+    if case is None:
+        raise AI5B2BridgeConfigurationError("reevaluation_c01_missing")
+    transcript = case.get("transcript")
+    if not isinstance(transcript, list):
+        raise AI5B2BridgeConfigurationError("reevaluation_transcript_missing")
+    response = next(
+        (
+            item.get("content")
+            for item in reversed(transcript)
+            if isinstance(item, dict)
+            and item.get("direction") == "outbound"
+            and isinstance(item.get("content"), str)
+        ),
+        None,
+    )
+    if response is None:
+        raise AI5B2BridgeConfigurationError("reevaluation_response_missing")
+    result = evaluate_c01_commercial_response(
+        response,
+        facts=C01CommercialFacts(
+            product_name="MBB Test Air Fryer",
+            sellable_model_label="6L",
+            usd_price=Decimal("55.00"),
+            cdf_price=Decimal("154000.00"),
+            availability="available",
+            is_sellable_now=True,
+            freshness_verified=case.get("freshness_verified") is True,
+        ),
+    )
+    return {
+        "reevaluation_type": "immutable_source_evidence_reevaluation",
+        "evaluator_version": result.evaluator_version,
+        "source_evidence_path": str(source_path.resolve()),
+        "source_evidence_sha256": source_hash,
+        "source_run_id": source.get("run_id"),
+        "source_baseline_commit": source.get("baseline_commit"),
+        "historical_result_unchanged": {
+            "deterministic_status": case.get("deterministic_status"),
+            "failure_attribution": case.get("failure_attribution"),
+        },
+        "authoritative_facts": {
+            "product": "MBB Test Air Fryer 6L",
+            "price_usd": "55.00",
+            "price_cdf": "154000.00",
+            "availability": "available",
+            "freshness_verified": case.get("freshness_verified") is True,
+        },
+        "fact_provenance": {
+            "fixture": "backend/scripts/run_ai5b2_canary_bridge.py",
+            "conversion_rule": "backend/app/modules/pricing/service.py:calculate_cdf_amount",
+            "provider_projection": "backend/app/ai/capabilities.py:_project_offer",
+            "retained_tool_arguments_and_results": False,
+        },
+        "corrected_evaluation": result.model_dump(mode="json"),
+        "human_language_review": "pending",
+    }
+
+
+def write_c01_reevaluation(source_path: Path, output_path: Path) -> None:
+    _write_atomic(output_path, build_c01_reevaluation(source_path))
+
+
 @contextmanager
 def _activated_runtime(runtime: DisposablePostgresRuntime) -> Iterator[None]:
     names = {
@@ -410,10 +498,23 @@ async def _seed_business_truth(factory: async_sessionmaker) -> CanaryBusinessTru
             administrator=_admin(account.account_id),
         )
         await session.commit()
+    from app.modules.product_offer.service import require_product_offer
+
+    async with factory() as session:
+        available_offer = await require_product_offer(
+            session, available.sellable_item_id
+        )
+    if available_offer.derived_cdf_quote is None:
+        raise AI5B2BridgeConfigurationError("fixture_cdf_quote_missing")
     return CanaryBusinessTruth(
         operator_account_id=account.account_id,
         available_item_id=available.sellable_item_id,
         unavailable_item_id=unavailable.sellable_item_id,
+        available_product_name=product.name,
+        available_model_label=available.model_label,
+        available_usd_price=Decimal("55.00"),
+        available_cdf_price=available_offer.derived_cdf_quote.cdf_amount,
+        available_is_sellable_now=available_offer.is_sellable_now,
     )
 
 
@@ -651,6 +752,19 @@ def _case_evidence(
         )
     if state is not None:
         persistence["commercial_state"] = state.model_dump(mode="json")
+    commercial_evaluation: dict[str, object] = {}
+    if spec.case_id == "B2-C01-FR-FRESH-P6":
+        outbound = [item.content for item in messages if item.direction == "outbound"]
+        if outbound:
+            commercial_evaluation = evaluate_c01_commercial_response(
+                outbound[-1],
+                facts=_c01_facts(
+                    truth,
+                    freshness_verified=all(
+                        name in validated_tools for name in spec.expected_capabilities
+                    ),
+                ),
+            ).model_dump(mode="json")
     return CanaryCaseEvidence(
         case_id=spec.case_id,
         fixture_snapshot=truth.evidence(),
@@ -677,6 +791,23 @@ def _case_evidence(
         provider_request_indexes=provider_indexes,
         m1_status=None if result is None else str(result.get("status", "unknown")),
         replay=replay or {},
+        commercial_evaluation=commercial_evaluation,
+    )
+
+
+def _c01_facts(
+    truth: CanaryBusinessTruth,
+    *,
+    freshness_verified: bool,
+) -> C01CommercialFacts:
+    return C01CommercialFacts(
+        product_name=truth.available_product_name,
+        sellable_model_label=truth.available_model_label,
+        usd_price=truth.available_usd_price,
+        cdf_price=truth.available_cdf_price,
+        availability="available",
+        is_sellable_now=truth.available_is_sellable_now,
+        freshness_verified=freshness_verified,
     )
 
 
@@ -703,8 +834,14 @@ def _deterministic_failure(spec, stored, result, truth, runtime_evidence) -> str
         return "expected_capability_missing"
     response = outbound[-1] if outbound else ""
     if spec.case_id == "B2-C01-FR-FRESH-P6":
-        if "55" not in response or "disponible" not in response.lower():
+        evaluation = evaluate_c01_commercial_response(
+            response,
+            facts=_c01_facts(truth, freshness_verified=True),
+        )
+        if evaluation.status == "failed":
             return "c01_commercial_truth_failed"
+        if evaluation.status == "needs_review":
+            return "c01_commercial_truth_requires_review"
     elif spec.case_id == "B2-C02-FR-QUALIFIED":
         if result.get("status") != "waiting_for_human" or len(tickets) != 1:
             return "c02_handoff_failed"
@@ -852,7 +989,10 @@ async def _dispatch_authorized_canaries(
     snapshots_match = snapshot_after == snapshot_before
     if not snapshots_match:
         latch.stop("protected_snapshot_mismatch")
-    unknown_usage = any(call.total_tokens is None for call in budgeted.call_evidence)
+    unknown_usage = any(
+        call.transport_dispatched and call.total_tokens is None
+        for call in budgeted.call_evidence
+    )
     observed_tokens = sum(call.total_tokens or 0 for call in budgeted.call_evidence)
     estimated_cost = (
         None
@@ -925,6 +1065,13 @@ async def _dispatch_authorized_canaries(
         reserved_durable_actions=budgeted.ledger.durable_actions,
         reserved_tokens=budgeted.ledger.reserved_tokens,
         reserved_cost_usd=budgeted.ledger.reserved_cost_usd,
+        unresolved_reserved_tokens=budgeted.ledger.unresolved_reserved_tokens,
+        unresolved_reserved_cost_usd=(budgeted.ledger.unresolved_reserved_cost_usd),
+        settled_actual_tokens=budgeted.ledger.observed_tokens,
+        settled_actual_cost_usd=budgeted.ledger.observed_cost_usd,
+        budget_committed_tokens=budgeted.ledger.committed_tokens,
+        budget_committed_cost_usd=budgeted.ledger.committed_cost_usd,
+        reservation_violations=budgeted.ledger.reservation_violations,
         observed_total_tokens=observed_tokens,
         real_provider_network_calls=(
             budgeted.dispatched_requests
@@ -1053,6 +1200,12 @@ async def _execute_isolated_stage(
                 profile=profile,
                 pricing=pricing,
                 stop_latch=latch,
+                request_reservation=lambda request: (
+                    conservative_json_request_reservation(
+                        deepseek.build_request_payload(request),
+                        max_output_tokens=request.max_output_tokens,
+                    )
+                ),
             )
             controller = EvaluationDeadlineAdapter(
                 budgeted,
@@ -1113,9 +1266,21 @@ async def _execute_isolated_stage(
                     "reserved_durable_actions": budgeted.ledger.durable_actions,
                     "reserved_tokens": budgeted.ledger.reserved_tokens,
                     "reserved_cost_usd": budgeted.ledger.reserved_cost_usd,
+                    "unresolved_reserved_tokens": (
+                        budgeted.ledger.unresolved_reserved_tokens
+                    ),
+                    "unresolved_reserved_cost_usd": (
+                        budgeted.ledger.unresolved_reserved_cost_usd
+                    ),
+                    "settled_actual_tokens": budgeted.ledger.observed_tokens,
+                    "settled_actual_cost_usd": budgeted.ledger.observed_cost_usd,
+                    "budget_committed_tokens": budgeted.ledger.committed_tokens,
+                    "budget_committed_cost_usd": (budgeted.ledger.committed_cost_usd),
+                    "reservation_violations": (budgeted.ledger.reservation_violations),
                     "observed_total_tokens": budgeted.ledger.observed_tokens,
                     "provider_usage_unknown": any(
-                        item.total_tokens is None for item in budgeted.call_evidence
+                        item.transport_dispatched and item.total_tokens is None
+                        for item in budgeted.call_evidence
                     ),
                     "deadline_evidence": (
                         controller.deadline_evidence

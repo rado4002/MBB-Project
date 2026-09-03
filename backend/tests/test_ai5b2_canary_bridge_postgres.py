@@ -28,6 +28,7 @@ from app.ai.canary_bridge import (
     CanaryReviewerAssignmentRecord,
     CanaryTranscriptEntry,
     CumulativeBudgetProvider,
+    conservative_json_request_reservation,
     dispatch_guarded_canary_stage,
 )
 from app.ai.offline_certification import (
@@ -96,11 +97,19 @@ def _cli_arguments(tmp_path, run_id: str) -> tuple[str, ...]:
     )
 
 
+def _deepseek_reservation(adapter: DeepSeekAdapter):
+    return lambda request: conservative_json_request_reservation(
+        adapter.build_request_payload(request),
+        max_output_tokens=request.max_output_tokens,
+    )
+
+
 def _mocked_cli_transport(
     payloads: list[dict],
     *,
     failure_index: int | None = None,
     missing_usage: bool = False,
+    under_reservation_index: int | None = None,
 ):
     def build(credential, truth):
         response_tools = (
@@ -110,8 +119,8 @@ def _mocked_cli_transport(
                 "propose_commercial_state_update",
                 {
                     "response_text": (
-                        "Le modèle 6L coûte 55 USD, est disponible et vendable "
-                        "maintenant."
+                        "Le MBB Test Air Fryer 6L coûte 55 USD, est disponible "
+                        "et vendable maintenant."
                     ),
                     "state_update": {
                         "selected_sellable_item_ids": [str(truth.available_item_id)],
@@ -217,6 +226,15 @@ def _mocked_cli_transport(
             }
             if failure_index == index and missing_usage:
                 response.pop("usage")
+            if under_reservation_index == index:
+                response["usage"] = {
+                    "prompt_tokens": 39_000,
+                    "completion_tokens": 100,
+                    "total_tokens": 39_100,
+                    "prompt_cache_hit_tokens": 1_000,
+                    "prompt_cache_miss_tokens": 38_000,
+                    "completion_tokens_details": {"reasoning_tokens": 50},
+                }
             return httpx.Response(200, json=response)
 
         return _DeepSeekHTTPTransport(
@@ -292,7 +310,8 @@ async def test_four_frozen_canaries_traverse_real_m1_and_postgres(
             "propose_commercial_state_update",
             {
                 "response_text": (
-                    "Le modèle 6L coûte 55 USD, est disponible et vendable maintenant."
+                    "Le MBB Test Air Fryer 6L coûte 55 USD, est disponible et "
+                    "vendable maintenant."
                 ),
                 "state_update": {
                     "selected_sellable_item_ids": [str(truth.available_item_id)],
@@ -428,11 +447,13 @@ async def test_four_frozen_canaries_traverse_real_m1_and_postgres(
             timeout_s=12,
             http_transport=httpx.MockTransport(handler),
         )
+        deepseek = DeepSeekAdapter(api_key=credential, transport=transport)
         budgeted = CumulativeBudgetProvider(
-            DeepSeekAdapter(api_key=credential, transport=transport),
+            deepseek,
             ledger=ledger,
             profile=profile,
             pricing=pricing,
+            request_reservation=_deepseek_reservation(deepseek),
         )
         controller = EvaluationDeadlineAdapter(
             budgeted,
@@ -601,11 +622,12 @@ async def test_four_frozen_canaries_traverse_real_m1_and_postgres(
     serialized = report.redacted_json()
     assert '"evidence_label":"offline_mocked_http"' in serialized
     assert len(payloads) == 7 and ledger.provider_calls == 7
-    assert ledger.reserved_tokens == 7 * profile.reserved_tokens_per_call
-    assert ledger.reserved_cost_usd == (
-        Decimal(7) * profile.fixture_reserved_cost_per_call
+    assert ledger.reserved_tokens == sum(
+        call.reserved_tokens for call in budgeted.call_evidence
     )
+    assert ledger.unresolved_reserved_tokens == 0
     assert ledger.observed_tokens == sum(100 + index for index in range(1, 8))
+    assert ledger.committed_tokens == ledger.observed_tokens
     assert report.real_provider_network_calls == 0
     assert report.actual_provider_api_tokens == 0
     assert report.actual_provider_cost_usd == 0
@@ -639,7 +661,8 @@ async def test_deepseek_adapter_mocked_http_continues_through_real_application(
             tool_name = "propose_commercial_state_update"
             arguments = {
                 "response_text": (
-                    "Le modèle 6L coûte 55 USD et est disponible maintenant."
+                    "Le MBB Test Air Fryer 6L coûte 55 USD et est disponible "
+                    "maintenant."
                 ),
                 "state_update": {
                     "current_goal": "Vérifier le modèle 6L",
@@ -701,7 +724,12 @@ async def test_deepseek_adapter_mocked_http_continues_through_real_application(
     )
     profile = AI5B2BudgetProfile()
     ledger = OfflineBudgetLedger(profile.offline_limits())
-    budgeted = CumulativeBudgetProvider(deepseek, ledger=ledger, profile=profile)
+    budgeted = CumulativeBudgetProvider(
+        deepseek,
+        ledger=ledger,
+        profile=profile,
+        request_reservation=_deepseek_reservation(deepseek),
+    )
     controller = EvaluationDeadlineAdapter(
         budgeted,
         clock=SystemEvaluationClock(),
@@ -734,6 +762,20 @@ async def test_deepseek_adapter_mocked_http_continues_through_real_application(
     assert any(
         message.get("role") == "assistant" and message.get("tool_calls")
         for message in payloads[1]["messages"]
+    )
+    assert budgeted.call_evidence[0].reserved_input_tokens == (
+        conservative_json_request_reservation(
+            payloads[0], max_output_tokens=512
+        ).input_tokens
+    )
+    assert budgeted.call_evidence[1].reserved_input_tokens == (
+        conservative_json_request_reservation(
+            payloads[1], max_output_tokens=512
+        ).input_tokens
+    )
+    assert (
+        budgeted.call_evidence[1].reserved_input_tokens
+        > budgeted.call_evidence[0].reserved_input_tokens
     )
     assert len(messages) == 2 and len(audits) == 1 and tickets == []
     outbound = [item for item in messages if item.direction == "outbound"]
@@ -846,6 +888,10 @@ def test_actual_cli_orchestrates_complete_mocked_stage_and_cleanup(
     }
     assert evidence["protected_snapshots"]["matched"] is True
     assert evidence["reserved_provider_calls"] == 7
+    assert evidence["unresolved_reserved_tokens"] == 0
+    assert evidence["settled_actual_tokens"] == sum(range(100, 107))
+    assert evidence["budget_committed_tokens"] == sum(range(100, 107))
+    assert evidence["reservation_violations"] == 0
     assert evidence["reserved_durable_actions"] == 1
     assert evidence["limits"]["durable_actions"] == 1
     assert evidence["observed_total_tokens"] == sum(range(100, 107))
@@ -853,6 +899,11 @@ def test_actual_cli_orchestrates_complete_mocked_stage_and_cleanup(
     assert evidence["actual_provider_api_tokens"] == 0
     assert evidence["actual_provider_cost_usd"] == "0"
     assert "55 USD" in evidence["cases"][0]["transcript"][1]["content"]
+    assert evidence["cases"][0]["commercial_evaluation"]["status"] == "passed"
+    assert all(
+        call["reservation_method"] == "utf8_wire_bytes_plus_json_nodes_v1"
+        for call in evidence["provider_calls"]
+    )
     assert evidence["cases"][1]["persistence"]["ticket_count"] == 1
     assert evidence["cases"][1]["persistence"]["audit_transitions"]
     assert "rupture" in evidence["cases"][2]["transcript"][1]["content"]
@@ -917,13 +968,63 @@ def test_actual_cli_latches_failure_and_persists_partial_evidence(
     assert evidence["actual_provider_api_tokens"] is None
     assert evidence["actual_provider_cost_usd"] is None
     assert evidence["reserved_provider_calls"] == expected_calls
-    assert evidence["reserved_tokens"] == 2560 * expected_calls
+    dispatched_calls = [
+        call for call in evidence["provider_calls"] if call["transport_dispatched"]
+    ]
+    assert evidence["reserved_tokens"] == sum(
+        call["reserved_tokens"] for call in dispatched_calls
+    )
+    assert (
+        evidence["unresolved_reserved_tokens"]
+        == dispatched_calls[-1]["reserved_tokens"]
+    )
     assert evidence["skipped_case_ids"]
     assert evidence["cleanup"]["database_dropped"] is True
     assert evidence["cleanup"]["cluster_stopped"] is True
     assert evidence["cleanup"]["temporary_directory_removed"] is True
     _assert_cleanup_observed(evidence["cleanup"])
     assert (tmp_path / run_id / "partial.json").is_file()
+
+
+def test_actual_cli_latches_under_reservation_before_later_cases(
+    tmp_path, capsys
+) -> None:
+    run_id = "synthetic-cli-under-reservation-ai5b2"
+    payloads: list[dict] = []
+    result = bridge_main(
+        _cli_arguments(tmp_path, run_id),
+        _test_overrides=CanaryCLIOverrides(
+            credential_loader=lambda: "inert-cli-test-credential",
+            transport_builder=_mocked_cli_transport(
+                payloads,
+                under_reservation_index=0,
+            ),
+        ),
+    )
+    capsys.readouterr()
+    evidence = json.loads(
+        (tmp_path / run_id / "evidence.json").read_text(encoding="utf-8")
+    )
+
+    assert result == 1
+    assert len(payloads) == 1
+    assert evidence["stop_reason"] == "budget_reservation_violation"
+    assert evidence["failed_request_index"] == 1
+    assert evidence["reservation_violations"] == 1
+    assert evidence["unresolved_reserved_tokens"] == 0
+    assert evidence["settled_actual_tokens"] == 39_100
+    assert evidence["provider_calls"][0]["reservation_settled"] is True
+    assert evidence["provider_calls"][0]["reservation_violation"] is True
+    assert evidence["provider_calls"][0]["total_tokens"] == 39_100
+    assert evidence["skipped_case_ids"] == [
+        "B2-C02-FR-QUALIFIED",
+        "B2-C03-FR-INJECTION-P8",
+        "B2-C04-SW-FR-BUDGET",
+    ]
+    assert evidence["cleanup"]["database_dropped"] is True
+    assert evidence["cleanup"]["cluster_stopped"] is True
+    assert evidence["cleanup"]["temporary_directory_removed"] is True
+    _assert_cleanup_observed(evidence["cleanup"])
 
 
 @pytest.mark.parametrize("failure", (RuntimeError("setup failed"), KeyboardInterrupt()))
