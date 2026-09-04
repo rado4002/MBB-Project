@@ -2,7 +2,8 @@
 
 Contract identifier: `mbb-ai5b-contract-v2`
 
-Status: AI-5B1 offline-certification contract and future AI-5B2/AI-5C design.
+Status: AI-5B1 offline certification, AI-5B2 guarded evaluation and future
+AI-5C design.
 This document does not authorize or execute AI-5B2, AI-5C, a live provider, a
 pilot, or a public deployment.
 
@@ -68,17 +69,19 @@ records an under-reservation violation, latches the stage and prevents later
 dispatch. That stop cannot undo tokens already consumed or billed by the
 request that exposed the under-reservation.
 
-Live readiness is blocked pending one Human decision on this proposed budget
-contract: retain the 21-request, 40,000 prompt-plus-completion token, USD 0.05,
-512 completion-token, zero-retry and existing durable-action ceilings; use the
-complete-client-payload estimate only for admission; settle from complete API
-usage when returned; retain unresolved estimates and stop on missing or
-uncertain usage; and stop after an under-reservation while acknowledging that
-one already-accepted request can exceed the token or calculated-cost ceiling.
-Approval means accepting that single-request overrun risk, not reclassifying
-the estimate as a guarantee. Otherwise a compatible provider-enforced
-preflight count or quota is required. No live run may load a credential or
-dispatch while this decision remains unresolved.
+AI-5B2 provides an evaluation-only acceptance gate for one Human decision on
+this proposed budget contract. The gate does not supply or imply acceptance.
+For each guarded run, the project owner must provide a new strict
+`mbb-ai5b2-budget-decision-v1` document that retains the 21-request, 40,000
+prompt-plus-completion token, USD 0.05, 512 completion-token, zero-retry and
+existing tool/durable-action ceilings; uses the complete-client-payload
+estimate only for admission; settles from complete API usage when returned;
+retains unresolved estimates and stops on missing or uncertain usage; and
+stops after an under-reservation while acknowledging that one already-
+dispatched request can exceed the token or calculated-cost ceiling. Acceptance
+of that single-request overrun risk does not reclassify the estimate as a
+guarantee. A missing, false, malformed, stale or mismatched decision stops
+before credential loading, disposable-database creation or provider dispatch.
 
 The same run's `154 000 FC` claim is supported by the disposable fixture's
 USD 55.00 price and current USD-to-CDF rate of 2,800, the existing
@@ -395,11 +398,37 @@ create/migrate/seed/test/drop/stop/remove lifecycle:
 python scripts/run_ai5b2_canary_bridge.py --offline-postgres
 ```
 
-Ambient credentials never activate live mode. Live selection is currently
-blocked by `human_budget_contract_decision_required`. After that decision, a
-future selection would still require an explicit live flag, safe run identifier,
-exact frozen case set, disabled business effects, newly verified official
-pricing and an assigned Human reviewer before credential loading.
+Ambient credentials never activate live mode. A guarded run must receive the
+decision document explicitly through `--budget-decision-file`; there is no
+accepted default. The strict document contains no credential or secret and
+must record `accepted: true`, `accepted_by: project-owner`, decision and
+contract versions, acceptance and expiry timestamps, a decision identifier,
+and exact run, authorization-record and 40-character Git-commit bindings. Its
+validity interval may not exceed 24 hours, it must already have begun, and it
+must remain unexpired when checked. A decision bound to one run cannot be used
+for another run or authorization.
+
+The accepted limits snapshot is exact: four case executions; 21 provider
+requests; 40,000 total API tokens; USD 0.05; 512 completion tokens per request;
+zero automatic provider retries; one evaluation durable action for the stage;
+the protected AITurnService ceilings of three provider calls, two tool rounds,
+three capability executions and two durable-action attempts per turn; a
+12-second `provider_request` deadline; a 60-second `evaluation_operation`
+watchdog; and a 600-second `complete_four_case_stage` ceiling. It must also
+accept settlement from complete API usage, retention of unresolved estimates,
+stopping on missing or uncertain usage, the possible one-request token or cost
+overrun, and the prohibition on any subsequent dispatch after that overrun.
+
+The runner parses and validates this decision and atomically persists its safe
+fields to external partial evidence before preparing PostgreSQL. The same
+typed decision is checked again inside provider selection after the existing
+baseline, metadata, pricing, reviewer, configuration, external-effect and
+database-isolation gates and before credential loading. Passing the budget
+decision gate therefore bypasses none of those gates, nor any evidence,
+settlement, budget, deadline or authorization control. The external run
+authorization must still use an explicit live flag, safe run identifier, exact
+frozen case set, disabled business effects, newly verified official pricing
+and an assigned Human reviewer.
 The authorization record is bound to the run identifier, current Git baseline
 and exact frozen case set. Pricing-verification and reviewer-assignment records
 are explicit metadata; reviewer assignment is not completed review. Live mode
@@ -434,12 +463,12 @@ state, protected snapshot hashes, per-call admission estimates, returned usage,
 ordered tool traces and latency, stop/skipped-case fields, and final cleanup.
 Absent usage remains null while its pre-call estimate is retained; late usage
 observed after a timeout is recorded without making the discarded completion
-eligible. Hidden reasoning,
-credentials and continuation state remain excluded. This does not itself
-authorize a run: the budget-contract decision remains unresolved, and later
-live flags plus non-synthetic authorization, official-pricing and assigned
-Human-reviewer records must come from a fresh authorization bound to the final
-commit.
+eligible. Hidden reasoning, credentials and continuation state remain
+excluded. Final evidence retains the same redacted budget-decision record and
+cleanup outcome. This mechanism does not itself authorize a run: live flags
+plus a non-synthetic fresh project-owner decision, authorization,
+official-pricing and assigned Human-reviewer records must be bound to the
+eventual committed HEAD.
 
 Offline mocked-HTTP certification uses the same guarded stage function with an
 inert credential loader and records explicitly marked synthetic. All four cases

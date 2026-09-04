@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import Iterator, Literal, TypeVar
@@ -55,6 +56,8 @@ AI5B2_MAX_PROVIDER_CALLS = 21
 AI5B2_MAX_TOTAL_TOKENS = 40_000
 AI5B2_MAX_COST_USD = Decimal("0.05")
 AI5B2_EXPECTED_PROVIDER_CALLS = 7
+AI5B2_BUDGET_DECISION_VERSION = "mbb-ai5b2-budget-decision-v1"
+AI5B2_BUDGET_DECISION_MAX_AGE = timedelta(hours=24)
 
 # These are deliberately synthetic accounting fixtures, not provider pricing.
 OFFLINE_FIXTURE_INPUT_USD_PER_MILLION = Decimal("0.50")
@@ -1037,6 +1040,54 @@ class CanaryReviewerAssignmentRecord(_StrictModel):
     synthetic: bool = False
 
 
+class AI5B2BudgetDecisionLimits(_StrictModel):
+    """Exact ceilings and scopes accepted by the project owner for one run."""
+
+    case_executions: int
+    provider_requests: int
+    total_api_tokens: int
+    cost_usd: Decimal
+    completion_tokens_per_request: int
+    automatic_provider_retries: int
+    evaluation_durable_actions: int
+    ai_turn_provider_calls: int
+    ai_turn_tool_rounds: int
+    ai_turn_capability_executions: int
+    ai_turn_durable_action_attempts: int
+    provider_deadline_seconds: int
+    provider_deadline_scope: str
+    outer_watchdog_seconds: int
+    outer_watchdog_scope: str
+    stage_ceiling_seconds: int
+    stage_ceiling_scope: str
+
+
+class AI5B2BudgetDecision(_StrictModel):
+    """Non-secret, single-run acceptance of estimated-admission overrun risk."""
+
+    decision_id: str
+    decision_version: str
+    contract_version: str
+    accepted: bool
+    accepted_by: str
+    accepted_at: datetime
+    valid_until: datetime
+    run_id: str
+    authorization_record_id: str
+    baseline_commit: str
+    limits: AI5B2BudgetDecisionLimits
+    admission_method: str
+    settle_from_complete_api_usage: bool
+    retain_unresolved_estimates: bool
+    stop_on_missing_or_uncertain_usage: bool
+    accepts_single_dispatched_request_token_or_cost_overrun: bool
+    accepts_no_subsequent_dispatch_after_overrun: bool
+    synthetic: bool = False
+
+    def evidence(self) -> dict[str, JsonValue]:
+        return self.model_dump(mode="json")
+
+
 class AI5B2ProviderSelection(_StrictModel):
     mode: CanaryProviderMode = CanaryProviderMode.dry_run
     explicit_live_opt_in: bool = False
@@ -1049,6 +1100,7 @@ class AI5B2ProviderSelection(_StrictModel):
     authorization: CanaryAuthorizationRecord | None = None
     pricing_verification: CanaryPricingVerificationRecord | None = None
     reviewer_assignment: CanaryReviewerAssignmentRecord | None = None
+    budget_decision: AI5B2BudgetDecision | None = None
     external_effects_disabled: bool = False
     disposable_database_isolated: bool = False
 
@@ -1161,8 +1213,113 @@ def _validate_live_selection(selection: AI5B2ProviderSelection) -> None:
         records_are_synthetic
     ):
         raise AI5B2BridgeConfigurationError("offline_records_must_be_synthetic")
-    if selection.mode == CanaryProviderMode.live:
-        raise AI5B2BridgeConfigurationError("human_budget_contract_decision_required")
+    validate_ai5b2_budget_decision(
+        selection.budget_decision,
+        run_id=selection.run_id,
+        authorization_record_id=authorization.record_id,
+        authorized_baseline=authorization.baseline_commit,
+        current_baseline_commit=selection.current_baseline_commit,
+        budget=selection.budget,
+        synthetic=selection.mode == CanaryProviderMode.offline_mocked_http,
+    )
+
+
+def validate_ai5b2_budget_decision(
+    decision: AI5B2BudgetDecision | None,
+    *,
+    run_id: str | None,
+    authorization_record_id: str | None,
+    authorized_baseline: str | None,
+    current_baseline_commit: str | None,
+    budget: AI5B2BudgetProfile,
+    synthetic: bool,
+    now: datetime | None = None,
+) -> None:
+    """Fail closed unless one fresh decision exactly matches this guarded run."""
+    if decision is None:
+        raise AI5B2BridgeConfigurationError("budget_decision_required")
+    if not decision.accepted:
+        raise AI5B2BridgeConfigurationError("budget_decision_not_accepted")
+    if decision.accepted_by != "project-owner":
+        raise AI5B2BridgeConfigurationError("budget_decision_acceptor_invalid")
+    if _SAFE_RECORD_ID.fullmatch(decision.decision_id) is None:
+        raise AI5B2BridgeConfigurationError("budget_decision_id_invalid")
+    if decision.decision_version != AI5B2_BUDGET_DECISION_VERSION:
+        raise AI5B2BridgeConfigurationError("budget_decision_version_mismatch")
+    if decision.contract_version != AI5B_CONTRACT_VERSION:
+        raise AI5B2BridgeConfigurationError("budget_decision_contract_mismatch")
+    if decision.run_id != run_id:
+        raise AI5B2BridgeConfigurationError("budget_decision_run_mismatch")
+    if decision.authorization_record_id != authorization_record_id:
+        raise AI5B2BridgeConfigurationError("budget_decision_authorization_mismatch")
+    if (
+        decision.baseline_commit != current_baseline_commit
+        or decision.baseline_commit != authorized_baseline
+    ):
+        raise AI5B2BridgeConfigurationError("budget_decision_commit_mismatch")
+    expected_limits = AI5B2BudgetDecisionLimits(
+        case_executions=4,
+        provider_requests=AI5B2_MAX_PROVIDER_CALLS,
+        total_api_tokens=AI5B2_MAX_TOTAL_TOKENS,
+        cost_usd=AI5B2_MAX_COST_USD,
+        completion_tokens_per_request=AI5B_MAX_OUTPUT_TOKENS,
+        automatic_provider_retries=0,
+        evaluation_durable_actions=1,
+        ai_turn_provider_calls=3,
+        ai_turn_tool_rounds=2,
+        ai_turn_capability_executions=3,
+        ai_turn_durable_action_attempts=2,
+        provider_deadline_seconds=AI5B1_PROVIDER_DEADLINE_SECONDS,
+        provider_deadline_scope="provider_request",
+        outer_watchdog_seconds=AI5B1_OUTER_WATCHDOG_SECONDS,
+        outer_watchdog_scope="evaluation_operation",
+        stage_ceiling_seconds=AI5B2_STAGE_CEILING_SECONDS,
+        stage_ceiling_scope="complete_four_case_stage",
+    )
+    if decision.limits != expected_limits or (
+        budget.max_case_executions != expected_limits.case_executions
+        or budget.max_provider_calls != expected_limits.provider_requests
+        or budget.max_total_tokens != expected_limits.total_api_tokens
+        or budget.max_cost_usd != expected_limits.cost_usd
+        or budget.max_output_tokens_per_call
+        != expected_limits.completion_tokens_per_request
+        or budget.automatic_provider_retries
+        != expected_limits.automatic_provider_retries
+        or budget.provider_deadline_seconds != expected_limits.provider_deadline_seconds
+        or budget.outer_watchdog_seconds != expected_limits.outer_watchdog_seconds
+        or budget.stage_ceiling_seconds != expected_limits.stage_ceiling_seconds
+    ):
+        raise AI5B2BridgeConfigurationError("budget_decision_limits_mismatch")
+    if decision.admission_method != "utf8_wire_bytes_plus_json_nodes_estimate_v1":
+        raise AI5B2BridgeConfigurationError("budget_decision_admission_mismatch")
+    if not all(
+        (
+            decision.settle_from_complete_api_usage,
+            decision.retain_unresolved_estimates,
+            decision.stop_on_missing_or_uncertain_usage,
+            decision.accepts_single_dispatched_request_token_or_cost_overrun,
+            decision.accepts_no_subsequent_dispatch_after_overrun,
+        )
+    ):
+        raise AI5B2BridgeConfigurationError("budget_decision_risk_not_accepted")
+    if decision.synthetic != synthetic:
+        raise AI5B2BridgeConfigurationError("budget_decision_synthetic_mismatch")
+    accepted_at = decision.accepted_at
+    valid_until = decision.valid_until
+    if accepted_at.tzinfo is None or valid_until.tzinfo is None:
+        raise AI5B2BridgeConfigurationError("budget_decision_time_invalid")
+    current_time = now or datetime.now(timezone.utc)
+    accepted_at = accepted_at.astimezone(timezone.utc)
+    valid_until = valid_until.astimezone(timezone.utc)
+    current_time = current_time.astimezone(timezone.utc)
+    if (
+        accepted_at > current_time
+        or valid_until <= current_time
+        or current_time - accepted_at > AI5B2_BUDGET_DECISION_MAX_AGE
+        or valid_until <= accepted_at
+        or valid_until - accepted_at > AI5B2_BUDGET_DECISION_MAX_AGE
+    ):
+        raise AI5B2BridgeConfigurationError("budget_decision_stale")
 
 
 _StageResult = TypeVar("_StageResult")
@@ -1541,6 +1698,7 @@ class CanaryBridgeEvidence(_StrictModel):
     baseline_commit: str | None = None
     authorization_record_id: str | None = None
     authorization_metadata: dict[str, JsonValue] = Field(default_factory=dict)
+    budget_decision_metadata: dict[str, JsonValue] = Field(default_factory=dict)
     pricing_metadata: dict[str, JsonValue] = Field(default_factory=dict)
     reviewer_assignment_metadata: dict[str, JsonValue] = Field(default_factory=dict)
     external_effect_guards: dict[str, JsonValue] = Field(default_factory=dict)

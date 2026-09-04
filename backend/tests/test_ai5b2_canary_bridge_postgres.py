@@ -17,6 +17,8 @@ import pytest
 from app.adapters.ai.deepseek_adapter import DeepSeekAdapter, _DeepSeekHTTPTransport
 from app.ai.canary_bridge import (
     AI5B2_CANARIES,
+    AI5B2BudgetDecision,
+    AI5B2BudgetDecisionLimits,
     AI5B2BudgetProfile,
     AI5B2ProviderSelection,
     CanaryAuthorizationRecord,
@@ -60,6 +62,52 @@ def _assert_cleanup_observed(cleanup: dict) -> None:
         socket.create_connection(("127.0.0.1", cleanup["loopback_port"]), timeout=1)
 
 
+def _budget_decision_record(
+    run_id: str,
+    baseline: str,
+    authorization_record_id: str,
+) -> AI5B2BudgetDecision:
+    accepted_at = datetime.now(timezone.utc)
+    return AI5B2BudgetDecision(
+        decision_id=f"synthetic:budget-decision:{run_id}",
+        decision_version="mbb-ai5b2-budget-decision-v1",
+        contract_version="mbb-ai5b-contract-v2",
+        accepted=True,
+        accepted_by="project-owner",
+        accepted_at=accepted_at,
+        valid_until=accepted_at + timedelta(hours=1),
+        run_id=run_id,
+        authorization_record_id=authorization_record_id,
+        baseline_commit=baseline,
+        limits=AI5B2BudgetDecisionLimits(
+            case_executions=4,
+            provider_requests=21,
+            total_api_tokens=40_000,
+            cost_usd=Decimal("0.05"),
+            completion_tokens_per_request=512,
+            automatic_provider_retries=0,
+            evaluation_durable_actions=1,
+            ai_turn_provider_calls=3,
+            ai_turn_tool_rounds=2,
+            ai_turn_capability_executions=3,
+            ai_turn_durable_action_attempts=2,
+            provider_deadline_seconds=12,
+            provider_deadline_scope="provider_request",
+            outer_watchdog_seconds=60,
+            outer_watchdog_scope="evaluation_operation",
+            stage_ceiling_seconds=600,
+            stage_ceiling_scope="complete_four_case_stage",
+        ),
+        admission_method="utf8_wire_bytes_plus_json_nodes_estimate_v1",
+        settle_from_complete_api_usage=True,
+        retain_unresolved_estimates=True,
+        stop_on_missing_or_uncertain_usage=True,
+        accepts_single_dispatched_request_token_or_cost_overrun=True,
+        accepts_no_subsequent_dispatch_after_overrun=True,
+        synthetic=True,
+    )
+
+
 def _cli_arguments(tmp_path, run_id: str) -> tuple[str, ...]:
     baseline = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -67,6 +115,16 @@ def _cli_arguments(tmp_path, run_id: str) -> tuple[str, ...]:
         capture_output=True,
         text=True,
     ).stdout.strip()
+    authorization_record_id = f"synthetic:authorization:{run_id}"
+    decision_path = tmp_path / f"{run_id}-budget-decision.json"
+    decision_path.write_text(
+        _budget_decision_record(
+            run_id,
+            baseline,
+            authorization_record_id,
+        ).model_dump_json(),
+        encoding="utf-8",
+    )
     return (
         "--live",
         "--authorize-live",
@@ -75,7 +133,9 @@ def _cli_arguments(tmp_path, run_id: str) -> tuple[str, ...]:
         "--authorized-baseline",
         baseline,
         "--authorization-record-id",
-        f"synthetic:authorization:{run_id}",
+        authorization_record_id,
+        "--budget-decision-file",
+        str(decision_path),
         "--pricing-record-id",
         f"synthetic:pricing:{run_id}",
         "--pricing-source",
@@ -564,6 +624,7 @@ async def test_four_frozen_canaries_traverse_real_m1_and_postgres(
 
     run_id = "synthetic-ai5b2-postgres-run"
     baseline_commit = "1" * 40
+    authorization_record_id = "synthetic:authorization:ai5b2-postgres"
     await dispatch_guarded_canary_stage(
         AI5B2ProviderSelection(
             mode=CanaryProviderMode.offline_mocked_http,
@@ -571,7 +632,7 @@ async def test_four_frozen_canaries_traverse_real_m1_and_postgres(
             run_id=run_id,
             current_baseline_commit=baseline_commit,
             authorization=CanaryAuthorizationRecord(
-                record_id="synthetic:authorization:ai5b2-postgres",
+                record_id=authorization_record_id,
                 run_id=run_id,
                 baseline_commit=baseline_commit,
                 synthetic=True,
@@ -582,6 +643,11 @@ async def test_four_frozen_canaries_traverse_real_m1_and_postgres(
                 reviewer_id="synthetic:reviewer:not-a-human-review",
                 drc_language_familiarity_confirmed=True,
                 synthetic=True,
+            ),
+            budget_decision=_budget_decision_record(
+                run_id,
+                baseline_commit,
+                authorization_record_id,
             ),
             external_effects_disabled=True,
             disposable_database_isolated=True,
@@ -899,6 +965,14 @@ def test_actual_cli_orchestrates_complete_mocked_stage_and_cleanup(
     def credential_loader() -> str:
         nonlocal credential_loads
         credential_loads += 1
+        partial_before_credential = json.loads(
+            (tmp_path / run_id / "partial.json").read_text(encoding="utf-8")
+        )
+        assert partial_before_credential["budget_decision_metadata"]["accepted"] is True
+        assert (
+            partial_before_credential["budget_decision_metadata"]["accepted_by"]
+            == "project-owner"
+        )
         return "inert-cli-test-credential"
 
     result = bridge_main(
@@ -917,6 +991,10 @@ def test_actual_cli_orchestrates_complete_mocked_stage_and_cleanup(
     assert len(payloads) == 7
     assert evidence["overall_decision"] == "manual_review_pending"
     assert evidence["evidence_state"] == "final"
+    assert evidence["budget_decision_metadata"]["accepted"] is True
+    assert evidence["budget_decision_metadata"]["accepted_by"] == "project-owner"
+    assert evidence["budget_decision_metadata"]["run_id"] == run_id
+    assert evidence["budget_decision_metadata"]["baseline_commit"]
     assert evidence["external_effect_guards"] == {
         "AI_ADAPTER": "disabled",
         "AI_TURN_PROVIDER": "deepseek",
@@ -1033,6 +1111,8 @@ def test_actual_cli_orchestrates_complete_mocked_stage_and_cleanup(
     assert evidence["cleanup"]["run_scoped_settings_restored"] is True
     _assert_cleanup_observed(evidence["cleanup"])
     assert partial_path.is_file()
+    partial = json.loads(partial_path.read_text(encoding="utf-8"))
+    assert partial["budget_decision_metadata"] == evidence["budget_decision_metadata"]
     assert "CLI_HIDDEN_REASONING_MUST_NOT_PERSIST" not in evidence_path.read_text(
         encoding="utf-8"
     )

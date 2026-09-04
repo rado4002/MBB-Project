@@ -22,6 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from pydantic import ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -33,6 +34,7 @@ from app.adapters.ai.disabled_adapter import DisabledAIAdapter  # noqa: E402
 from app.adapters.base import ProviderTurnAdapter  # noqa: E402
 from app.ai.canary_bridge import (  # noqa: E402
     AI5B2_CANARIES,
+    AI5B2BudgetDecision,
     AI5B2BridgeConfigurationError,
     AI5B2BudgetProfile,
     AI5B2ProviderSelection,
@@ -53,6 +55,7 @@ from app.ai.canary_bridge import (  # noqa: E402
     dispatch_guarded_canary_stage,
     dry_run_manifest,
     evaluate_c01_commercial_response,
+    validate_ai5b2_budget_decision,
 )
 from app.ai.offline_certification import (  # noqa: E402
     EvaluationDeadlineAdapter,
@@ -148,6 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id")
     parser.add_argument("--authorized-baseline")
     parser.add_argument("--authorization-record-id")
+    parser.add_argument("--budget-decision-file")
     parser.add_argument("--pricing-record-id")
     parser.add_argument("--pricing-source")
     parser.add_argument("--pricing-verified-at")
@@ -175,6 +179,26 @@ def _current_head() -> str:
         timeout=10,
     )
     return completed.stdout.strip() if completed.returncode == 0 else ""
+
+
+def _load_budget_decision(path_value: str | None) -> AI5B2BudgetDecision:
+    if not path_value:
+        raise AI5B2BridgeConfigurationError("budget_decision_required")
+    path = Path(path_value).expanduser()
+    try:
+        if not path.is_file() or path.stat().st_size > 32_768:
+            raise AI5B2BridgeConfigurationError("budget_decision_file_unavailable")
+        serialized = path.read_text(encoding="utf-8")
+    except AI5B2BridgeConfigurationError:
+        raise
+    except (OSError, UnicodeError):
+        raise AI5B2BridgeConfigurationError(
+            "budget_decision_file_unavailable"
+        ) from None
+    try:
+        return AI5B2BudgetDecision.model_validate_json(serialized)
+    except ValidationError:
+        raise AI5B2BridgeConfigurationError("budget_decision_malformed") from None
 
 
 def _external_effects_are_disabled() -> bool:
@@ -1061,6 +1085,11 @@ async def _dispatch_authorized_canaries(
             if selection.authorization
             else {}
         ),
+        budget_decision_metadata=(
+            selection.budget_decision.evidence()
+            if selection.budget_decision is not None
+            else {}
+        ),
         pricing_metadata=(
             {
                 "record_id": pricing.record_id,
@@ -1204,6 +1233,7 @@ async def _execute_isolated_stage(
     runtime: DisposablePostgresRuntime,
     overrides: CanaryCLIOverrides | None,
     partial_evidence_path: Path,
+    budget_decision: AI5B2BudgetDecision,
 ) -> CanaryBridgeEvidence:
     engine, factory = await _install_database_runtime(runtime)
     try:
@@ -1221,6 +1251,7 @@ async def _execute_isolated_stage(
             authorization=authorization,
             pricing_verification=pricing,
             reviewer_assignment=reviewer,
+            budget_decision=budget_decision,
             external_effects_disabled=args.external_effects_disabled
             and _external_effects_are_disabled(),
             disposable_database_isolated=_disposable_database_is_isolated(),
@@ -1239,6 +1270,7 @@ async def _execute_isolated_stage(
                 {
                     "run_id": args.run_id,
                     "baseline_commit": selection.current_baseline_commit,
+                    "budget_decision_metadata": budget_decision.evidence(),
                     "evidence_state": "partial",
                     "tool_traces": records,
                     "tool_trace_complete": complete,
@@ -1335,6 +1367,7 @@ async def _execute_isolated_stage(
                 partial = {
                     "run_id": args.run_id,
                     "baseline_commit": selection.current_baseline_commit,
+                    "budget_decision_metadata": budget_decision.evidence(),
                     "evidence_state": "partial",
                     "overall_decision": "failed",
                     "stop_reason": latch.stop_reason,
@@ -1406,13 +1439,25 @@ def main(
     runtime = DisposablePostgresRuntime(suite="ai5b2_guarded_stage")
     report: CanaryBridgeEvidence | None = None
     failure: BaseException | None = None
+    budget_decision: AI5B2BudgetDecision | None = None
     try:
         evidence_directory = _evidence_directory(args, run_id, runtime)
+        budget_decision = _load_budget_decision(args.budget_decision_file)
+        validate_ai5b2_budget_decision(
+            budget_decision,
+            run_id=args.run_id,
+            authorization_record_id=args.authorization_record_id,
+            authorized_baseline=args.authorized_baseline,
+            current_baseline_commit=_current_head(),
+            budget=AI5B2BudgetProfile(),
+            synthetic=_test_overrides is not None,
+        )
         _write_atomic(
             evidence_directory / "partial.json",
             {
                 "run_id": run_id,
                 "baseline_commit": _current_head(),
+                "budget_decision_metadata": budget_decision.evidence(),
                 "evidence_state": "partial",
                 "provider_dispatches": 0,
                 "database_lifecycle": runtime.evidence(),
@@ -1428,6 +1473,7 @@ def main(
                     runtime,
                     _test_overrides,
                     evidence_directory / "partial.json",
+                    budget_decision,
                 )
             )
         _write_atomic(evidence_directory / "partial.json", report)
@@ -1458,6 +1504,9 @@ def main(
         final_value = {
             "run_id": run_id,
             "baseline_commit": _current_head(),
+            "budget_decision_metadata": (
+                budget_decision.evidence() if budget_decision is not None else {}
+            ),
             "evidence_state": "final",
             "overall_decision": "failed",
             "safe_failure_code": (

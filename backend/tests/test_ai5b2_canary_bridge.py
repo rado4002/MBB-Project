@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -13,6 +14,8 @@ from app.ai.canary_bridge import (
     AI5B2_CANARIES,
     AI5B2_CANARY_IDS,
     AI5B2BridgeConfigurationError,
+    AI5B2BudgetDecision,
+    AI5B2BudgetDecisionLimits,
     AI5B2BudgetProfile,
     AI5B2ProviderSelection,
     C01CommercialFacts,
@@ -50,10 +53,55 @@ from app.ai.provider_contract import (
     ProviderTurnResult,
     ProviderUsage,
 )
+import scripts.run_ai5b2_canary_bridge as bridge_script
 from scripts.run_ai5b2_canary_bridge import main as bridge_main
 
 
 _SYNTHETIC_BASELINE = "1" * 40
+
+
+def _synthetic_budget_decision(
+    run_id: str = "synthetic-ai5b2-run",
+) -> AI5B2BudgetDecision:
+    accepted_at = datetime.now(timezone.utc)
+    return AI5B2BudgetDecision(
+        decision_id=f"synthetic:budget-decision:{run_id}",
+        decision_version="mbb-ai5b2-budget-decision-v1",
+        contract_version="mbb-ai5b-contract-v2",
+        accepted=True,
+        accepted_by="project-owner",
+        accepted_at=accepted_at,
+        valid_until=accepted_at + timedelta(hours=1),
+        run_id=run_id,
+        authorization_record_id="synthetic:authorization:ai5b2",
+        baseline_commit=_SYNTHETIC_BASELINE,
+        limits=AI5B2BudgetDecisionLimits(
+            case_executions=4,
+            provider_requests=21,
+            total_api_tokens=40_000,
+            cost_usd=Decimal("0.05"),
+            completion_tokens_per_request=512,
+            automatic_provider_retries=0,
+            evaluation_durable_actions=1,
+            ai_turn_provider_calls=3,
+            ai_turn_tool_rounds=2,
+            ai_turn_capability_executions=3,
+            ai_turn_durable_action_attempts=2,
+            provider_deadline_seconds=12,
+            provider_deadline_scope="provider_request",
+            outer_watchdog_seconds=60,
+            outer_watchdog_scope="evaluation_operation",
+            stage_ceiling_seconds=600,
+            stage_ceiling_scope="complete_four_case_stage",
+        ),
+        admission_method="utf8_wire_bytes_plus_json_nodes_estimate_v1",
+        settle_from_complete_api_usage=True,
+        retain_unresolved_estimates=True,
+        stop_on_missing_or_uncertain_usage=True,
+        accepts_single_dispatched_request_token_or_cost_overrun=True,
+        accepts_no_subsequent_dispatch_after_overrun=True,
+        synthetic=True,
+    )
 
 
 def _synthetic_dispatch_records(run_id: str = "synthetic-ai5b2-run") -> dict:
@@ -79,6 +127,7 @@ def _synthetic_dispatch_records(run_id: str = "synthetic-ai5b2-run") -> dict:
             drc_language_familiarity_confirmed=True,
             synthetic=True,
         ),
+        "budget_decision": _synthetic_budget_decision(run_id),
         "external_effects_disabled": True,
         "disposable_database_isolated": True,
     }
@@ -249,22 +298,235 @@ def test_live_validation_precedes_credentials_and_dispatch() -> None:
     live_records["reviewer_assignment"] = live_records[
         "reviewer_assignment"
     ].model_copy(update={"synthetic": False})
-    with pytest.raises(AI5B2BridgeConfigurationError) as budget_decision:
+    live_records["budget_decision"] = live_records["budget_decision"].model_copy(
+        update={"synthetic": False}
+    )
+    missing_decision_records = {**live_records, "budget_decision": None}
+    with pytest.raises(AI5B2BridgeConfigurationError) as missing_decision:
         select_canary_provider(
             AI5B2ProviderSelection(
                 mode=CanaryProviderMode.live,
                 explicit_live_opt_in=True,
                 run_id="synthetic-ai5b2-run",
-                **live_records,
+                **missing_decision_records,
             ),
             offline_factory=lambda: _SequenceAdapter(_result()),
             credential_loader=load_credential,
             live_factory=construct,
         )
-    assert budget_decision.value.safe_code == (
-        "human_budget_contract_decision_required"
-    )
+    assert missing_decision.value.safe_code == "budget_decision_required"
     assert credential_loads == 1 and constructions == 1
+
+    false_decision_records = {
+        **live_records,
+        "budget_decision": live_records["budget_decision"].model_copy(
+            update={"accepted": False}
+        ),
+    }
+    with pytest.raises(AI5B2BridgeConfigurationError) as false_decision:
+        select_canary_provider(
+            AI5B2ProviderSelection(
+                mode=CanaryProviderMode.live,
+                explicit_live_opt_in=True,
+                run_id="synthetic-ai5b2-run",
+                **false_decision_records,
+            ),
+            offline_factory=lambda: _SequenceAdapter(_result()),
+            credential_loader=load_credential,
+            live_factory=construct,
+        )
+    assert false_decision.value.safe_code == "budget_decision_not_accepted"
+    assert credential_loads == 1 and constructions == 1
+
+    selected_live = select_canary_provider(
+        AI5B2ProviderSelection(
+            mode=CanaryProviderMode.live,
+            explicit_live_opt_in=True,
+            run_id="synthetic-ai5b2-run",
+            **live_records,
+        ),
+        offline_factory=lambda: _SequenceAdapter(_result()),
+        credential_loader=load_credential,
+        live_factory=construct,
+    )
+    assert isinstance(selected_live, _SequenceAdapter)
+    assert credential_loads == 2 and constructions == 2
+
+
+def test_budget_decision_is_exact_fresh_and_not_reusable_for_another_run() -> None:
+    credential_loads = 0
+
+    def load_credential() -> str:
+        nonlocal credential_loads
+        credential_loads += 1
+        return "inert-placeholder"
+
+    base_records = _synthetic_dispatch_records()
+    base_selection = AI5B2ProviderSelection(
+        mode=CanaryProviderMode.offline_mocked_http,
+        explicit_live_opt_in=True,
+        run_id="synthetic-ai5b2-run",
+        **base_records,
+    )
+
+    mismatches = (
+        (
+            "budget_decision_commit_mismatch",
+            {"baseline_commit": "2" * 40},
+        ),
+        ("budget_decision_run_mismatch", {"run_id": "synthetic-other-run"}),
+        (
+            "budget_decision_authorization_mismatch",
+            {"authorization_record_id": "synthetic:authorization:other"},
+        ),
+        (
+            "budget_decision_contract_mismatch",
+            {"contract_version": "mbb-ai5b-contract-v1"},
+        ),
+        (
+            "budget_decision_version_mismatch",
+            {"decision_version": "mbb-ai5b2-budget-decision-v0"},
+        ),
+        (
+            "budget_decision_limits_mismatch",
+            {
+                "limits": base_records["budget_decision"].limits.model_copy(
+                    update={"provider_requests": 20}
+                )
+            },
+        ),
+        (
+            "budget_decision_stale",
+            {
+                "accepted_at": datetime.now(timezone.utc) - timedelta(hours=2),
+                "valid_until": datetime.now(timezone.utc) - timedelta(hours=1),
+            },
+        ),
+    )
+    for expected_code, update in mismatches:
+        selection = base_selection.model_copy(
+            update={
+                "budget_decision": base_records["budget_decision"].model_copy(
+                    update=update
+                )
+            }
+        )
+        with pytest.raises(AI5B2BridgeConfigurationError) as failure:
+            select_canary_provider(
+                selection,
+                offline_factory=lambda: _SequenceAdapter(_result()),
+                credential_loader=load_credential,
+                live_factory=lambda _credential: _SequenceAdapter(_result()),
+            )
+        assert failure.value.safe_code == expected_code
+    assert credential_loads == 0
+
+    reused_records = _synthetic_dispatch_records("synthetic-other-run")
+    reused_records["budget_decision"] = base_records["budget_decision"]
+    with pytest.raises(AI5B2BridgeConfigurationError) as reused:
+        select_canary_provider(
+            AI5B2ProviderSelection(
+                mode=CanaryProviderMode.offline_mocked_http,
+                explicit_live_opt_in=True,
+                run_id="synthetic-other-run",
+                **reused_records,
+            ),
+            offline_factory=lambda: _SequenceAdapter(_result()),
+            credential_loader=load_credential,
+            live_factory=lambda _credential: _SequenceAdapter(_result()),
+        )
+    assert reused.value.safe_code == "budget_decision_run_mismatch"
+    assert credential_loads == 0
+
+
+def test_budget_decision_acceptance_has_no_default() -> None:
+    decision = _synthetic_budget_decision().model_dump()
+    decision.pop("accepted")
+    with pytest.raises(ValidationError, match="accepted"):
+        AI5B2BudgetDecision.model_validate(decision)
+
+
+def test_cli_rejects_missing_false_and_malformed_decisions_before_database_or_credential(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    database_prepares = 0
+    credential_loads = 0
+
+    def prepare(_runtime) -> None:
+        nonlocal database_prepares
+        database_prepares += 1
+
+    def load_credential() -> str:
+        nonlocal credential_loads
+        credential_loads += 1
+        return "inert-placeholder"
+
+    monkeypatch.setattr(bridge_script.DisposablePostgresRuntime, "prepare", prepare)
+    monkeypatch.setattr(
+        bridge_script.DisposablePostgresRuntime,
+        "cleanup",
+        lambda _runtime: None,
+    )
+    monkeypatch.setattr(bridge_script, "_credential_loader", load_credential)
+
+    common = (
+        "--live",
+        "--authorize-live",
+        "--authorized-baseline",
+        _SYNTHETIC_BASELINE,
+        "--authorization-record-id",
+        "synthetic:authorization:ai5b2",
+        "--external-effects-disabled",
+        "--evidence-root",
+        str(tmp_path),
+    )
+    cases = []
+    missing_run = "synthetic-missing-decision"
+    cases.append((missing_run, (), "budget_decision_required"))
+
+    false_run = "synthetic-false-decision"
+    false_path = tmp_path / "false-decision.json"
+    false_path.write_text(
+        _synthetic_budget_decision(false_run)
+        .model_copy(
+            update={
+                "accepted": False,
+                "baseline_commit": _SYNTHETIC_BASELINE,
+            }
+        )
+        .model_dump_json(),
+        encoding="utf-8",
+    )
+    cases.append(
+        (
+            false_run,
+            ("--budget-decision-file", str(false_path)),
+            "budget_decision_not_accepted",
+        )
+    )
+
+    malformed_run = "synthetic-malformed-decision"
+    malformed_path = tmp_path / "malformed-decision.json"
+    malformed_path.write_text(
+        '{"accepted":true,"secret":"must-not-persist"}', encoding="utf-8"
+    )
+    cases.append(
+        (
+            malformed_run,
+            ("--budget-decision-file", str(malformed_path)),
+            "budget_decision_malformed",
+        )
+    )
+
+    for run_id, decision_args, expected_code in cases:
+        assert bridge_main((*common, "--run-id", run_id, *decision_args)) == 1
+        evidence = (tmp_path / run_id / "evidence.json").read_text(encoding="utf-8")
+        assert expected_code in evidence
+        assert "must-not-persist" not in evidence
+
+    capsys.readouterr()
+    assert database_prepares == 0
+    assert credential_loads == 0
 
 
 @pytest.mark.asyncio
