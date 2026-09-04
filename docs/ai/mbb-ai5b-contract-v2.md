@@ -33,6 +33,21 @@ the full requested output allowance as
 not a tokenizer result, proven maximum, pre-billing guarantee or provider quota.
 Continuation content is measured only in memory and is not retained.
 
+AI-5B2-R3 adds the protected
+`mbb-commercial-grounding-validator-v1` pre-delivery guard and increments the
+bridge and truth evaluator to `mbb-ai5b2-bridge-v3` and
+`mbb-ai5b2-truth-evaluator-v3`. Successful current-turn `search_products` and
+`get_product_details` Product Offer results are the only price authority. Before
+an ordinary provider-authored response can be finalized, each explicit
+non-budget USD or CDF claim must bind unambiguously to one Sellable Item and
+match that same item's price. A mismatch fails as
+`commercial_grounding_failed`, discards the provider text and enters the
+existing audited M1 fallback path. Transaction-owned terminal handoff
+acknowledgments are unchanged. C03 now accepts either authoritative product-read
+plan and evaluates freshness, item-local prices, unavailable truth and forbidden
+future promises instead of requiring one exact capability. The policy remains
+`mbb-ai-policy-v2-ai4-v3`. This correction does not authorize a live run.
+
 The bounded official-source investigation on 2026-09-03 checked:
 
 - DeepSeek API **Token & Token Usage**, current page, which gives approximate

@@ -4,6 +4,7 @@ import json
 import os
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,12 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from app.ai.audit import AITurnAuditRecord, AITurnOutcome
+from app.ai.capabilities import (
+    CapabilityDefinition,
+    CapabilityRegistry,
+    SearchProductsInput,
+    SearchProductsOutput,
+)
 from app.ai.policy import AI_SYSTEM_POLICY_VERSION
 from app.ai.provider_contract import (
     ProviderContinuationState,
@@ -151,10 +158,65 @@ class _ScriptedFinalAdapter:
 
     async def generate_turn(self, request):
         self.calls.append(request)
+        if len(self.calls) == 1:
+            return ProviderTurnResult(
+                tool_calls=(
+                    ProviderToolCall(
+                        call_id="search_call_1",
+                        capability_name="search_products",
+                        arguments={
+                            "query": "air fryer",
+                            "search_mode": "SELLABLE_ONLY",
+                        },
+                    ),
+                ),
+                finish_reason=ProviderFinishReason.tool_call,
+            )
         return ProviderTurnResult(
             text="Air fryer fictif disponible a 55 USD.",
             finish_reason=ProviderFinishReason.completed,
         )
+
+
+def _scripted_product_registry() -> CapabilityRegistry:
+    async def search_products(_context, _arguments):
+        return {
+            "items": [
+                {
+                    "product_id": uuid.UUID("20000000-0000-4000-8000-000000000002"),
+                    "sellable_item_id": uuid.UUID(
+                        "60000000-0000-4000-8000-000000000006"
+                    ),
+                    "name": "Air fryer fictif",
+                    "model_label": "6L",
+                    "category_code": "air_fryer",
+                    "attributes": {"capacity_l": 6},
+                    "current_usd_price": Decimal("55.00"),
+                    "price_currency": "USD",
+                    "cdf_quote_status": "available",
+                    "derived_cdf_quote": {
+                        "currency": "CDF",
+                        "amount": Decimal("154000.00"),
+                    },
+                    "availability": "available",
+                    "offer_status": "sellable_now",
+                    "is_sellable_now": True,
+                    "primary_media": None,
+                }
+            ]
+        }
+
+    return CapabilityRegistry(
+        (
+            CapabilityDefinition(
+                name="search_products",
+                description="Return the current fictional Product Offer.",
+                input_model=SearchProductsInput,
+                output_model=SearchProductsOutput,
+                handler=search_products,
+            ),
+        )
+    )
 
 
 def _handoff_service(factory, *, audit_appender=None) -> AITurnService:
@@ -203,6 +265,7 @@ async def test_real_m1_scripted_response_persists_outbound_and_audit_atomically(
 
     service = AITurnService(
         scripted,
+        capability_registry=_scripted_product_registry(),
         authority_checker=authority_checker,
         durable_session_factory=factory,
         provider_identity=ProviderIdentity(
@@ -260,7 +323,7 @@ async def test_real_m1_scripted_response_persists_outbound_and_audit_atomically(
 
     assert result["status"] == "processed"
     assert result["send_status"] == "skipped"
-    assert len(scripted.calls) == 1
+    assert len(scripted.calls) == 2
     conversation_id = uuid.UUID(result["conversation_id"])
     outbound_message_id = uuid.UUID(result["outbound_message_id"])
     async with factory() as session:
@@ -362,18 +425,28 @@ async def test_outbound_audit_failure_rolls_back_only_ai_action(
 
     assert persisted is None
     async with factory() as session:
-        assert await session.scalar(
-            select(func.count()).select_from(Message).where(
-                Message.conversation_id == conversation.conversation_id,
-                Message.direction == "inbound",
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(Message)
+                .where(
+                    Message.conversation_id == conversation.conversation_id,
+                    Message.direction == "inbound",
+                )
             )
-        ) == 1
-        assert await session.scalar(
-            select(func.count()).select_from(Message).where(
-                Message.conversation_id == conversation.conversation_id,
-                Message.direction == "outbound",
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(Message)
+                .where(
+                    Message.conversation_id == conversation.conversation_id,
+                    Message.direction == "outbound",
+                )
             )
-        ) == 0
+            == 0
+        )
         assert await session.scalar(select(func.count()).select_from(AITurnAudit)) == 0
         stored_conversation = await session.get(
             Conversation,
@@ -401,9 +474,10 @@ async def test_caller_owned_handoff_can_roll_back_without_partial_state(engine) 
         assert stored is not None
         assert stored.ai_execution_state == "eligible"
         assert stored.ownership_version == 1
-        assert await session.scalar(
-            select(func.count()).select_from(EscalationTicket)
-        ) == 0
+        assert (
+            await session.scalar(select(func.count()).select_from(EscalationTicket))
+            == 0
+        )
 
 
 @pytest.mark.asyncio
@@ -424,7 +498,9 @@ async def test_handoff_and_audit_commit_atomically_and_reasoning_is_excluded(
         )
     )
 
-    assert finalized.text == "D'accord. Je transmets cette conversation à un conseiller."
+    assert (
+        finalized.text == "D'accord. Je transmets cette conversation à un conseiller."
+    )
     assert finalized.outbound_message_id is not None
     assert finalized.audit_persisted is True
     async with factory() as session:
@@ -457,16 +533,22 @@ async def test_handoff_and_audit_commit_atomically_and_reasoning_is_excluded(
             }
         ]
         serialized_audit = json.dumps(
-            {column.name: getattr(audit, column.name) for column in audit.__table__.columns},
+            {
+                column.name: getattr(audit, column.name)
+                for column in audit.__table__.columns
+            },
             default=str,
             sort_keys=True,
         )
         assert HIDDEN_REASONING_SENTINEL not in serialized_audit
-        assert await session.scalar(
-            select(func.count()).select_from(Message).where(
-                Message.direction == "outbound"
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(Message)
+                .where(Message.direction == "outbound")
             )
-        ) == 1
+            == 1
+        )
 
 
 @pytest.mark.asyncio
@@ -498,17 +580,24 @@ async def test_handoff_audit_failure_rolls_back_authority_ticket_and_audit(
         assert stored.human_owner_account_id is None
         assert stored.ai_execution_state == "eligible"
         assert stored.ownership_version == 1
-        assert await session.scalar(
-            select(func.count()).select_from(EscalationTicket)
-        ) == 0
+        assert (
+            await session.scalar(select(func.count()).select_from(EscalationTicket))
+            == 0
+        )
         assert await session.scalar(select(func.count()).select_from(AITurnAudit)) == 0
-        assert await session.scalar(
-            select(func.count()).select_from(Message).where(
-                Message.direction == "inbound"
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(Message)
+                .where(Message.direction == "inbound")
             )
-        ) == 1
-        assert await session.scalar(
-            select(func.count()).select_from(Message).where(
-                Message.direction == "outbound"
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(Message)
+                .where(Message.direction == "outbound")
             )
-        ) == 0
+            == 0
+        )

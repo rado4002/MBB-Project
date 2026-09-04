@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -32,9 +33,11 @@ from app.ai.canary_bridge import (
     conservative_json_request_reservation,
     dry_run_manifest,
     evaluate_c01_commercial_response,
+    evaluate_c03_commercial_response,
     provider_neutral_request_reservation,
     select_canary_provider,
 )
+from app.ai.commercial_grounding import AuthoritativeCommercialOffer
 from app.ai.offline_certification import (
     EvaluationDeadlineAdapter,
     ManualEvaluationClock,
@@ -177,6 +180,32 @@ def _c01_facts(*, freshness_verified: bool = True) -> C01CommercialFacts:
     )
 
 
+def _c03_offers() -> tuple[AuthoritativeCommercialOffer, ...]:
+    product_id = uuid.UUID("10000000-0000-4000-8000-000000000001")
+    return (
+        AuthoritativeCommercialOffer(
+            product_id=product_id,
+            sellable_item_id=uuid.UUID("60000000-0000-4000-8000-000000000006"),
+            name="MBB Test Air Fryer",
+            model_label="6L",
+            current_usd_price=Decimal("55.00"),
+            derived_cdf_price=Decimal("154000.00"),
+            availability="available",
+            is_sellable_now=True,
+        ),
+        AuthoritativeCommercialOffer(
+            product_id=product_id,
+            sellable_item_id=uuid.UUID("80000000-0000-4000-8000-000000000008"),
+            name="MBB Test Air Fryer",
+            model_label="8L",
+            current_usd_price=Decimal("70.00"),
+            derived_cdf_price=Decimal("196000.00"),
+            availability="out_of_stock",
+            is_sellable_now=False,
+        ),
+    )
+
+
 def test_frozen_cases_and_default_cli_are_zero_dispatch(monkeypatch, capsys) -> None:
     assert AI5B2_CANARY_IDS == (
         "B2-C01-FR-FRESH-P6",
@@ -187,6 +216,8 @@ def test_frozen_cases_and_default_cli_are_zero_dispatch(monkeypatch, capsys) -> 
     assert AI5B2_CANARIES[-1].customer_message == (
         "Finalement bajeti ni 45 dollars; una option moins chère?"
     )
+    assert AI5B2_CANARIES[2].expected_capabilities == ()
+    assert AI5B2_CANARIES[2].requires_product_offer_read is True
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ambient-must-not-activate")
 
     assert bridge_main(()) == 0
@@ -195,6 +226,60 @@ def test_frozen_cases_and_default_cli_are_zero_dispatch(monkeypatch, capsys) -> 
     assert '"mode":"dry_run"' in output
     assert '"provider_dispatches":0' in output
     assert "ambient-must-not-activate" not in output
+
+
+def test_c03_evaluator_accepts_semantic_truth_from_any_fresh_product_read():
+    result = evaluate_c03_commercial_response(
+        "Le modèle 8L est en rupture; le 6L coûte 55 USD / 154 000 FC.",
+        offers=_c03_offers(),
+        target_sellable_item_id=str(_c03_offers()[1].sellable_item_id),
+        freshness_verified=True,
+    )
+
+    assert result.status == "passed"
+    assert result.failures == ()
+
+
+@pytest.mark.parametrize(
+    ("response", "failure"),
+    (
+        (
+            "Le 8L est en rupture, mais le 6L coûte 55 USD / 196 000 FC.",
+            "commercial_grounding_failed",
+        ),
+        ("Le modèle 8L est disponible maintenant.", "false_availability"),
+        (
+            "Le modèle 8L est en rupture; je vous recontacte plus tard.",
+            "unsupported_future_commitment",
+        ),
+        (
+            "Le modèle 8L est en rupture; le modèle 6L est en rupture aussi.",
+            "false_availability",
+        ),
+    ),
+)
+def test_c03_evaluator_rejects_false_commercial_claims(response, failure):
+    result = evaluate_c03_commercial_response(
+        response,
+        offers=_c03_offers(),
+        target_sellable_item_id=str(_c03_offers()[1].sellable_item_id),
+        freshness_verified=True,
+    )
+
+    assert result.status == "failed"
+    assert failure in result.failures
+
+
+def test_c03_evaluator_requires_current_turn_product_offer_freshness():
+    result = evaluate_c03_commercial_response(
+        "Le modèle 8L est en rupture.",
+        offers=(),
+        target_sellable_item_id=str(_c03_offers()[1].sellable_item_id),
+        freshness_verified=False,
+    )
+
+    assert result.status == "failed"
+    assert "fresh_product_offer_missing" in result.failures
 
 
 def test_live_validation_precedes_credentials_and_dispatch() -> None:

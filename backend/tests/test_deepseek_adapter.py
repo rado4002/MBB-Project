@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -39,7 +40,9 @@ class _FakeTransport:
         self.error = error
         self.calls: list[dict[str, Any]] = []
 
-    async def create_chat_completion(self, payload: dict[str, Any]) -> Mapping[str, Any]:
+    async def create_chat_completion(
+        self, payload: dict[str, Any]
+    ) -> Mapping[str, Any]:
         self.calls.append(payload)
         if self.error is not None:
             raise self.error
@@ -127,7 +130,9 @@ def test_adapter_exposes_only_safe_provider_identity_metadata() -> None:
 
 
 @pytest.mark.asyncio
-async def test_http_transport_uses_fixed_endpoint_bearer_auth_and_one_offline_attempt() -> None:
+async def test_http_transport_uses_fixed_endpoint_bearer_auth_and_one_offline_attempt() -> (
+    None
+):
     attempts: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -201,9 +206,7 @@ async def test_text_completion_translates_without_reasoning_leak() -> None:
 async def test_oversized_reasoning_payload_is_rejected_without_retention() -> None:
     adapter = DeepSeekAdapter(
         api_key="fake-key",
-        transport=_FakeTransport(
-            _response(reasoning_content="x" * 64_001)
-        ),
+        transport=_FakeTransport(_response(reasoning_content="x" * 64_001)),
     )
 
     with pytest.raises(ProviderTurnError) as captured:
@@ -213,7 +216,9 @@ async def test_oversized_reasoning_payload_is_rejected_without_retention() -> No
 
 
 @pytest.mark.asyncio
-async def test_capability_translation_uses_only_supplied_definitions_without_strict_mode() -> None:
+async def test_capability_translation_uses_only_supplied_definitions_without_strict_mode() -> (
+    None
+):
     transport = _FakeTransport(_response())
     adapter = DeepSeekAdapter(api_key="fake-key", transport=transport)
     capability = _capability()
@@ -294,6 +299,25 @@ async def test_thinking_tool_continuation_replays_opaque_assistant_state() -> No
     first_request = _request(allowed_capabilities=(_capability(),))
     first_result = await adapter.generate_turn(first_request)
     assert first_result.continuation_state is not None
+    nested_product_result = json.dumps(
+        {
+            "items": [
+                {
+                    "sellable_item_id": "p6",
+                    "model_label": "6L",
+                    "current_usd_price": "55.00",
+                    "derived_cdf_quote": {"currency": "CDF", "amount": "154000.00"},
+                },
+                {
+                    "sellable_item_id": "p8",
+                    "model_label": "8L",
+                    "current_usd_price": "70.00",
+                    "derived_cdf_quote": {"currency": "CDF", "amount": "196000.00"},
+                },
+            ]
+        },
+        separators=(",", ":"),
+    )
 
     continuation_request = _request(
         messages=(
@@ -301,7 +325,7 @@ async def test_thinking_tool_continuation_replays_opaque_assistant_state() -> No
             ProviderMessage(
                 role="tool_result",
                 tool_call_id="call_search_1",
-                content='{"results":[{"name":"Fictional Air Fryer"}]}',
+                content=nested_product_result,
             ),
         ),
         allowed_capabilities=(_capability(),),
@@ -321,9 +345,12 @@ async def test_thinking_tool_continuation_replays_opaque_assistant_state() -> No
         {
             "role": "tool",
             "tool_call_id": "call_search_1",
-            "content": '{"results":[{"name":"Fictional Air Fryer"}]}',
+            "content": nested_product_result,
         },
     ]
+    projected_items = json.loads(payload["messages"][-1]["content"])["items"]
+    assert projected_items[0]["derived_cdf_quote"]["amount"] == "154000.00"
+    assert projected_items[1]["derived_cdf_quote"]["amount"] == "196000.00"
     assert "continuation_state" not in continuation_request.model_dump(mode="json")
     assert "private synthetic continuation" not in repr(continuation_request)
 
@@ -391,9 +418,7 @@ def test_every_reasoning_profile_has_an_explicit_mapping(profile, expected) -> N
 
 def test_reasoning_mapping_covers_the_complete_provider_neutral_enum() -> None:
     mapped_profiles = {
-        profile
-        for profile in ProviderReasoningProfile
-        if _reasoning_settings(profile)
+        profile for profile in ProviderReasoningProfile if _reasoning_settings(profile)
     }
     assert mapped_profiles == set(ProviderReasoningProfile)
 
@@ -465,7 +490,9 @@ async def test_non_thinking_tool_call_does_not_require_or_retain_reasoning() -> 
 
 
 @pytest.mark.asyncio
-async def test_structurally_valid_semantically_invalid_arguments_are_not_repaired() -> None:
+async def test_structurally_valid_semantically_invalid_arguments_are_not_repaired() -> (
+    None
+):
     adapter = DeepSeekAdapter(
         api_key="fake-key",
         transport=_FakeTransport(
@@ -583,7 +610,9 @@ async def test_duplicate_provider_tool_call_ids_are_rejected() -> None:
     assert captured.value.category == ProviderErrorCategory.malformed_response
 
 
-def _status_error(status_code: int, *, body: str = "private body") -> httpx.HTTPStatusError:
+def _status_error(
+    status_code: int, *, body: str = "private body"
+) -> httpx.HTTPStatusError:
     request = httpx.Request("POST", "https://api.deepseek.com/chat/completions")
     response = httpx.Response(
         status_code,
@@ -591,7 +620,9 @@ def _status_error(status_code: int, *, body: str = "private body") -> httpx.HTTP
         text=body,
         headers={"x-request-id": "req_safe_error"},
     )
-    return httpx.HTTPStatusError("provider status error", request=request, response=response)
+    return httpx.HTTPStatusError(
+        "provider status error", request=request, response=response
+    )
 
 
 @pytest.mark.asyncio
@@ -599,7 +630,10 @@ def _status_error(status_code: int, *, body: str = "private body") -> httpx.HTTP
     ("provider_error", "expected"),
     [
         (_status_error(400), ProviderErrorCategory.invalid_request),
-        (_status_error(401, body="secret-key-must-not-leak"), ProviderErrorCategory.authentication),
+        (
+            _status_error(401, body="secret-key-must-not-leak"),
+            ProviderErrorCategory.authentication,
+        ),
         (_status_error(402), ProviderErrorCategory.configuration),
         (_status_error(403), ProviderErrorCategory.permission),
         (_status_error(422), ProviderErrorCategory.invalid_request),
@@ -702,7 +736,7 @@ def test_adapter_has_one_fixed_provider_egress_and_no_business_access() -> None:
         "conversation_id",
         "user_id",
         "tool_choice",
-        "strict\": true",
+        'strict": true',
         "temperature",
         "top_p",
         "retry",

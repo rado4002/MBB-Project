@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.ai.audit import AITurnAuditRecord, AITurnOutcome
+from app.ai.commercial_grounding import COMMERCIAL_GROUNDING_FAILURE_CODE
 from app.ai.policy import AI_SYSTEM_POLICY_VERSION
 from app.ai.turn import AITurnExecutionError, FinalizedAITurnResult
 from app.modules.m1_gateway.service import ProcessedInbound
@@ -102,6 +103,23 @@ class _FailingAI:
         )
 
 
+class _GroundingFailingAI:
+    rejected_text = (
+        "Le Air Fryer 8L est en rupture (70 $), mais le modèle 6L est "
+        "disponible à 55 $ (196 000 FC)."
+    )
+
+    async def generate_finalized(self, turn):
+        raise AITurnExecutionError(
+            _audit_record(
+                turn,
+                outcome=AITurnOutcome.failed,
+                safe_code=COMMERCIAL_GROUNDING_FAILURE_CODE,
+            ),
+            RuntimeError(COMMERCIAL_GROUNDING_FAILURE_CODE),
+        )
+
+
 class _UnfinalizedFailingAI:
     async def generate_finalized(self, _turn):
         raise RuntimeError("unexpected service contract failure")
@@ -126,6 +144,7 @@ class _Messaging:
         self.calls = []
         self.audits = []
         self.saved_session_states = []
+        self.persisted_contents = []
         self.inbound_session = None
 
     async def send_message(self, phone, text, *, idempotency_key=None):
@@ -177,8 +196,9 @@ def _patch_normal_flow(
         events.append("inbound")
         return inbound
 
-    async def persist_outbound(**_kwargs):
+    async def persist_outbound(**kwargs):
         events.append("persist")
+        messaging.persisted_contents.append(kwargs["content"])
         return outbound_id
 
     async def append_audit(_session, record):
@@ -221,6 +241,7 @@ def _patch_normal_flow(
         lambda _content: False,
     )
     monkeypatch.setattr(m1, "_dispatch_maps_fanout", lambda **_kwargs: None)
+
     async def _allow_ai(*_args, **_kwargs):
         return True
 
@@ -263,9 +284,7 @@ def test_committed_outbound_uuid_reaches_send_safe_and_adapter(monkeypatch):
 
     result = _run(_process(task))
 
-    assert messaging.calls == [
-        ("+243812345678", "outbound response", str(outbound_id))
-    ]
+    assert messaging.calls == [("+243812345678", "outbound response", str(outbound_id))]
     persisted_at = events.index("persist")
     assert events[persisted_at : persisted_at + 3] == ["persist", "audit", "commit"]
     assert persisted_at < events.index("adapter")
@@ -292,9 +311,7 @@ def test_m1_binds_trusted_context_and_explicit_capability_exposure(monkeypatch):
     assert str(turn.conversation_id) == result["conversation_id"]
     assert turn.expected_ownership_version == 4
     assert turn.allowed_capabilities == m1._M1_AI_CAPABILITIES
-    assert turn.source_message_id == uuid.UUID(
-        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-    )
+    assert turn.source_message_id == uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 
 
 def test_cold_history_excludes_the_current_inbound_from_ai_context(monkeypatch):
@@ -326,12 +343,8 @@ def test_cold_history_excludes_the_current_inbound_from_ai_context(monkeypatch):
         "Ancienne question",
         "Ancienne réponse",
     ]
-    assert "inbound content" not in {
-        item["content"] for item in ai.turns[0].history
-    }
-    assert "messages.message_id !=" in str(
-        messaging.inbound_session.statements[0]
-    )
+    assert "inbound content" not in {item["content"] for item in ai.turns[0].history}
+    assert "messages.message_id !=" in str(messaging.inbound_session.statements[0])
 
 
 def test_cache_from_an_older_ownership_period_is_rebuilt_from_db(monkeypatch):
@@ -438,14 +451,40 @@ def test_ai_failure_preserves_localized_fallback_and_outbound_path(monkeypatch):
     result = _run(_process(_Task()))
 
     fallback = t("error_fallback", "french")
-    assert messaging.calls == [
-        ("+243812345678", fallback, str(outbound_id))
-    ]
+    assert messaging.calls == [("+243812345678", fallback, str(outbound_id))]
     persisted_at = events.index("persist")
     assert events[persisted_at : persisted_at + 3] == ["persist", "audit", "commit"]
     assert messaging.audits[0].outcome == AITurnOutcome.fallback_used.value
     assert result["status"] == "processed"
     assert result["outbound_message_id"] == str(outbound_id)
+
+
+def test_commercial_grounding_failure_discards_bad_text_and_sends_fallback_once(
+    monkeypatch,
+):
+    from app.i18n.messages import t
+
+    outbound_id = uuid.uuid4()
+    events, messaging = _patch_normal_flow(
+        monkeypatch,
+        outbound_id=outbound_id,
+        ai=_GroundingFailingAI(),
+    )
+
+    result = _run(_process(_Task()))
+
+    fallback = t("error_fallback", "french")
+    assert messaging.persisted_contents == [fallback]
+    assert _GroundingFailingAI.rejected_text not in messaging.persisted_contents
+    assert messaging.calls == [("+243812345678", fallback, str(outbound_id))]
+    assert all(
+        audit.outcome != AITurnOutcome.response_generated.value
+        for audit in messaging.audits
+    )
+    assert messaging.audits[0].outcome == AITurnOutcome.fallback_used.value
+    assert messaging.audits[0].safe_code == COMMERCIAL_GROUNDING_FAILURE_CODE
+    assert events.count("adapter") == 1
+    assert result["status"] == "processed"
 
 
 def test_unfinalized_ai_failure_cannot_persist_unaudited_fallback(monkeypatch):
@@ -620,9 +659,7 @@ def test_complete_human_cycle_does_not_reauthorize_stale_ai_send(monkeypatch):
     session = _Session(events)
     observed_versions = []
 
-    async def _generation_gate(
-        *_args, expected_ownership_version=None, **_kwargs
-    ):
+    async def _generation_gate(*_args, expected_ownership_version=None, **_kwargs):
         observed_versions.append(expected_ownership_version)
         return False
 

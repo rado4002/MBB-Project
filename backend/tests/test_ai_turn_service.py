@@ -1,6 +1,7 @@
 import inspect
 import json
 import uuid
+from decimal import Decimal
 
 import pytest
 
@@ -12,8 +13,11 @@ from app.ai.audit import (
 from app.ai.capabilities import (
     CapabilityDefinition,
     CapabilityRegistry,
+    SearchProductsInput,
+    SearchProductsOutput,
     StrictCapabilityModel,
 )
+from app.ai.commercial_grounding import COMMERCIAL_GROUNDING_FAILURE_CODE
 from app.ai.commercial_state import (
     COMMERCIAL_STATE_FINALIZER,
     CommercialState,
@@ -33,6 +37,7 @@ from app.ai.provider_contract import (
 from app.ai.turn import (
     AITurn,
     AITurnBudgetExceeded,
+    AITurnExecutionError,
     AITurnLimits,
     AITurnPersistenceError,
     AITurnService,
@@ -40,6 +45,9 @@ from app.ai.turn import (
 )
 
 CONVERSATION_ID = uuid.UUID("10000000-0000-4000-8000-000000000001")
+PRODUCT_ID = uuid.UUID("20000000-0000-4000-8000-000000000002")
+P6_ID = uuid.UUID("60000000-0000-4000-8000-000000000006")
+P8_ID = uuid.UUID("80000000-0000-4000-8000-000000000008")
 
 
 class _EchoInput(StrictCapabilityModel):
@@ -218,9 +226,48 @@ async def test_turn_without_history_preserves_existing_user_prompt_shape():
         )
     )
 
-    assert adapter.calls[0].messages == (
-        ProviderMessage(role="user", content="Mbote"),
+    assert adapter.calls[0].messages == (ProviderMessage(role="user", content="Mbote"),)
+
+
+def _product_registry(handler) -> CapabilityRegistry:
+    return CapabilityRegistry(
+        (
+            CapabilityDefinition(
+                name="search_products",
+                description="Return current test Product Offer records.",
+                input_model=SearchProductsInput,
+                output_model=SearchProductsOutput,
+                handler=handler,
+            ),
+        )
     )
+
+
+def _product_output() -> dict:
+    def item(item_id, model, usd, cdf, availability, sellable):
+        return {
+            "product_id": PRODUCT_ID,
+            "sellable_item_id": item_id,
+            "name": "MBB Test Air Fryer",
+            "model_label": model,
+            "category_code": "air_fryer",
+            "attributes": {"capacity_l": int(model.removesuffix("L"))},
+            "current_usd_price": Decimal(usd),
+            "price_currency": "USD",
+            "cdf_quote_status": "available",
+            "derived_cdf_quote": {"currency": "CDF", "amount": Decimal(cdf)},
+            "availability": availability,
+            "offer_status": "sellable_now" if sellable else "out_of_stock",
+            "is_sellable_now": sellable,
+            "primary_media": None,
+        }
+
+    return {
+        "items": [
+            item(P6_ID, "6L", "55.00", "154000.00", "available", True),
+            item(P8_ID, "8L", "70.00", "196000.00", "out_of_stock", False),
+        ]
+    }
 
 
 @pytest.mark.asyncio
@@ -331,8 +378,7 @@ async def test_turn_preserves_existing_six_message_history_window():
     adapter = _RecordingAdapter()
     service = AITurnService(adapter)
     history = tuple(
-        {"direction": "inbound", "content": f"history-{index}"}
-        for index in range(8)
+        {"direction": "inbound", "content": f"history-{index}"} for index in range(8)
     )
 
     await service.generate(
@@ -448,6 +494,79 @@ async def test_exposed_capability_executes_and_returns_safe_continuation_result(
 
 
 @pytest.mark.asyncio
+async def test_commercial_grounding_rejects_historical_crossed_price_before_success():
+    async def handler(_context, _arguments):
+        return _product_output()
+
+    bad_response = (
+        "Le Air Fryer 8L est en rupture (70 $), mais le modèle 6L est "
+        "disponible à 55 $ (196 000 FC)."
+    )
+    adapter = _SequenceAdapter(
+        _tool_result(
+            _tool_call(
+                name="search_products",
+                arguments={
+                    "query": "Air Fryer",
+                    "search_mode": "INCLUDE_UNAVAILABLE",
+                },
+            )
+        ),
+        ProviderTurnResult(
+            text=bad_response,
+            finish_reason=ProviderFinishReason.completed,
+        ),
+    )
+    service = AITurnService(
+        adapter,
+        capability_registry=_product_registry(handler),
+        authority_checker=_authority_allowed,
+    )
+
+    with pytest.raises(AITurnExecutionError) as captured:
+        await service.generate_finalized(
+            _turn(allowed_capabilities=("search_products",))
+        )
+
+    assert captured.value.audit_record.outcome == AITurnOutcome.failed
+    assert captured.value.audit_record.safe_code == COMMERCIAL_GROUNDING_FAILURE_CODE
+    assert captured.value.original_error.args == (COMMERCIAL_GROUNDING_FAILURE_CODE,)
+    assert len(adapter.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_commercial_grounding_accepts_correct_multi_product_prices():
+    async def handler(_context, _arguments):
+        return _product_output()
+
+    response = "6L: 55 USD / 154 000 FC; 8L: 70 USD / 196 000 FC."
+    adapter = _SequenceAdapter(
+        _tool_result(
+            _tool_call(
+                name="search_products",
+                arguments={
+                    "query": "Air Fryer",
+                    "search_mode": "INCLUDE_UNAVAILABLE",
+                },
+            )
+        ),
+        ProviderTurnResult(
+            text=response,
+            finish_reason=ProviderFinishReason.completed,
+        ),
+    )
+
+    finalized = await AITurnService(
+        adapter,
+        capability_registry=_product_registry(handler),
+        authority_checker=_authority_allowed,
+    ).generate_finalized(_turn(allowed_capabilities=("search_products",)))
+
+    assert finalized.text == response
+    assert finalized.audit_record.outcome == AITurnOutcome.response_generated
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("requested_name", "exposed", "expected_category"),
     [
@@ -472,7 +591,9 @@ async def test_unknown_or_unexposed_capability_never_executes(
 
     adapter = _SequenceAdapter(
         _tool_result(_tool_call(name=requested_name)),
-        ProviderTurnResult(text="Fallback", finish_reason=ProviderFinishReason.completed),
+        ProviderTurnResult(
+            text="Fallback", finish_reason=ProviderFinishReason.completed
+        ),
     )
     service = AITurnService(
         adapter,
@@ -511,7 +632,9 @@ async def test_malformed_unknown_or_trusted_arguments_never_execute(tool_call):
 
     adapter = _SequenceAdapter(
         _tool_result(tool_call),
-        ProviderTurnResult(text="Clarify", finish_reason=ProviderFinishReason.completed),
+        ProviderTurnResult(
+            text="Clarify", finish_reason=ProviderFinishReason.completed
+        ),
     )
     service = AITurnService(
         adapter,
@@ -519,9 +642,9 @@ async def test_malformed_unknown_or_trusted_arguments_never_execute(tool_call):
         authority_checker=_authority_allowed,
     )
 
-    assert await service.generate(
-        _turn(allowed_capabilities=("echo_value",))
-    ) == "Clarify"
+    assert (
+        await service.generate(_turn(allowed_capabilities=("echo_value",))) == "Clarify"
+    )
     assert executions == 0
     returned = json.loads(adapter.calls[1].messages[-1].content)
     assert returned["error"]["category"] == "invalid_arguments"
@@ -554,7 +677,9 @@ async def test_defense_in_depth_rejects_provider_attempt_to_override_trusted_con
     )
     adapter = _SequenceAdapter(
         unchecked_result,
-        ProviderTurnResult(text="Clarify", finish_reason=ProviderFinishReason.completed),
+        ProviderTurnResult(
+            text="Clarify", finish_reason=ProviderFinishReason.completed
+        ),
     )
     service = AITurnService(
         adapter,
@@ -562,9 +687,9 @@ async def test_defense_in_depth_rejects_provider_attempt_to_override_trusted_con
         authority_checker=_authority_allowed,
     )
 
-    assert await service.generate(
-        _turn(allowed_capabilities=("echo_value",))
-    ) == "Clarify"
+    assert (
+        await service.generate(_turn(allowed_capabilities=("echo_value",))) == "Clarify"
+    )
     assert executions == 0
     returned = json.loads(adapter.calls[1].messages[-1].content)
     assert returned["error"]["category"] == "invalid_arguments"
@@ -721,7 +846,9 @@ async def test_capability_exception_returns_only_safe_normalized_error():
 
     adapter = _SequenceAdapter(
         _tool_result(_tool_call()),
-        ProviderTurnResult(text="Safe fallback", finish_reason=ProviderFinishReason.completed),
+        ProviderTurnResult(
+            text="Safe fallback", finish_reason=ProviderFinishReason.completed
+        ),
     )
     service = AITurnService(
         adapter,
@@ -962,7 +1089,9 @@ def test_policy_is_explicitly_versioned_and_contains_authority_limits():
     ):
         assert prohibited_fact in policy.text
     assert "Human operators remain authoritative" in policy.text
-    assert "matching\napproved capability is available for the current turn" in policy.text
+    assert (
+        "matching\napproved capability is available for the current turn" in policy.text
+    )
     assert "reserve, hold, notify, contact later, book, change delivery" in policy.text
     assert "Recommend one strongest fit" in normalized_policy
     assert "at most two meaningful alternatives" in normalized_policy

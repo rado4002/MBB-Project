@@ -171,6 +171,7 @@ def _mocked_cli_transport(
     missing_usage: bool = False,
     under_reservation_index: int | None = None,
     outcome_probe: bool = False,
+    c03_use_search: bool = False,
 ):
     def build(credential, truth):
         response_tool_rounds = (
@@ -224,8 +225,15 @@ def _mocked_cli_transport(
             (
                 (
                     "b2_c03_offer",
-                    "get_product_details",
-                    {"sellable_item_id": str(truth.unavailable_item_id)},
+                    "search_products" if c03_use_search else "get_product_details",
+                    (
+                        {
+                            "query": "air fryer",
+                            "search_mode": "INCLUDE_UNAVAILABLE",
+                        }
+                        if c03_use_search
+                        else {"sellable_item_id": str(truth.unavailable_item_id)}
+                    ),
                 ),
             ),
             (
@@ -955,10 +963,11 @@ async def test_deepseek_adapter_mocked_http_continues_through_real_application(
     await _assert_protected_unchanged(factory, baseline)
 
 
+@pytest.mark.parametrize("c03_use_search", (False, True))
 def test_actual_cli_orchestrates_complete_mocked_stage_and_cleanup(
-    tmp_path, capsys
+    tmp_path, capsys, c03_use_search
 ) -> None:
-    run_id = "synthetic-cli-success-ai5b2"
+    run_id = f"synthetic-cli-success-ai5b2-{int(c03_use_search)}"
     payloads: list[dict] = []
     credential_loads = 0
 
@@ -979,7 +988,10 @@ def test_actual_cli_orchestrates_complete_mocked_stage_and_cleanup(
         _cli_arguments(tmp_path, run_id),
         _test_overrides=CanaryCLIOverrides(
             credential_loader=credential_loader,
-            transport_builder=_mocked_cli_transport(payloads),
+            transport_builder=_mocked_cli_transport(
+                payloads,
+                c03_use_search=c03_use_search,
+            ),
         ),
     )
     capsys.readouterr()
@@ -1097,6 +1109,11 @@ def test_actual_cli_orchestrates_complete_mocked_stage_and_cleanup(
     assert evidence["cases"][1]["persistence"]["ticket_count"] == 1
     assert evidence["cases"][1]["persistence"]["audit_transitions"]
     assert "rupture" in evidence["cases"][2]["transcript"][1]["content"]
+    assert evidence["cases"][2]["freshness_verified"] is True
+    assert evidence["cases"][2]["commercial_evaluation"]["status"] == "passed"
+    assert evidence["cases"][2]["validated_tools"] == [
+        "search_products" if c03_use_search else "get_product_details"
+    ]
     assert (
         evidence["cases"][3]["persistence"]["commercial_state"]["decision_constraints"][
             0

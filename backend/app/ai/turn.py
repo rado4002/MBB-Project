@@ -1,4 +1,5 @@
 """Provider-neutral MBB AI turn contract and service."""
+
 from __future__ import annotations
 
 import json
@@ -40,6 +41,14 @@ from app.ai.commercial_state import (
     CommercialStateUpdate,
     commercial_state_projection,
     read_commercial_state,
+)
+from app.ai.commercial_grounding import (
+    COMMERCIAL_GROUNDING_FAILURE_CODE,
+    AuthoritativeCommercialOffer,
+    CommercialGroundingError,
+    merge_authoritative_offers,
+    offers_from_capability_output,
+    validate_commercial_grounding,
 )
 from app.ai.policy import get_system_policy
 from app.ai.provider_contract import (
@@ -172,7 +181,9 @@ class FinalizedAITurnResult:
         if not is_handoff and self.text is None:
             raise ValueError("non-terminal finalized turn requires customer text")
         if is_handoff and (self.text is None) != (self.outbound_message_id is None):
-            raise ValueError("terminal text and persisted outbound must appear together")
+            raise ValueError(
+                "terminal text and persisted outbound must appear together"
+            )
         if not is_handoff and self.outbound_message_id is not None:
             raise ValueError("normal turn cannot pre-persist its outbound message")
         if is_handoff != self.audit_persisted:
@@ -257,6 +268,9 @@ class AITurnService:
         capability_executions = 0
         commercial_state: CommercialState | None = None
         commercial_state_revision = 0
+        authoritative_commercial_offers: dict[
+            uuid.UUID, AuthoritativeCommercialOffer
+        ] = {}
 
         try:
             if self._commercial_state_loader is not None:
@@ -311,6 +325,10 @@ class AITurnService:
                         raise ProviderTurnError(
                             ProviderErrorCategory.malformed_response
                         ) from None
+                    validate_commercial_grounding(
+                        proposal.response_text,
+                        authoritative_commercial_offers.values(),
+                    )
                     await self._require_current_authority(context)
                     return FinalizedAITurnResult(
                         text=proposal.response_text,
@@ -334,6 +352,10 @@ class AITurnService:
                         raise ProviderTurnError(
                             ProviderErrorCategory.malformed_response
                         )
+                    validate_commercial_grounding(
+                        result.text,
+                        authoritative_commercial_offers.values(),
+                    )
                     await self._require_current_authority(context)
                     return FinalizedAITurnResult(
                         text=result.text,
@@ -355,10 +377,9 @@ class AITurnService:
                 tool_rounds += 1
 
                 round_call_ids = {call.call_id for call in result.tool_calls}
-                if (
-                    len(round_call_ids) != len(result.tool_calls)
-                    or round_call_ids.intersection(seen_call_ids)
-                ):
+                if len(round_call_ids) != len(
+                    result.tool_calls
+                ) or round_call_ids.intersection(seen_call_ids):
                     raise ProviderTurnError(ProviderErrorCategory.malformed_response)
                 seen_call_ids.update(round_call_ids)
 
@@ -374,17 +395,18 @@ class AITurnService:
                         tool_call.capability_name
                     )
                     if definition is not None and definition.terminal_on_success:
-                        execution_result, terminal_result = (
-                            await self._execute_terminal_capability(
-                                tool_call=tool_call,
-                                remaining_calls=result.tool_calls[index + 1 :],
-                                turn=turn,
-                                context=context,
-                                policy_version=policy.version,
-                                exposed_capabilities=allowed_capabilities,
-                                prior_activity=capability_activity,
-                                commercial_state_revision=commercial_state_revision,
-                            )
+                        (
+                            execution_result,
+                            terminal_result,
+                        ) = await self._execute_terminal_capability(
+                            tool_call=tool_call,
+                            remaining_calls=result.tool_calls[index + 1 :],
+                            turn=turn,
+                            context=context,
+                            policy_version=policy.version,
+                            exposed_capabilities=allowed_capabilities,
+                            prior_activity=capability_activity,
+                            commercial_state_revision=commercial_state_revision,
                         )
                         if terminal_result is not None:
                             return terminal_result
@@ -394,6 +416,14 @@ class AITurnService:
                             model_arguments=tool_call.arguments,
                             allowed_capabilities=turn.allowed_capabilities,
                             context=context,
+                        )
+                    if isinstance(execution_result, CapabilitySuccess):
+                        authoritative_commercial_offers = merge_authoritative_offers(
+                            authoritative_commercial_offers,
+                            offers_from_capability_output(
+                                tool_call.capability_name,
+                                execution_result.output,
+                            ),
                         )
                     capability_activity.append(
                         _capability_audit_summary(tool_call, execution_result)
@@ -455,9 +485,7 @@ class AITurnService:
                         model_arguments=tool_call.arguments,
                         allowed_capabilities=turn.allowed_capabilities,
                         context=context,
-                        runtime=CapabilityExecutionRuntime(
-                            transaction_session=session
-                        ),
+                        runtime=CapabilityExecutionRuntime(transaction_session=session),
                     )
                 except CapabilityTransactionRetry:
                     await session.rollback()
@@ -725,6 +753,8 @@ def _capability_audit_summary(
 
 
 def _turn_failure_safe_code(error: Exception) -> str:
+    if isinstance(error, CommercialGroundingError):
+        return COMMERCIAL_GROUNDING_FAILURE_CODE
     if isinstance(error, ProviderTurnError):
         return error.safe_code
     if isinstance(error, StaleAITurnAuthority):
