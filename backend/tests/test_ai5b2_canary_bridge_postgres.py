@@ -36,16 +36,21 @@ from app.ai.canary_bridge import (
 from app.ai.offline_certification import (
     EvaluationDeadlineAdapter,
     OfflineBudgetLedger,
+    RecordingScriptedProvider,
+    ScriptedProviderStep,
     SystemEvaluationClock,
 )
 from app.ai.provider_contract import (
     ProviderFinishReason,
     ProviderReasoningProfile,
+    ProviderToolCall,
+    ProviderTurnResult,
 )
 from scripts.run_ai5b2_canary_bridge import CanaryCLIOverrides, main as bridge_main
 
 from test_ai5b1_offline_certification_postgres import (
     _assert_protected_unchanged,
+    _finalizer,
     _install_closed_runtime,
     _run_m1,
     _stored_state,
@@ -53,6 +58,101 @@ from test_ai5b1_offline_certification_postgres import (
 )
 
 pytest_plugins = ("test_ai5b1_offline_certification_postgres",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "valid"),
+    (
+        ("6L coûte 55 USD et 8L coûte 55 USD.", False),
+        ("6L coûte 55 USD et Blender X coûte 55 USD.", False),
+        ("Budget 45 USD, Blender X à 55 USD.", False),
+        ("La livraison est de 12 USD, Blender X coûte 55 USD.", False),
+        ("Acompte prévu, Blender X coûte 55 EUR.", False),
+        ("Mon budget est 45 USD, le modèle 6L coûte 55 USD.", True),
+        ("La livraison est de 12 USD, le 6L coûte 55 USD.", True),
+        ("6L coûte 55 USD et 154 000 FC et 8L coûte 70 USD et 196 000 FC.", True),
+    ),
+)
+async def test_claim_boundaries_through_postgres_and_enabled_fake_messaging(
+    postgres, monkeypatch, response, valid
+):
+    import app.adapters as adapters
+    from app.ai.commercial_grounding import COMMERCIAL_GROUNDING_FAILURE_CODE
+    from app.i18n.messages import t
+    from app.tasks import m1
+
+    factory, truth, baseline = postgres
+
+    def read_offers(_request):
+        return ProviderTurnResult(
+            tool_calls=(
+                ProviderToolCall(
+                    call_id="boundary_offers",
+                    capability_name="search_products",
+                    arguments={
+                        "query": "air fryer",
+                        "search_mode": "INCLUDE_UNAVAILABLE",
+                    },
+                ),
+            ),
+            finish_reason=ProviderFinishReason.tool_call,
+        )
+
+    provider = RecordingScriptedProvider(
+        (
+            ScriptedProviderStep(read_offers),
+            ScriptedProviderStep(
+                lambda _request: _finalizer(
+                    "boundary_state", response, selected_item_id=truth.available_item_id
+                )
+            ),
+        )
+    )
+    runtime = await _install_closed_runtime(monkeypatch, factory, provider)
+    sent = []
+    phone = "+243810006299"
+    expected = response if valid else t("error_fallback", "french")
+
+    class FakeMessaging:
+        async def send_message(self, customer_phone, content, *, idempotency_key):
+            # A separate read at the real adapter boundary proves both rows have
+            # committed before sending. This adapter has no network capability.
+            _, messages, audits, _ = await _stored_state(factory, customer_phone)
+            outbound = [item for item in messages if item.direction == "outbound"]
+            assert [item.content for item in outbound] == [expected]
+            assert len(audits) == 1
+            assert str(audits[0].outbound_message_id) == idempotency_key
+            assert str(outbound[0].message_id) == idempotency_key
+            sent.append(content)
+            return "fake-boundary-delivery"
+
+    monkeypatch.setattr(adapters, "get_messaging_adapter", FakeMessaging)
+    monkeypatch.setattr(m1.settings, "whatsapp_send_enabled", True)
+    result, source_id, wa_id = await _run_m1(phone=phone, content="Quel est le prix ?")
+    conversation, messages, audits, tickets = await _stored_state(factory, phone)
+    outbound = [item for item in messages if item.direction == "outbound"]
+    assert result["status"] == "processed" and result["send_status"] == "sent"
+    assert [item.content for item in outbound] == sent == [expected]
+    assert len(audits) == 1 and tickets == []
+    assert audits[0].outcome == ("response_generated" if valid else "fallback_used")
+    assert audits[0].safe_code == (None if valid else COMMERCIAL_GROUNDING_FAILURE_CODE)
+    if not valid:
+        assert response not in [item.content for item in messages]
+        assert all(item.outcome != "response_generated" for item in audits)
+    state = await read_commercial_state_for_test(factory, conversation.conversation_id)
+    assert (state is not None) == valid
+    assert len(provider.requests) == 2 and provider.network_calls == 0
+    assert runtime.send_boundaries == [outbound[0].message_id]
+    replay, _, _ = await _run_m1(
+        phone=phone,
+        content="Quel est le prix ?",
+        message_id=source_id,
+        whatsapp_message_id=wa_id,
+    )
+    assert replay["status"] == "duplicate_ignored"
+    assert len(provider.requests) == 2 and sent == [expected]
+    await _assert_protected_unchanged(factory, baseline)
 
 
 def _assert_cleanup_observed(cleanup: dict) -> None:

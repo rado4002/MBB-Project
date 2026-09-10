@@ -216,20 +216,11 @@ class _GroundingProviderAI:
                 ),
             )
         )
-        try:
-            return await AITurnService(
-                self,
-                capability_registry=registry,
-                authority_checker=authority_allowed,
-            ).generate_finalized(turn)
-        except AITurnExecutionError as exc:
-            audit_values = exc.audit_record.model_dump()
-            audit_values["commercial_state_revision_before"] = None
-            audit_values["commercial_state_revision_after"] = None
-            raise AITurnExecutionError(
-                AITurnAuditRecord.model_validate(audit_values, strict=True),
-                exc.original_error,
-            ) from None
+        return await AITurnService(
+            self,
+            capability_registry=registry,
+            authority_checker=authority_allowed,
+        ).generate_finalized(turn)
 
 
 class _UnfinalizedFailingAI:
@@ -303,6 +294,25 @@ def _patch_normal_flow(
     )
     messaging = _Messaging(events, error=messaging_error)
     messaging.inbound_session = inbound_session
+
+    if isinstance(ai, _GroundingProviderAI):
+        import app.ai.commercial_state as commercial_state
+
+        async def latest_inbound(statement):
+            assert "messages.message_id" in str(statement)
+            events.append("latest_inbound")
+            return inbound.message_id
+
+        async def read_state(session, requested_conversation_id):
+            assert session is outbound_session
+            assert requested_conversation_id == conversation_id
+            events.append("read_state")
+            return None
+
+        # Model the actual persistence reads instead of stripping state revisions
+        # from the real AITurnService audit on either success or failure.
+        monkeypatch.setattr(outbound_session, "scalar", latest_inbound, raising=False)
+        monkeypatch.setattr(commercial_state, "read_commercial_state", read_state)
 
     async def process_inbound(**_kwargs):
         events.append("inbound")
@@ -604,6 +614,17 @@ def test_commercial_grounding_failure_discards_bad_text_and_sends_fallback_once(
     (
         "Les modèles 8L et 6L coûtent 55 USD.",
         "Blender X coûte 55 USD.",
+        "6L coûte 55 USD et 8L coûte 55 USD.",
+        "8L coûte 70 USD et 6L coûte 70 USD.",
+        "6L coûte 55 USD et Blender X coûte 55 USD.",
+        "6L coûte 55 USD et 154 000 FC et 8L coûte 55 USD et 154 000 FC.",
+        "Budget 45 USD, Blender X à 55 USD.",
+        "La livraison est de 12 USD, Blender X coûte 55 USD.",
+        "Paiement 12 USD, Blender X coûte 55 USD.",
+        "Frais 12 USD, Blender X coûte 55 USD.",
+        "Taxe 12 USD, Blender X coûte 55 USD.",
+        "Acompte 12 USD, Blender X coûte 55 USD.",
+        "Acompte prévu, Blender X coûte 55 EUR.",
     ),
 )
 def test_provider_grounding_bypasses_fall_back_before_persistence_or_send(
@@ -638,6 +659,50 @@ def test_provider_grounding_bypasses_fall_back_before_persistence_or_send(
         == 1
     )
     assert messaging.audits[0].safe_code == COMMERCIAL_GROUNDING_FAILURE_CODE
+    assert len(messaging.audits) == 1
+    assert messaging.audits[0].commercial_state_revision_before == 0
+    assert messaging.audits[0].commercial_state_revision_after == 0
+    assert events.count("persist") == events.count("adapter") == 1
+    assert events[events.index("persist") : events.index("persist") + 3] == [
+        "persist",
+        "audit",
+        "commit",
+    ]
+    assert events.index("audit") < events.index("adapter")
+    assert len(ai.calls) == 2
+    assert result["status"] == "processed"
+
+
+@pytest.mark.parametrize(
+    "response",
+    (
+        "6L coûte 55 USD et 8L coûte 70 USD.",
+        "6L coûte 55 USD et 154 000 FC et 8L coûte 70 USD et 196 000 FC.",
+        "Mon budget est 45 USD, le modèle 6L coûte 55 USD.",
+        "La livraison est de 12 USD, le 6L coûte 55 USD.",
+    ),
+)
+def test_provider_grounding_mixed_statements_persist_and_send_normally(
+    monkeypatch, response
+):
+    outbound_id = uuid.uuid4()
+    ai = _GroundingProviderAI(response)
+    events, messaging = _patch_normal_flow(monkeypatch, outbound_id=outbound_id, ai=ai)
+    result = _run(_process(_Task()))
+    assert messaging.persisted_contents == [response]
+    assert messaging.calls == [("+243812345678", response, str(outbound_id))]
+    assert len(messaging.audits) == 1
+    assert messaging.audits[0].outcome == AITurnOutcome.response_generated
+    assert messaging.audits[0].safe_code is None
+    assert messaging.audits[0].commercial_state_revision_before == 0
+    assert messaging.audits[0].commercial_state_revision_after == 0
+    assert events[events.index("persist") : events.index("persist") + 3] == [
+        "persist",
+        "audit",
+        "commit",
+    ]
+    assert events.index("audit") < events.index("adapter")
+    assert events.count("persist") == events.count("adapter") == 1
     assert len(ai.calls) == 2
     assert result["status"] == "processed"
 

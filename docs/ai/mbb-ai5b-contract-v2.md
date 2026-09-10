@@ -61,6 +61,45 @@ product-price guard regardless of catalog-price equality; that exemption is
 not validation of those amounts. The correction adds no general language
 parser, provider behavior, external effect or live-run authorization.
 
+AI-5B2-R5 introduces `mbb-commercial-grounding-validator-v3` after review
+demonstrated that v2 reused the first identity for later assertions and allowed
+non-product markers to exempt unrelated prices. Each detected monetary token now
+has an explicit local assertion, a product-price/non-product/unresolved role,
+and (for product prices) its own authoritative Sellable Items. Unresolved roles
+and unsupported product currencies fail as `commercial_grounding_failed`.
+
+A new explicit subject after an amount starts a fresh association, including
+inside one sentence. Conjunctions and commas can also join identities sharing a
+price or introduce a bare USD/CDF continuation; they are not unconditional
+sentence splits. A bare continuation must immediately follow its first amount
+through a supported connector (`et`, `and`, `na`, `pamoja na`, `soit`, comma,
+slash or parenthesis), contain no new subject/predicate, and complete a single
+USD/CDF pair. Every shared identity must match both amounts. Decimal punctuation
+inside money tokens is not an assertion boundary. Compact forms such as `55USD`
+and `USD55` remain detected.
+
+Budget, delivery, transport, shipping, payment, fee, tax and deposit exemptions
+require a complete local monetary head; a marker elsewhere or a missing catalog
+identity is insufficient. A marker without its own amount cannot exempt a later
+product assertion. Headless postfix budgets such as `45 USD de budget` remain
+bounded to the end of a sentence or a hard boundary. These roles only exclude
+clearly non-product amounts from the price guard; they never verify a fee,
+payment, delivery, tax or deposit fact.
+
+Supported examples include `6L coûte 55 USD et 8L coûte 70 USD`, separate USD/CDF
+pairs for both items, `Mon budget est 45 USD, le modèle 6L coûte 55 USD`, and
+`La livraison est de 12 USD, le 6L coûte 55 USD`. Price assertions allow bounded
+trailing availability wording, but trailing identity reassignment fails closed.
+Unfamiliar aliases, ambiguous parents, disjunctions, unresolved pronouns,
+unrecognized intervening prose and other ambiguous associations remain
+conservative rejections. The guard detects the documented numeric currency
+forms; it is not an unrestricted language, implicit-price or number-word parser.
+French, Lingala, Swahili and code-switched fixtures demonstrate only those
+bounded structures. Policy `mbb-ai-policy-v2-ai4-v3`, successful current-turn
+Product Offer authority, pre-delivery validation, localized audited fallback,
+terminal acknowledgments and replay suppression remain the required boundaries.
+This correction provides no live-run authorization.
+
 The bounded official-source investigation on 2026-09-03 checked:
 
 - DeepSeek API **Token & Token Usage**, current page, which gives approximate

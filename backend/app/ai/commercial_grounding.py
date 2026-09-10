@@ -5,24 +5,21 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
-COMMERCIAL_GROUNDING_VALIDATOR_VERSION = "mbb-commercial-grounding-validator-v2"
+COMMERCIAL_GROUNDING_VALIDATOR_VERSION = "mbb-commercial-grounding-validator-v3"
 COMMERCIAL_GROUNDING_FAILURE_CODE = "commercial_grounding_failed"
 
-_AMOUNT = r"(?:\d{1,3}(?:[ \u00a0\u202f,]\d{3})+|\d+(?:[.,]\d{1,2})?)"
-_SUPPORTED_MONEY = re.compile(
-    rf"(?:(?P<prefix>\$|usd|dollars?|cdf|fc)\s*"
+_AMOUNT = r"-?(?:\d{1,3}(?:[ \u00a0\u202f,]\d{3})+|\d+)(?:[.,]\d{1,2})?"
+_CURRENCY = r"\$|€|£|(?<![a-z])(?:usd|dollars?|cdf|fc|euros?|eur|gbp)(?![a-z])"
+_MONEY = re.compile(
+    rf"(?:(?P<prefix>{_CURRENCY})\s*"
     rf"(?P<prefix_amount>{_AMOUNT})|(?P<suffix_amount>{_AMOUNT})\s*"
-    rf"(?P<suffix>\$|usd|dollars?|cdf|fc)(?:\s*us)?)",
-    re.IGNORECASE,
-)
-_UNSUPPORTED_MONEY = re.compile(
-    rf"(?:(?:€|eur|euros?|£|gbp)\s*{_AMOUNT}|" rf"{_AMOUNT}\s*(?:€|eur|euros?|£|gbp))",
+    rf"(?P<suffix>{_CURRENCY})(?:\s*us\b)?)",
     re.IGNORECASE,
 )
 _CLAUSE_BOUNDARY = re.compile(
@@ -30,7 +27,7 @@ _CLAUSE_BOUNDARY = re.compile(
     re.IGNORECASE,
 )
 _BUDGET_MARKER = re.compile(
-    r"\b(?:budget|bajeti|maximum|max|plafond|moins\s+de|jusqu(?:'|’|e)?a|"
+    r"\b(?:budget|bajeti|maximum|max|plafond|moins\s+de|jusqu(?:'|’|e)?[aà]|"
     r"under|up\s+to)\b",
     re.IGNORECASE,
 )
@@ -43,7 +40,9 @@ _NON_PRODUCT_MONEY_MARKER = re.compile(
     r"paiement|payment|acompte|deposit|versement|taxe|tax|frais|fees?)\b",
     re.IGNORECASE,
 )
-_IDENTITY_COORDINATOR = re.compile(r"\b(?:et|and|na|pamoja\s+na)\b|[&+]", re.IGNORECASE)
+_IDENTITY_COORDINATOR = re.compile(
+    r"\b(?:et|and|pamoja\s+na|na)\b|[&+,]", re.IGNORECASE
+)
 _IDENTITY_SCAFFOLD = re.compile(
     r"\b(?:le|la|les|l|un|une|des|du|de|d|the|ya|kwa|pour|for|"
     r"modele|modèle|modeles|modèles|model|models|produit|produits|product|"
@@ -51,6 +50,48 @@ _IDENTITY_SCAFFOLD = re.compile(
     r"est|sont|is|are|ezali|na|ni|a|à|au|en|de|du|actuel|actuelle|current|"
     r"disponible|indisponible|available|unavailable|vendable|rupture|stock|"
     r"maintenant|now)\b",
+    re.IGNORECASE,
+)
+# These are complete local heads, not bags of words to erase around any amount.
+# In particular, neither a catalog miss nor a marker somewhere in the sentence
+# establishes a non-product role.
+_MONEY_SUBJECT_PREFIX = (
+    r"(?:(?:je\s+(?:garde|note|retiens)\s+)?"
+    r"(?:mon|ton|votre|notre|le|la|les|un|une)\s+|na\s+)?"
+)
+_BUDGET_HEAD = re.compile(
+    _MONEY_SUBJECT_PREFIX
+    + _BUDGET_MARKER.pattern
+    + r"(?:\s+(?:actuel|actuelle|est|de|ya|ni|ezali|is|na\s+ngai|yangu))*\s*[:=(]*\s*",
+    re.IGNORECASE,
+)
+_NON_PRODUCT_HEAD = re.compile(
+    _MONEY_SUBJECT_PREFIX
+    + _NON_PRODUCT_MONEY_MARKER.pattern
+    + r"(?:\s+(?:de|du|la|le)\s*"
+    + _NON_PRODUCT_MONEY_MARKER.pattern
+    + r")?"
+    + r"(?:\s+(?:est|de|du|ya|ni|ezali|is|received|reçu|recu|prévu|prevu|"
+    r"coûte|coute|costs?|à|a))*\s*[:=(]*\s*",
+    re.IGNORECASE,
+)
+_BARE_PAIR_LINK = re.compile(
+    r"\s*(?:,\s*)?(?:(?:et|and|na|pamoja\s+na|soit)\b|[/,(])\s*\(?\s*",
+    re.IGNORECASE,
+)
+_ASSERTION_LEADER = re.compile(
+    r"\s*[),]*\s*(?:(?:et|and|pamoja\s+na|na)\b\s*)?", re.IGNORECASE
+)
+_POSTFIX_BUDGET = re.compile(
+    r"\s*(?:de\s+)?" + _BUDGET_MARKER.pattern + r"\s*", re.IGNORECASE
+)
+_PRODUCT_TAIL = re.compile(
+    r"[\s),]*(?:(?:et|and)\s+)?"
+    r"(?:(?:(?:est|is|ezali|ni)\s+)?"
+    r"(?:disponible|indisponible|vendable|available|unavailable|en\s+stock|"
+    r"en\s+rupture(?:\s+de\s+stock)?)"
+    r"(?:\s+(?:et|and)\s+(?:disponible|vendable|available))*"
+    r"(?:\s+(?:maintenant|now))?)?\s*",
     re.IGNORECASE,
 )
 
@@ -93,6 +134,17 @@ class _MoneyClaim:
     end: int
     currency: str
     amount: Decimal
+
+
+@dataclass(frozen=True)
+class _MoneyAssertion:
+    """One detected amount's local association; never an authorization for fees."""
+
+    claim: _MoneyClaim
+    assertion_start: int
+    role: Literal["product_price", "non_product", "unresolved"]
+    offers: tuple[AuthoritativeCommercialOffer, ...] = ()
+    currencies: frozenset[str] = frozenset()
 
 
 def offers_from_capability_output(
@@ -181,35 +233,23 @@ def validate_commercial_grounding(
     text: str,
     offers: Iterable[AuthoritativeCommercialOffer],
 ) -> None:
-    """Validate bounded, clause-local identity and product-price associations.
+    """Validate bounded local monetary assertions before delivery.
 
     Supported product claims identify one item through adjacent authoritative aliases,
     or identify several items through explicit conjunctive coordination. A parent name
     may be narrowed by an adjacent model/SKU alias. Identity-free, unfamiliar,
     disjunctive, or cross-clause associations fail closed. Clearly marked budgets and
-    standalone delivery/payment/fee statements are outside this price guard; exemption
-    does not validate the truth of those non-product amounts.
+    delivery/payment/fee heads govern only their local amounts. Only an adjacent
+    bare USD/CDF pair can continue an association without another explicit head.
+    Non-product exemption does not validate the truth of those amounts.
     """
     offer_list = tuple(offers)
     claims = _money_claims(text)
-    mentions = _identity_mentions(text, offer_list)
-
-    unsupported = tuple(_UNSUPPORTED_MONEY.finditer(text))
-    if any(
-        not _is_budget_amount(text, match.start(), match.end(), mentions)
-        and not _is_non_product_amount(text, match.start(), mentions)
-        for match in unsupported
-    ):
-        raise CommercialGroundingError
-
-    for claim in claims:
-        if _is_budget_amount(text, claim.start, claim.end, mentions):
+    for assertion in _money_assertions(text, claims, offer_list):
+        if assertion.role == "non_product":
             continue
-        if _is_non_product_amount(text, claim.start, mentions):
-            continue
-        resolved = _resolve_offers(text, claim, claims, mentions, offer_list)
-        if resolved is None or any(
-            not _claim_matches(offer, claim) for offer in resolved
+        if assertion.role == "unresolved" or any(
+            not _claim_matches(offer, assertion.claim) for offer in assertion.offers
         ):
             raise CommercialGroundingError
 
@@ -225,17 +265,25 @@ def _optional_decimal(value: object) -> Decimal | None:
 
 def _money_claims(text: str) -> tuple[_MoneyClaim, ...]:
     claims = []
-    for match in _SUPPORTED_MONEY.finditer(text):
+    for match in _MONEY.finditer(text):
         currency = (match.group("prefix") or match.group("suffix")).casefold()
         raw_amount = match.group("prefix_amount") or match.group("suffix_amount")
+        try:
+            amount = _parse_amount(raw_amount)
+        except InvalidOperation:
+            raise CommercialGroundingError from None
         claims.append(
             _MoneyClaim(
                 start=match.start(),
                 end=match.end(),
                 currency=(
-                    "USD" if currency in {"$", "usd", "dollar", "dollars"} else "CDF"
+                    "USD"
+                    if currency in {"$", "usd", "dollar", "dollars"}
+                    else "CDF"
+                    if currency in {"cdf", "fc"}
+                    else "unsupported"
                 ),
-                amount=_parse_amount(raw_amount),
+                amount=amount,
             )
         )
     return tuple(claims)
@@ -243,7 +291,7 @@ def _money_claims(text: str) -> tuple[_MoneyClaim, ...]:
 
 def _parse_amount(raw: str) -> Decimal:
     compact = re.sub(r"[ \u00a0\u202f]", "", raw)
-    if re.fullmatch(r"\d{1,3}(?:,\d{3})+", compact):
+    if re.fullmatch(r"-?\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?", compact):
         compact = compact.replace(",", "")
     elif "," in compact and "." not in compact:
         compact = compact.replace(",", ".")
@@ -285,93 +333,118 @@ def _identity_mentions(
     return tuple(sorted(mentions, key=lambda item: (item.start, item.end)))
 
 
-def _clause_bounds(text: str, position: int) -> tuple[int, int]:
-    start = 0
-    end = len(text)
-    for match in _CLAUSE_BOUNDARY.finditer(text):
-        if match.end() <= position:
-            start = match.end()
-        elif match.start() >= position:
-            end = match.start()
-            break
-    return start, end
-
-
-def _is_budget_amount(
+def _money_assertions(
     text: str,
-    start: int,
-    end: int,
-    mentions: tuple[_IdentityMention, ...],
-) -> bool:
-    clause_start, clause_end = _clause_bounds(text, start)
-    before = text[clause_start:start]
-    budget_before = tuple(_BUDGET_MARKER.finditer(before))
-    if budget_before:
-        marker = budget_before[-1]
-        absolute_marker_end = clause_start + marker.end()
-        identity_after_marker = any(
-            mention.start >= absolute_marker_end and mention.end <= start
-            for mention in mentions
-        )
-        price_word_after_marker = _PRICE_MARKER.search(text[absolute_marker_end:start])
-        if not identity_after_marker and price_word_after_marker is None:
-            return True
-    after = text[end : min(clause_end, end + 32)]
-    if _BUDGET_MARKER.search(after) is None:
-        return False
-    has_local_identity = any(
-        clause_start <= mention.start < clause_end for mention in mentions
-    )
-    return not has_local_identity and _PRICE_MARKER.search(before) is None
-
-
-def _is_non_product_amount(
-    text: str,
-    start: int,
-    mentions: tuple[_IdentityMention, ...],
-) -> bool:
-    """Exclude only standalone, explicitly marked non-product money statements."""
-    clause_start, clause_end = _clause_bounds(text, start)
-    if any(clause_start <= mention.start < clause_end for mention in mentions):
-        return False
-    return _NON_PRODUCT_MONEY_MARKER.search(text[clause_start:start]) is not None
+    claims: tuple[_MoneyClaim, ...],
+    offers: tuple[AuthoritativeCommercialOffer, ...],
+) -> tuple[_MoneyAssertion, ...]:
+    assertions: list[_MoneyAssertion] = []
+    previous_end = 0
+    for index, claim in enumerate(claims):
+        gap = text[previous_end : claim.start]
+        boundaries = tuple(_CLAUSE_BOUNDARY.finditer(gap))
+        if (
+            assertions
+            and not boundaries
+            and _BARE_PAIR_LINK.fullmatch(gap)
+            and assertions[-1].currencies | {claim.currency} == {"USD", "CDF"}
+            and claim.currency not in assertions[-1].currencies
+        ):
+            previous = assertions[-1]
+            assertion = _MoneyAssertion(
+                claim,
+                previous.assertion_start,
+                previous.role,
+                previous.offers,
+                previous.currencies | {claim.currency},
+            )
+        else:
+            # Inspect only the gap after the previous amount. Decimal punctuation
+            # inside a money token can never become a sentence boundary here.
+            start = previous_end + (boundaries[-1].end() if boundaries else 0)
+            leader = _ASSERTION_LEADER.match(text, start, claim.start)
+            assert leader is not None
+            start = leader.end()
+            head = text[start : claim.start]
+            resolved = _resolve_offers(head, offers)
+            if resolved is not None and claim.currency in {"USD", "CDF"}:
+                role = "product_price"
+            elif not _identity_mentions(head, offers) and (
+                _BUDGET_HEAD.fullmatch(head) or _NON_PRODUCT_HEAD.fullmatch(head)
+            ):
+                role = "non_product"
+            else:
+                role = "unresolved"
+                # Retain the narrow identity-free "45 USD de budget" form only
+                # when the complete suffix ends at a hard boundary/end of text.
+                next_start = (
+                    claims[index + 1].start if index + 1 < len(claims) else len(text)
+                )
+                suffix = text[claim.end : next_start]
+                boundary = _CLAUSE_BOUNDARY.search(suffix)
+                if boundary:
+                    suffix = suffix[: boundary.start()]
+                if (
+                    not head.strip()
+                    and (boundary is not None or index + 1 == len(claims))
+                    and _POSTFIX_BUDGET.fullmatch(suffix)
+                ):
+                    role = "non_product"
+            assertion = _MoneyAssertion(
+                claim, start, role, resolved or (), frozenset({claim.currency})
+            )
+        assertions.append(assertion)
+        previous_end = claim.end
+    for index, assertion in enumerate(assertions):
+        next_assertion = assertions[index + 1] if index + 1 < len(assertions) else None
+        if (
+            next_assertion
+            and next_assertion.assertion_start == assertion.assertion_start
+        ):
+            continue
+        end = next_assertion.claim.start if next_assertion else len(text)
+        tail = text[assertion.claim.end : end]
+        boundary = _CLAUSE_BOUNDARY.search(tail)
+        if boundary:
+            tail = tail[: boundary.start()]
+        elif next_assertion:
+            # This entire gap was checked as the next explicit assertion head.
+            continue
+        if assertion.role == "product_price" and not _PRODUCT_TAIL.fullmatch(tail):
+            assertions[index] = replace(assertion, role="unresolved")
+        elif assertion.role == "non_product" and _PRICE_MARKER.search(tail):
+            # A following predicate cannot turn a fee into a product's price.
+            assertions[index] = replace(assertion, role="unresolved")
+    return tuple(assertions)
 
 
 def _resolve_offers(
     text: str,
-    claim: _MoneyClaim,
-    claims: tuple[_MoneyClaim, ...],
-    mentions: tuple[_IdentityMention, ...],
     offers: tuple[AuthoritativeCommercialOffer, ...],
 ) -> tuple[AuthoritativeCommercialOffer, ...] | None:
     by_id = {offer.sellable_item_id: offer for offer in offers}
-    clause_start, clause_end = _clause_bounds(text, claim.start)
-    first_claim_start = min(
-        item.start for item in claims if clause_start <= item.start < clause_end
-    )
-    identity_region = text[clause_start:first_claim_start]
-    local_mentions = [
-        mention
-        for mention in mentions
-        if clause_start <= mention.start and mention.end <= first_claim_start
-    ]
+    local_mentions = _identity_mentions(text, offers)
     if not local_mentions:
         return None
 
     boundaries = [0]
     boundaries.extend(
         boundary
-        for match in _IDENTITY_COORDINATOR.finditer(identity_region)
+        for match in _IDENTITY_COORDINATOR.finditer(text)
+        if not any(
+            mention.start <= match.start() and match.end() <= mention.end
+            for mention in local_mentions
+        )
         for boundary in (match.start(), match.end())
     )
-    boundaries.append(len(identity_region))
+    boundaries.append(len(text))
 
     resolved_ids: list[uuid.UUID] = []
     for index in range(0, len(boundaries) - 1, 2):
         relative_start = boundaries[index]
         relative_end = boundaries[index + 1]
-        segment_start = clause_start + relative_start
-        segment_end = clause_start + relative_end
+        segment_start = relative_start
+        segment_end = relative_end
         segment_mentions = [
             mention
             for mention in local_mentions
@@ -422,6 +495,10 @@ def _claim_matches(
     claim: _MoneyClaim,
 ) -> bool:
     expected = (
-        offer.current_usd_price if claim.currency == "USD" else offer.derived_cdf_price
+        offer.current_usd_price
+        if claim.currency == "USD"
+        else offer.derived_cdf_price
+        if claim.currency == "CDF"
+        else None
     )
     return expected is not None and claim.amount == expected

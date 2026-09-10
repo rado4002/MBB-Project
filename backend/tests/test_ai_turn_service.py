@@ -540,10 +540,19 @@ async def test_commercial_grounding_rejects_historical_crossed_price_before_succ
     (
         "Les modèles 8L et 6L coûtent 55 USD.",
         "Blender X coûte 55 USD.",
+        "6L coûte 55 USD et 8L coûte 55 USD.",
+        "8L coûte 70 USD et 6L coûte 70 USD.",
+        "6L coûte 55 USD et Blender X coûte 55 USD.",
+        "6L coûte 55 USD et 154 000 FC et 8L coûte 55 USD et 154 000 FC.",
+        "Budget 45 USD, Blender X à 55 USD.",
+        "La livraison est de 12 USD, Blender X coûte 55 USD.",
+        "Acompte prévu, Blender X coûte 55 EUR.",
     ),
 )
+@pytest.mark.parametrize("finalizer", (False, True))
 async def test_commercial_grounding_rejects_identity_price_bypasses_before_success(
     bad_response,
+    finalizer,
 ):
     async def handler(_context, _arguments):
         return _product_output()
@@ -558,9 +567,18 @@ async def test_commercial_grounding_rejects_identity_price_bypasses_before_succe
                 },
             )
         ),
-        ProviderTurnResult(
-            text=bad_response,
-            finish_reason=ProviderFinishReason.completed,
+        _tool_result(
+            _tool_call(
+                name=COMMERCIAL_STATE_FINALIZER,
+                arguments={
+                    "response_text": bad_response,
+                    "state_update": {"next_objective": "clarify_choice"},
+                },
+            )
+        )
+        if finalizer
+        else ProviderTurnResult(
+            text=bad_response, finish_reason=ProviderFinishReason.completed
         ),
     )
     service = AITurnService(
@@ -580,11 +598,23 @@ async def test_commercial_grounding_rejects_identity_price_bypasses_before_succe
 
 
 @pytest.mark.asyncio
-async def test_commercial_grounding_accepts_correct_multi_product_prices():
+@pytest.mark.parametrize(
+    "response",
+    (
+        "6L: 55 USD / 154 000 FC; 8L: 70 USD / 196 000 FC.",
+        "6L coûte 55 USD et 8L coûte 70 USD.",
+        "6L coûte 55 USD et 154 000 FC et 8L coûte 70 USD et 196 000 FC.",
+        "Mon budget est 45 USD, le modèle 6L coûte 55 USD.",
+        "La livraison est de 12 USD, le 6L coûte 55 USD.",
+    ),
+)
+@pytest.mark.parametrize("finalizer", (False, True))
+async def test_commercial_grounding_accepts_correct_multi_product_prices(
+    response, finalizer
+):
     async def handler(_context, _arguments):
         return _product_output()
 
-    response = "6L: 55 USD / 154 000 FC; 8L: 70 USD / 196 000 FC."
     adapter = _SequenceAdapter(
         _tool_result(
             _tool_call(
@@ -595,9 +625,18 @@ async def test_commercial_grounding_accepts_correct_multi_product_prices():
                 },
             )
         ),
-        ProviderTurnResult(
-            text=response,
-            finish_reason=ProviderFinishReason.completed,
+        _tool_result(
+            _tool_call(
+                name=COMMERCIAL_STATE_FINALIZER,
+                arguments={
+                    "response_text": response,
+                    "state_update": {"next_objective": "clarify_choice"},
+                },
+            )
+        )
+        if finalizer
+        else ProviderTurnResult(
+            text=response, finish_reason=ProviderFinishReason.completed
         ),
     )
 
