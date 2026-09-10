@@ -14,7 +14,14 @@ from decimal import Decimal
 import httpx
 import pytest
 
+from app import database
 from app.adapters.ai.deepseek_adapter import DeepSeekAdapter, _DeepSeekHTTPTransport
+from app.ai.capabilities import (
+    AI_CAPABILITY_REGISTRY,
+    CapabilityExecutor,
+    CapabilitySuccess,
+    TrustedCapabilityContext,
+)
 from app.ai.canary_bridge import (
     AI5B2_CANARIES,
     AI5B2BudgetDecision,
@@ -46,9 +53,14 @@ from app.ai.provider_contract import (
     ProviderToolCall,
     ProviderTurnResult,
 )
-from scripts.run_ai5b2_canary_bridge import CanaryCLIOverrides, main as bridge_main
+from scripts.run_ai5b2_canary_bridge import (
+    CanaryCLIOverrides,
+    _seed_business_truth as seed_ai5b2_business_truth,
+    main as bridge_main,
+)
 
 from test_ai5b1_offline_certification_postgres import (
+    TRUNCATE,
     _assert_protected_unchanged,
     _finalizer,
     _install_closed_runtime,
@@ -58,6 +70,67 @@ from test_ai5b1_offline_certification_postgres import (
 )
 
 pytest_plugins = ("test_ai5b1_offline_certification_postgres",)
+
+
+@pytest.mark.asyncio
+async def test_frozen_c01_searches_cross_product_and_variant_fields(
+    postgres, monkeypatch
+) -> None:
+    factory, _shared_truth, _baseline = postgres
+    async with factory() as session:
+        await session.execute(TRUNCATE)
+        await session.commit()
+    truth = await seed_ai5b2_business_truth(factory)
+    monkeypatch.setattr(database, "async_session_factory", factory)
+    executor = CapabilityExecutor(AI_CAPABILITY_REGISTRY)
+    context = TrustedCapabilityContext(
+        conversation_id=uuid.uuid4(),
+        turn_id=uuid.uuid4(),
+        expected_ownership_version=1,
+    )
+    operations = (
+        {
+            "query": "MBB Test Air Fryer 6L",
+            "search_mode": "SELLABLE_ONLY",
+            "budget_currency": "USD",
+            "limit": 5,
+        },
+        {
+            "query": "air fryer 6L",
+            "search_mode": "INCLUDE_UNAVAILABLE",
+            "budget_currency": "USD",
+            "limit": 5,
+        },
+        {
+            "query": "friteuse",
+            "search_mode": "INCLUDE_UNAVAILABLE",
+            "budget_currency": "USD",
+            "limit": 5,
+        },
+    )
+
+    results = []
+    for arguments in operations:
+        result = await executor.execute(
+            requested_name="search_products",
+            model_arguments=arguments,
+            allowed_capabilities={"search_products"},
+            context=context,
+        )
+        assert isinstance(result, CapabilitySuccess)
+        results.append(result.output.items)
+
+    assert [[item.sellable_item_id for item in items] for items in results] == [
+        [truth.available_item_id],
+        [truth.available_item_id],
+        [],
+    ]
+    for items in results[:2]:
+        assert items[0].name == truth.available_product_name
+        assert items[0].model_label == truth.available_model_label
+        assert items[0].current_usd_price == truth.available_usd_price
+        assert items[0].availability == "available"
+        assert items[0].is_sellable_now is True
 
 
 @pytest.mark.asyncio
@@ -272,6 +345,7 @@ def _mocked_cli_transport(
     under_reservation_index: int | None = None,
     outcome_probe: bool = False,
     c03_use_search: bool = False,
+    c01_budget_exhaustion: bool = False,
 ):
     def build(credential, truth):
         response_tool_rounds = (
@@ -401,6 +475,50 @@ def _mocked_cli_transport(
                     ),
                 ),
                 *response_tool_rounds[1:],
+            )
+        if c01_budget_exhaustion:
+            response_tool_rounds = (
+                (
+                    (
+                        "b2_c01_exact_offer",
+                        "search_products",
+                        {
+                            "query": "MBB Test Air Fryer 6L",
+                            "search_mode": "SELLABLE_ONLY",
+                            "budget_currency": "USD",
+                            "limit": 5,
+                        },
+                    ),
+                ),
+                (
+                    (
+                        "b2_c01_short_offer",
+                        "search_products",
+                        {
+                            "query": "air fryer 6L",
+                            "search_mode": "INCLUDE_UNAVAILABLE",
+                            "budget_currency": "USD",
+                            "limit": 5,
+                        },
+                    ),
+                    (
+                        "b2_c01_french_offer",
+                        "search_products",
+                        {
+                            "query": "friteuse",
+                            "search_mode": "INCLUDE_UNAVAILABLE",
+                            "budget_currency": "USD",
+                            "limit": 5,
+                        },
+                    ),
+                ),
+                (
+                    (
+                        "b2_c01_after_budget",
+                        "search_products",
+                        {"query": "air fryer"},
+                    ),
+                ),
             )
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -1400,6 +1518,88 @@ def test_actual_cli_latches_under_reservation_before_later_cases(
         "B2-C03-FR-INJECTION-P8",
         "B2-C04-SW-FR-BUDGET",
     ]
+    assert evidence["cleanup"]["database_dropped"] is True
+    assert evidence["cleanup"]["cluster_stopped"] is True
+    assert evidence["cleanup"]["temporary_directory_removed"] is True
+    _assert_cleanup_observed(evidence["cleanup"])
+
+
+def test_actual_cli_preserves_attempted_case_and_fallback_at_turn_budget(
+    tmp_path, capsys
+) -> None:
+    from app.i18n.messages import t
+
+    run_id = "synthetic-cli-turn-budget-ai5b2"
+    payloads: list[dict] = []
+    result = bridge_main(
+        _cli_arguments(tmp_path, run_id),
+        _test_overrides=CanaryCLIOverrides(
+            credential_loader=lambda: "inert-cli-test-credential",
+            transport_builder=_mocked_cli_transport(
+                payloads,
+                c01_budget_exhaustion=True,
+            ),
+        ),
+    )
+    capsys.readouterr()
+    evidence = json.loads(
+        (tmp_path / run_id / "evidence.json").read_text(encoding="utf-8")
+    )
+
+    assert result == 1 and len(payloads) == 3
+    assert evidence["stop_reason"] == "budget_exceeded"
+    assert [case["deterministic_status"] for case in evidence["cases"]] == [
+        "failed",
+        "skipped",
+        "skipped",
+        "skipped",
+    ]
+    attempted = evidence["cases"][0]
+    assert attempted["failure_attribution"] == "budget_exceeded"
+    assert attempted["transcript"] == [
+        {
+            "direction": "inbound",
+            "content": AI5B2_CANARIES[0].customer_message,
+        },
+        {"direction": "outbound", "content": t("error_fallback", "french")},
+    ]
+    assert attempted["persisted_outbound"] == {
+        "present": True,
+        "content": t("error_fallback", "french"),
+        "outcome": "fallback_used",
+        "safe_error_code": "budget_exceeded",
+    }
+    assert evidence["skipped_case_ids"] == [
+        "B2-C02-FR-QUALIFIED",
+        "B2-C03-FR-INJECTION-P8",
+        "B2-C04-SW-FR-BUDGET",
+    ]
+    assert all(
+        case["persisted_outbound"]
+        == {
+            "present": False,
+            "content": None,
+            "outcome": None,
+            "safe_error_code": None,
+        }
+        for case in evidence["cases"][1:]
+    )
+    assert evidence["tool_trace_complete"] is False
+    completed_searches = [
+        trace
+        for trace in evidence["tool_traces"]
+        if trace["capability_name"] == "search_products"
+        and trace["outcome"] == "success"
+    ]
+    assert [
+        [item["sellable_item_id"] for item in trace["authoritative_result"]["items"]]
+        for trace in completed_searches
+    ] == [
+        [attempted["fixture_snapshot"]["P6_sellable_item_id"]],
+        [attempted["fixture_snapshot"]["P6_sellable_item_id"]],
+        [],
+    ]
+    assert evidence["protected_snapshots"]["matched"] is True
     assert evidence["cleanup"]["database_dropped"] is True
     assert evidence["cleanup"]["cluster_stopped"] is True
     assert evidence["cleanup"]["temporary_directory_removed"] is True

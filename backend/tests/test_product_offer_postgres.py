@@ -284,7 +284,9 @@ async def test_product_offer_exact_read_preserves_truthful_states(
             rate=Decimal("2800.000000"),
             administrator=_admin(admin),
         )
-        current = await session.get(SellableItemPrice, no_current_price.sellable_item_id)
+        current = await session.get(
+            SellableItemPrice, no_current_price.sellable_item_id
+        )
         assert current is None
         price = (
             await session.execute(
@@ -342,7 +344,10 @@ async def test_product_offer_exact_read_preserves_truthful_states(
         and no_price_offer.offer_status == "price_unavailable"
         and no_price_offer.current_usd_price is None
     )
-    assert inactive_item_offer is not None and inactive_item_offer.offer_status == "inactive"
+    assert (
+        inactive_item_offer is not None
+        and inactive_item_offer.offer_status == "inactive"
+    )
     assert (
         inactive_product_offer is not None
         and inactive_product_offer.offer_status == "inactive"
@@ -519,6 +524,21 @@ async def test_product_offer_search_modes_budgets_and_determinism(
             search_mode="include_unavailable",
             limit=2,
         )
+        product_variant = await search_product_offers(
+            session,
+            query="Fictional Search Fryer 6L",
+            search_mode="include_unavailable",
+        )
+        unavailable_variant = await search_product_offers(
+            session,
+            query="Fictional Search Fryer 8L",
+            search_mode="sellable_only",
+        )
+        unsupported_translation = await search_product_offers(
+            session,
+            query="friteuse",
+            search_mode="include_unavailable",
+        )
 
     assert [offer.sellable_item_id for offer in sellable_only] == [
         sellable.sellable_item_id
@@ -541,6 +561,11 @@ async def test_product_offer_search_modes_budgets_and_determinism(
         sellable.sellable_item_id,
         missing_inventory.sellable_item_id,
     ]
+    assert [offer.sellable_item_id for offer in product_variant] == [
+        sellable.sellable_item_id
+    ]
+    assert unavailable_variant == []
+    assert unsupported_translation == []
 
 
 @pytest.mark.asyncio

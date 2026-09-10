@@ -100,6 +100,23 @@ Product Offer authority, pre-delivery validation, localized audited fallback,
 terminal acknowledgments and replay suppression remain the required boundaries.
 This correction provides no live-run authorization.
 
+AI-5B2-R6 corrects two defects demonstrated by guarded run
+`ai5b2-live-6a7979d3dda844979388c9bbcc23fcdb`. Product Offer text search now
+recognizes the ordinary composed product-and-variant label (product name plus
+Sellable Item model label) while retaining the existing literal substring,
+active/sellable, inventory, price, budget and result-limit filters. It does not
+add translation, synonym, fuzzy or semantic search; therefore `friteuse`
+legitimately remains unmatched by the English-only disposable fixture.
+
+Failure evidence now retains a case after its M1 attempt has completed even
+when the provider's last response leaves tool calls unexecuted at a protected
+ceiling. The attempted case is failed, later undispatched cases are skipped,
+and the exact persisted outbound message (or an explicit absence), associated
+audit outcome and safe error code are captured before disposable-database
+cleanup. Pending tool calls remain recorded as not executed and make the tool
+trace incomplete; evidence collection does not execute them. Historical
+evidence remains immutable. This correction provides no live-run authorization.
+
 The bounded official-source investigation on 2026-09-03 checked:
 
 - DeepSeek API **Token & Token Usage**, current page, which gives approximate

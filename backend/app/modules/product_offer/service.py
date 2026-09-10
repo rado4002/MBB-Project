@@ -11,7 +11,12 @@ from sqlalchemy import and_, case, desc, func, nulls_last, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.models.catalog import Product, ProductMedia, SellableItem, normalize_category_code
+from app.models.catalog import (
+    Product,
+    ProductMedia,
+    SellableItem,
+    normalize_category_code,
+)
 from app.models.inventory import InventoryRecord
 from app.models.pricing import ExchangeRate, SellableItemPrice
 from app.modules.pricing.service import CDF, USD, calculate_cdf_amount
@@ -310,6 +315,9 @@ async def search_product_offers(
         statement = statement.where(
             or_(
                 Product.name.ilike(pattern),
+                func.concat_ws(" ", Product.name, SellableItem.model_label).ilike(
+                    pattern
+                ),
                 Product.category_code.ilike(pattern),
                 Product.description.ilike(pattern),
                 SellableItem.model_label.ilike(pattern),
@@ -320,9 +328,8 @@ async def search_product_offers(
         statement = statement.where(Product.category_code == normalized_category)
     if max_budget_usd is not None:
         statement = statement.where(
-            SellableItemPrice.amount <= _validate_budget(
-                max_budget_usd, field="max_budget_usd"
-            )
+            SellableItemPrice.amount
+            <= _validate_budget(max_budget_usd, field="max_budget_usd")
         )
     if max_budget_cdf is not None:
         budget_cdf = _validate_budget(max_budget_cdf, field="max_budget_cdf")

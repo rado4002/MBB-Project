@@ -820,6 +820,27 @@ def _case_evidence(
 ) -> CanaryCaseEvidence:
     conversation, messages, audits, tickets, state = stored or (None, [], [], [], None)
     activities = [item for audit in audits for item in audit.capability_activity]
+    outbound_messages = [item for item in messages if item.direction == "outbound"]
+    persisted_message = outbound_messages[-1] if outbound_messages else None
+    associated_audit = next(
+        (
+            audit
+            for audit in reversed(audits)
+            if persisted_message is not None
+            and audit.outbound_message_id == persisted_message.message_id
+        ),
+        None,
+    )
+    if associated_audit is None and audits:
+        associated_audit = audits[-1]
+    persisted_outbound: dict[str, object] = {
+        "present": persisted_message is not None,
+        "content": None if persisted_message is None else persisted_message.content,
+        "outcome": None if associated_audit is None else associated_audit.outcome,
+        "safe_error_code": (
+            None if associated_audit is None else associated_audit.safe_code
+        ),
+    }
     validated_tools = tuple(
         item["capability_name"]
         for item in activities
@@ -907,6 +928,7 @@ def _case_evidence(
         requires_drc_fluent_review=spec.requires_drc_fluent_review,
         provider_request_indexes=provider_indexes,
         m1_status=None if result is None else str(result.get("status", "unknown")),
+        persisted_outbound=persisted_outbound,
         replay=replay or {},
         commercial_evaluation=commercial_evaluation,
     )
@@ -1130,7 +1152,11 @@ async def _dispatch_authorized_canaries(
                         failure="stage_stopped_before_case",
                     )
                 )
-        tool_trace_recorder.assert_complete()
+        try:
+            tool_trace_recorder.assert_complete()
+        except AI5B2BridgeConfigurationError as exc:
+            if exc.safe_code != "tool_trace_incomplete":
+                raise
     snapshot_after = await _protected_snapshot(factory)
     snapshots_match = snapshot_after == snapshot_before
     if not snapshots_match:

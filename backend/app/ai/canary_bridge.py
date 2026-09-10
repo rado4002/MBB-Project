@@ -567,6 +567,7 @@ class CanaryToolTraceRecorder:
             f"ai5b2_tool_trace_turn_{id(self)}", default=None
         )
         self.persistence_failed = False
+        self.completion_failed = False
 
     @property
     def records(self) -> tuple[CanaryToolTraceRecord, ...]:
@@ -574,7 +575,11 @@ class CanaryToolTraceRecorder:
 
     @property
     def complete(self) -> bool:
-        return not self._pending and not self.persistence_failed
+        return (
+            not self._pending
+            and not self.persistence_failed
+            and not self.completion_failed
+        )
 
     @contextmanager
     def turn_scope(self, turn_id: object) -> Iterator[None]:
@@ -840,6 +845,7 @@ class CanaryToolTraceRecorder:
 
     def assert_complete(self) -> None:
         if self._pending:
+            self.completion_failed = True
             request_index = self._pending[0].provider_request_index
             for pending in tuple(self._pending):
                 self._pending.remove(pending)
@@ -1797,6 +1803,7 @@ class CanaryCaseEvidence(_StrictModel):
     requires_drc_fluent_review: bool = False
     provider_request_indexes: tuple[int, ...] = ()
     m1_status: str | None = None
+    persisted_outbound: dict[str, JsonValue] = Field(default_factory=dict)
     replay: dict[str, JsonValue] = Field(default_factory=dict)
     commercial_evaluation: dict[str, JsonValue] = Field(default_factory=dict)
 
