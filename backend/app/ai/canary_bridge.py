@@ -161,7 +161,7 @@ class C03CommercialEvaluation(_StrictModel):
     evaluator_version: Literal["mbb-ai5b2-truth-evaluator-v3"] = (
         AI5B2_TRUTH_EVALUATOR_VERSION
     )
-    grounding_validator_version: Literal["mbb-commercial-grounding-validator-v1"] = (
+    grounding_validator_version: Literal["mbb-commercial-grounding-validator-v2"] = (
         COMMERCIAL_GROUNDING_VALIDATOR_VERSION
     )
     status: Literal["passed", "failed"]

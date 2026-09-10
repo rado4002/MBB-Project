@@ -1,13 +1,25 @@
 import asyncio
 import uuid
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 
 from app.ai.audit import AITurnAuditRecord, AITurnOutcome
+from app.ai.capabilities import (
+    CapabilityDefinition,
+    CapabilityRegistry,
+    SearchProductsInput,
+    SearchProductsOutput,
+)
 from app.ai.commercial_grounding import COMMERCIAL_GROUNDING_FAILURE_CODE
 from app.ai.policy import AI_SYSTEM_POLICY_VERSION
-from app.ai.turn import AITurnExecutionError, FinalizedAITurnResult
+from app.ai.provider_contract import (
+    ProviderFinishReason,
+    ProviderToolCall,
+    ProviderTurnResult,
+)
+from app.ai.turn import AITurnExecutionError, AITurnService, FinalizedAITurnResult
 from app.modules.m1_gateway.service import ProcessedInbound
 from app.modules.m1_gateway.session_cache import SessionState
 from app.tasks import m1
@@ -118,6 +130,106 @@ class _GroundingFailingAI:
             ),
             RuntimeError(COMMERCIAL_GROUNDING_FAILURE_CODE),
         )
+
+
+class _GroundingProviderAI:
+    def __init__(self, response_text):
+        self.response_text = response_text
+        self.calls = []
+
+    async def generate_turn(self, request):
+        self.calls.append(request)
+        if len(self.calls) == 1:
+            return ProviderTurnResult(
+                tool_calls=(
+                    ProviderToolCall(
+                        call_id="product-offer",
+                        capability_name="search_products",
+                        arguments={
+                            "query": "Air Fryer",
+                            "search_mode": "INCLUDE_UNAVAILABLE",
+                        },
+                    ),
+                ),
+                finish_reason=ProviderFinishReason.tool_call,
+            )
+        return ProviderTurnResult(
+            text=self.response_text,
+            finish_reason=ProviderFinishReason.completed,
+        )
+
+    async def generate_finalized(self, turn):
+        async def product_handler(_context, _arguments):
+            def item(item_id, model, usd, cdf, availability, sellable):
+                return {
+                    "product_id": uuid.UUID("20000000-0000-4000-8000-000000000002"),
+                    "sellable_item_id": item_id,
+                    "name": "MBB Test Air Fryer",
+                    "model_label": model,
+                    "category_code": "air_fryer",
+                    "attributes": {"capacity_l": int(model.removesuffix("L"))},
+                    "current_usd_price": Decimal(usd),
+                    "price_currency": "USD",
+                    "cdf_quote_status": "available",
+                    "derived_cdf_quote": {
+                        "currency": "CDF",
+                        "amount": Decimal(cdf),
+                    },
+                    "availability": availability,
+                    "offer_status": "sellable_now" if sellable else "out_of_stock",
+                    "is_sellable_now": sellable,
+                    "primary_media": None,
+                }
+
+            return {
+                "items": [
+                    item(
+                        uuid.UUID("60000000-0000-4000-8000-000000000006"),
+                        "6L",
+                        "55.00",
+                        "154000.00",
+                        "available",
+                        True,
+                    ),
+                    item(
+                        uuid.UUID("80000000-0000-4000-8000-000000000008"),
+                        "8L",
+                        "70.00",
+                        "196000.00",
+                        "out_of_stock",
+                        False,
+                    ),
+                ]
+            }
+
+        async def authority_allowed(_context):
+            return True
+
+        registry = CapabilityRegistry(
+            (
+                CapabilityDefinition(
+                    name="search_products",
+                    description="Return current test Product Offer records.",
+                    input_model=SearchProductsInput,
+                    output_model=SearchProductsOutput,
+                    handler=product_handler,
+                ),
+            )
+        )
+        try:
+            return await AITurnService(
+                self,
+                capability_registry=registry,
+                authority_checker=authority_allowed,
+            ).generate_finalized(turn)
+        except AITurnExecutionError as exc:
+            audit_values = exc.audit_record.model_dump()
+            audit_values["commercial_state_revision_before"] = None
+            audit_values["commercial_state_revision_after"] = None
+            raise AITurnExecutionError(
+                AITurnAuditRecord.model_validate(audit_values, strict=True),
+                exc.original_error,
+            ) from None
 
 
 class _UnfinalizedFailingAI:
@@ -484,6 +596,49 @@ def test_commercial_grounding_failure_discards_bad_text_and_sends_fallback_once(
     assert messaging.audits[0].outcome == AITurnOutcome.fallback_used.value
     assert messaging.audits[0].safe_code == COMMERCIAL_GROUNDING_FAILURE_CODE
     assert events.count("adapter") == 1
+    assert result["status"] == "processed"
+
+
+@pytest.mark.parametrize(
+    "rejected_text",
+    (
+        "Les modèles 8L et 6L coûtent 55 USD.",
+        "Blender X coûte 55 USD.",
+    ),
+)
+def test_provider_grounding_bypasses_fall_back_before_persistence_or_send(
+    monkeypatch,
+    rejected_text,
+):
+    from app.i18n.messages import t
+
+    outbound_id = uuid.uuid4()
+    ai = _GroundingProviderAI(rejected_text)
+    events, messaging = _patch_normal_flow(
+        monkeypatch,
+        outbound_id=outbound_id,
+        ai=ai,
+    )
+
+    result = _run(_process(_Task()))
+
+    fallback = t("error_fallback", "french")
+    assert messaging.persisted_contents == [fallback]
+    assert rejected_text not in messaging.persisted_contents
+    assert messaging.calls == [("+243812345678", fallback, str(outbound_id))]
+    assert all(
+        audit.outcome != AITurnOutcome.response_generated.value
+        for audit in messaging.audits
+    )
+    assert (
+        sum(
+            audit.outcome == AITurnOutcome.fallback_used.value
+            for audit in messaging.audits
+        )
+        == 1
+    )
+    assert messaging.audits[0].safe_code == COMMERCIAL_GROUNDING_FAILURE_CODE
+    assert len(ai.calls) == 2
     assert result["status"] == "processed"
 
 

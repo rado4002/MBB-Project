@@ -535,6 +535,51 @@ async def test_commercial_grounding_rejects_historical_crossed_price_before_succ
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_response",
+    (
+        "Les modèles 8L et 6L coûtent 55 USD.",
+        "Blender X coûte 55 USD.",
+    ),
+)
+async def test_commercial_grounding_rejects_identity_price_bypasses_before_success(
+    bad_response,
+):
+    async def handler(_context, _arguments):
+        return _product_output()
+
+    adapter = _SequenceAdapter(
+        _tool_result(
+            _tool_call(
+                name="search_products",
+                arguments={
+                    "query": "Air Fryer",
+                    "search_mode": "INCLUDE_UNAVAILABLE",
+                },
+            )
+        ),
+        ProviderTurnResult(
+            text=bad_response,
+            finish_reason=ProviderFinishReason.completed,
+        ),
+    )
+    service = AITurnService(
+        adapter,
+        capability_registry=_product_registry(handler),
+        authority_checker=_authority_allowed,
+    )
+
+    with pytest.raises(AITurnExecutionError) as captured:
+        await service.generate_finalized(
+            _turn(allowed_capabilities=("search_products",))
+        )
+
+    assert captured.value.audit_record.outcome == AITurnOutcome.failed
+    assert captured.value.audit_record.safe_code == COMMERCIAL_GROUNDING_FAILURE_CODE
+    assert len(adapter.calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_commercial_grounding_accepts_correct_multi_product_prices():
     async def handler(_context, _arguments):
         return _product_output()

@@ -40,6 +40,13 @@ def _offers() -> tuple[AuthoritativeCommercialOffer, ...]:
     )
 
 
+def test_corrected_validator_version_is_explicit():
+    assert (
+        COMMERCIAL_GROUNDING_VALIDATOR_VERSION
+        == "mbb-commercial-grounding-validator-v2"
+    )
+
+
 @pytest.mark.parametrize(
     "response",
     (
@@ -77,6 +84,47 @@ def test_accepts_correct_multi_product_comparison():
 @pytest.mark.parametrize(
     "response",
     (
+        "Les modèles 8L et 6L coûtent 55 USD.",
+        "Les modèles 6L et 8L coûtent 55 USD.",
+        "Blender X coûte 55 USD.",
+        "Blender X et 6L coûtent 55 USD.",
+        "MBB Test Air Fryer coûte 55 USD.",
+        "AF Mini coûte 55 USD.",
+        "Le modèle 8L est populaire. Il coûte 55 USD.",
+    ),
+)
+def test_rejects_unresolved_ambiguous_or_detached_identity_price_claims(response):
+    with pytest.raises(CommercialGroundingError):
+        validate_commercial_grounding(response, _offers())
+
+
+def test_accepts_shared_price_only_when_every_explicit_identity_matches():
+    shared_price = (
+        _offers()[0],
+        AuthoritativeCommercialOffer(
+            product_id=PRODUCT_ID,
+            sellable_item_id=P8_ID,
+            name="MBB Test Air Fryer",
+            model_label="8L",
+            sku="MBB-AF-8L",
+            current_usd_price=Decimal("55.00"),
+            derived_cdf_price=Decimal("154000.00"),
+        ),
+    )
+
+    validate_commercial_grounding(
+        "Les modèles 8L et 6L coûtent 55 USD et 154 000 FC.",
+        shared_price,
+    )
+    validate_commercial_grounding(
+        "Les modèles 6L et 8L coûtent 55 USD et 154 000 FC.",
+        shared_price,
+    )
+
+
+@pytest.mark.parametrize(
+    "response",
+    (
         "Le modèle 6L coûte 55 USD et 196 000 FC.",
         "6L: 55 USD / 196 000 FC; 8L: 70 USD / 154 000 FC.",
         "MBB Test Air Fryer coûte 60 USD.",
@@ -90,9 +138,7 @@ def test_rejects_crossed_ambiguous_or_unsupported_claims(response):
     assert captured.value.validator_version == COMMERCIAL_GROUNDING_VALIDATOR_VERSION
 
 
-def test_unidentified_price_is_accepted_only_when_one_offer_matches():
-    validate_commercial_grounding("Le prix actuel est 154 000 FC.", _offers())
-
+def test_unidentified_price_never_resolves_from_amount_alone():
     duplicated_price = (
         _offers()[0],
         AuthoritativeCommercialOffer(
@@ -105,6 +151,8 @@ def test_unidentified_price_is_accepted_only_when_one_offer_matches():
         ),
     )
     with pytest.raises(CommercialGroundingError):
+        validate_commercial_grounding("Le prix actuel est 154 000 FC.", _offers())
+    with pytest.raises(CommercialGroundingError):
         validate_commercial_grounding("Le prix actuel est 55 USD.", duplicated_price)
 
 
@@ -114,6 +162,19 @@ def test_non_price_numbers_and_customer_budget_are_not_product_price_claims():
         "option moins chère ezali te.",
         _offers(),
     )
+
+
+@pytest.mark.parametrize(
+    "response",
+    (
+        "La livraison coûte 55 USD.",
+        "La livraison coûte 12 USD.",
+        "Payment received: 55 USD.",
+        "Payment received: 12 USD.",
+    ),
+)
+def test_non_product_money_is_exempt_regardless_of_catalog_price(response):
+    validate_commercial_grounding(response, _offers())
 
 
 def test_response_without_explicit_product_price_claim_is_unchanged():

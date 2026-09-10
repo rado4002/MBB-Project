@@ -193,8 +193,8 @@ def _mocked_cli_transport(
                     "propose_commercial_state_update",
                     {
                         "response_text": (
-                            "Le MBB Test Air Fryer 6L coûte 55 USD, est disponible "
-                            "et vendable maintenant."
+                            f"Le {truth.available_product_name} 6L coûte 55 USD, "
+                            "est disponible et vendable maintenant."
                         ),
                         "state_update": {
                             "selected_sellable_item_ids": [
@@ -433,7 +433,7 @@ async def test_four_frozen_canaries_traverse_real_m1_and_postgres(
             "propose_commercial_state_update",
             {
                 "response_text": (
-                    "Le MBB Test Air Fryer 6L coûte 55 USD, est disponible et "
+                    "Le Fictional Air Fryer 6L coûte 55 USD, est disponible et "
                     "vendable maintenant."
                 ),
                 "state_update": {
@@ -790,7 +790,7 @@ async def test_deepseek_adapter_mocked_http_continues_through_real_application(
             tool_name = "propose_commercial_state_update"
             arguments = {
                 "response_text": (
-                    "Le MBB Test Air Fryer 6L coûte 55 USD et est disponible "
+                    "Le Fictional Air Fryer 6L coûte 55 USD et est disponible "
                     "maintenant."
                 ),
                 "state_update": {

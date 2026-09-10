@@ -48,6 +48,19 @@ plan and evaluates freshness, item-local prices, unavailable truth and forbidden
 future promises instead of requiring one exact capability. The policy remains
 `mbb-ai-policy-v2-ai4-v3`. This correction does not authorize a live run.
 
+AI-5B2-R4 replaces the price resolver with
+`mbb-commercial-grounding-validator-v2`. Supported product-price forms are
+bounded to clause-local authoritative name/model/SKU identity components and
+explicit conjunctive lists. Adjacent parent and model components may narrow to
+one Sellable Item; every item in a conjunctive claim must carry every stated
+USD/CDF amount. Identity-free prices, unfamiliar aliases, ambiguous parents,
+disjunctions and unresolved cross-clause references fail closed. Global
+amount-only identity inference is removed. Clearly marked customer budgets and
+standalone delivery, payment, fee, tax or deposit amounts remain outside this
+product-price guard regardless of catalog-price equality; that exemption is
+not validation of those amounts. The correction adds no general language
+parser, provider behavior, external effect or live-run authorization.
+
 The bounded official-source investigation on 2026-09-03 checked:
 
 - DeepSeek API **Token & Token Usage**, current page, which gives approximate
