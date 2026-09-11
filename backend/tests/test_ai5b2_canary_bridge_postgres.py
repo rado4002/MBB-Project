@@ -1389,6 +1389,50 @@ def test_actual_cli_orchestrates_complete_mocked_stage_and_cleanup(
     assert '"secret":"omit"' not in evidence_path.read_text(encoding="utf-8")
 
 
+def test_actual_cli_accepts_exact_historical_live_c01_candidate(
+    tmp_path, capsys
+) -> None:
+    run_id = "synthetic-cli-live-c01-association"
+    payloads: list[dict] = []
+    candidate = (
+        "Oui, il est bien dispo  Le MBB Test Air Fryer 6L est à 55 USD "
+        "(environ 154 000 CDF). Tu veux que je te dise ce qu'il y a comme "
+        "autres modèles dans le même budget ?"
+    )
+
+    result = bridge_main(
+        _cli_arguments(tmp_path, run_id),
+        _test_overrides=CanaryCLIOverrides(
+            credential_loader=lambda: "inert-cli-test-credential",
+            transport_builder=_mocked_cli_transport(
+                payloads,
+                c01_response_text=candidate,
+            ),
+        ),
+    )
+    capsys.readouterr()
+    evidence = json.loads(
+        (tmp_path / run_id / "evidence.json").read_text(encoding="utf-8")
+    )
+
+    assert result == 0 and len(payloads) == 7
+    assert [case["deterministic_status"] for case in evidence["cases"]] == [
+        "passed",
+        "passed",
+        "passed",
+        "passed",
+    ]
+    c01 = evidence["cases"][0]
+    assert c01["transcript"][1]["content"] == candidate
+    assert c01["persisted_outbound"]["content"] == candidate
+    assert c01["persisted_outbound"]["outcome"] == "response_generated"
+    assert c01["grounding_rejections"] == []
+    assert c01["commercial_evaluation"]["status"] == "passed"
+    assert evidence["real_provider_network_calls"] == 0
+    assert evidence["actual_provider_api_tokens"] == 0
+    assert evidence["actual_provider_cost_usd"] == "0"
+
+
 def test_actual_cli_preserves_rejected_c01_diagnostic_outside_persistence(
     tmp_path, capsys
 ) -> None:

@@ -680,6 +680,9 @@ def test_provider_grounding_bypasses_fall_back_before_persistence_or_send(
         "6L coûte 55 USD et 154 000 FC et 8L coûte 70 USD et 196 000 FC.",
         "Mon budget est 45 USD, le modèle 6L coûte 55 USD.",
         "La livraison est de 12 USD, le 6L coûte 55 USD.",
+        "Oui, il est bien dispo  Le MBB Test Air Fryer 6L est à 55 USD "
+        "(environ 154 000 CDF). Tu veux que je te dise ce qu'il y a comme "
+        "autres modèles dans le même budget ?",
     ),
 )
 def test_provider_grounding_mixed_statements_persist_and_send_normally(

@@ -76,7 +76,8 @@ _NON_PRODUCT_HEAD = re.compile(
     re.IGNORECASE,
 )
 _BARE_PAIR_LINK = re.compile(
-    r"\s*(?:,\s*)?(?:(?:et|and|na|pamoja\s+na|soit)\b|[/,(])\s*\(?\s*",
+    r"\s*(?:,\s*)?(?:(?:et|and|na|pamoja\s+na|soit)\b|[/,(])\s*\(?\s*"
+    r"(?:(?:environ|approximately|approx\.?)\s*)?",
     re.IGNORECASE,
 )
 _ASSERTION_LEADER = re.compile(
@@ -101,6 +102,11 @@ _LOCAL_PRODUCT_REFERENCE_HEAD = re.compile(
     re.IGNORECASE,
 )
 _LOCAL_ANTECEDENT_LEADER = re.compile(r"\s*(?:oui\b\s*[,]?\s*)?", re.IGNORECASE)
+_LOCAL_CONFIRMED_AVAILABILITY_LEADER = re.compile(
+    r"\s*oui\b\s*[,]?\s*(?:il|elle)\s+est\s+(?:bien\s+)?"
+    r"(?:dispo|disponible)\b(?:\s+[^\w\s,.;:!?]+)?\s+",
+    re.IGNORECASE,
+)
 _LOCAL_POSITIVE_AVAILABILITY = re.compile(
     r"\b(?:disponible|available|vendable|en\s+stock)\b", re.IGNORECASE
 )
@@ -301,8 +307,9 @@ def validate_commercial_grounding(
     exception is an explicit short French price reference immediately following a
     sentence that resolves to exactly one authoritative offer. Clearly marked budgets
     and delivery/payment/fee heads govern only their local amounts. Only an adjacent
-    bare USD/CDF pair can continue an association without another explicit head.
-    Non-product exemption does not validate the truth of those amounts.
+    bare USD/CDF pair, optionally parenthesized and marked approximate, can continue
+    an association without another explicit head. Non-product exemption does not
+    validate the truth of those amounts.
     """
     offer_list = tuple(offers)
     claims = _money_claims(text)
@@ -468,6 +475,8 @@ def _money_assertions(
             start = leader.end()
             head = text[start : claim.start]
             resolved = _resolve_offers(head, offers)
+            if resolved is None:
+                resolved = _resolve_after_confirmed_availability_leader(head, offers)
             if resolved is None and last_boundary is not None:
                 resolved = _resolve_immediate_local_reference(
                     text,
@@ -525,6 +534,46 @@ def _money_assertions(
             # A following predicate cannot turn a fee into a product's price.
             assertions[index] = replace(assertion, role="unresolved")
     return tuple(assertions)
+
+
+def _resolve_after_confirmed_availability_leader(
+    head: str,
+    offers: tuple[AuthoritativeCommercialOffer, ...],
+) -> tuple[AuthoritativeCommercialOffer, ...] | None:
+    """Ignore one bounded confirmation only before a full authoritative identity."""
+    leader = _LOCAL_CONFIRMED_AVAILABILITY_LEADER.match(head)
+    if leader is None:
+        return None
+    explicit_head = head[leader.end() :]
+    resolved = _resolve_offers(explicit_head, offers)
+    if resolved is None or len(resolved) != 1:
+        return None
+    offer = resolved[0]
+    if not _has_full_offer_identity(explicit_head, offer):
+        return None
+    if not _local_availability_is_consistent("disponible", offer):
+        return None
+    return resolved
+
+
+def _has_full_offer_identity(
+    text: str,
+    offer: AuthoritativeCommercialOffer,
+) -> bool:
+    if not offer.name or not (offer.model_label or offer.sku):
+        return False
+    name = re.escape(offer.name).replace(r"\ ", r"\s+")
+    return any(
+        re.search(
+            rf"(?<!\w){name}\s+"
+            rf"{re.escape(alias).replace(r'\ ', r'\s+')}(?!\w)",
+            text,
+            re.IGNORECASE,
+        )
+        is not None
+        for alias in (offer.model_label, offer.sku)
+        if alias
+    )
 
 
 def _resolve_immediate_local_reference(

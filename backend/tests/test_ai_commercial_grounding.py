@@ -73,6 +73,47 @@ def test_c01_authoritative_natural_french_forms_remain_accepted(response):
 @pytest.mark.parametrize(
     "response",
     (
+        "Oui, il est bien dispo  Le MBB Test Air Fryer 6L est à 55 USD "
+        "(environ 154 000 CDF). Tu veux que je te dise ce qu'il y a comme "
+        "autres modèles dans le même budget ?",
+        "Oui, il est bien dispo 🔥 Le MBB Test Air Fryer 6L est à 55 USD "
+        "(environ 154 000 CDF). Tu veux que je te dise ce qu'il y a comme "
+        "autres modèles dans le même budget ?",
+        "Oui, il est bien dispo  Le MBB Test Air Fryer 6L est à 55 USD.",
+    ),
+)
+def test_accepts_live_c01_explicit_product_price_forms(response):
+    validate_commercial_grounding(response, _offers())
+
+
+@pytest.mark.parametrize(
+    "response",
+    (
+        "Oui, il est bien dispo  Le MBB Test Air Fryer 6L est à 70 USD "
+        "(environ 154 000 CDF).",
+        "Oui, il est bien dispo  Le MBB Test Air Fryer 6L est à 55 USD "
+        "(environ 196 000 CDF).",
+        "Oui, il est bien dispo  Le MBB Test Air Fryer 6L est à 70 USD "
+        "(environ 196 000 CDF).",
+        "Non, il n'est pas dispo  Le MBB Test Air Fryer 6L est à 55 USD "
+        "(environ 154 000 CDF).",
+        "Oui, il est bien dispo  Le MBB Test Air Fryer 8L est à 70 USD "
+        "(environ 196 000 CDF).",
+        "Oui, il est bien dispo  Le MBB Test Air Fryer est à 55 USD "
+        "(environ 154 000 CDF).",
+        "Oui, il est bien dispo  Le Blender X est à 55 USD (environ 154 000 CDF).",
+        "Oui, il est bien dispo  Le MBB Test Air Fryer 6L est à 55 USD "
+        "(environ 154 000 CDF). Cela représente aussi 12 USD.",
+    ),
+)
+def test_live_c01_correction_remains_fail_closed(response):
+    with pytest.raises(CommercialGroundingError):
+        validate_commercial_grounding(response, _offers())
+
+
+@pytest.mark.parametrize(
+    "response",
+    (
         "Oui, le MBB Test Air Fryer 6L est disponible. Son prix est de 55 USD.",
         "Le MBB Test Air Fryer 6L est disponible. Il coûte 55 dollars.",
         "Le modèle 6L est disponible! Son prix actuel est $55.",

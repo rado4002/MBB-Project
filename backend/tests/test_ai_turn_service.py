@@ -606,6 +606,9 @@ async def test_commercial_grounding_rejects_identity_price_bypasses_before_succe
         "6L coûte 55 USD et 154 000 FC et 8L coûte 70 USD et 196 000 FC.",
         "Mon budget est 45 USD, le modèle 6L coûte 55 USD.",
         "La livraison est de 12 USD, le 6L coûte 55 USD.",
+        "Oui, il est bien dispo  Le MBB Test Air Fryer 6L est à 55 USD "
+        "(environ 154 000 CDF). Tu veux que je te dise ce qu'il y a comme "
+        "autres modèles dans le même budget ?",
     ),
 )
 @pytest.mark.parametrize("finalizer", (False, True))
