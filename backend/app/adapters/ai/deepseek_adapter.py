@@ -1,9 +1,11 @@
 """DeepSeek Chat Completions translation for the MBB provider-turn boundary."""
+
 from __future__ import annotations
 
 import json
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 import httpx
@@ -17,6 +19,7 @@ from app.ai.provider_contract import (
     ProviderErrorCategory,
     ProviderFinishReason,
     ProviderReasoningProfile,
+    ProviderResponseDiagnostic,
     ProviderToolCall,
     ProviderTurnError,
     ProviderTurnRequest,
@@ -33,10 +36,24 @@ _MAX_CONTINUATION_ASSISTANT_MESSAGES = 16
 _MAX_REASONING_CONTENT_CHARS = MAX_PROVIDER_MESSAGE_CHARS * 4
 
 
+class _DeepSeekResponseParseFailure(ValueError):
+    def __init__(self, safe_code: str) -> None:
+        self.safe_code = safe_code
+        super().__init__(safe_code)
+
+
+@dataclass(frozen=True)
+class _DeepSeekDecodedResponse:
+    payload: Mapping[str, Any]
+    http_status: int
+
+
 class DeepSeekChatTransport(Protocol):
     """Provider-internal transport seam used by deterministic adapter tests."""
 
-    async def create_chat_completion(self, payload: dict[str, Any]) -> Mapping[str, Any]:
+    async def create_chat_completion(
+        self, payload: dict[str, Any]
+    ) -> Mapping[str, Any] | _DeepSeekDecodedResponse:
         """Return one decoded DeepSeek Chat Completions response."""
 
 
@@ -52,7 +69,9 @@ class _DeepSeekHTTPTransport:
         self._timeout = httpx.Timeout(timeout_s)
         self._http_transport = http_transport
 
-    async def create_chat_completion(self, payload: dict[str, Any]) -> Mapping[str, Any]:
+    async def create_chat_completion(
+        self, payload: dict[str, Any]
+    ) -> _DeepSeekDecodedResponse:
         async with httpx.AsyncClient(
             timeout=self._timeout,
             follow_redirects=False,
@@ -67,10 +86,33 @@ class _DeepSeekHTTPTransport:
                 json=payload,
             )
             response.raise_for_status()
-            decoded = response.json()
+            try:
+                decoded = response.json()
+            except (ValueError, json.JSONDecodeError):
+                raise ProviderTurnError(
+                    ProviderErrorCategory.malformed_response,
+                    provider_request_id=_safe_provider_identifier(
+                        response.headers.get("x-request-id")
+                    ),
+                    response_diagnostic=_unavailable_response_diagnostic(
+                        parser_failure_category="transport_invalid_json",
+                        http_status=response.status_code,
+                        top_level_shape="invalid_json",
+                    ),
+                ) from None
         if not isinstance(decoded, Mapping):
-            raise ValueError("provider response must be a JSON object")
-        return decoded
+            raise ProviderTurnError(
+                ProviderErrorCategory.malformed_response,
+                provider_request_id=_safe_provider_identifier(
+                    response.headers.get("x-request-id")
+                ),
+                response_diagnostic=_unavailable_response_diagnostic(
+                    parser_failure_category="transport_non_object",
+                    http_status=response.status_code,
+                    top_level_shape=_top_level_shape(decoded),
+                ),
+            )
+        return _DeepSeekDecodedResponse(decoded, response.status_code)
 
 
 class DeepSeekAdapter(ProviderTurnAdapter):
@@ -103,8 +145,27 @@ class DeepSeekAdapter(ProviderTurnAdapter):
     async def generate_turn(self, request: ProviderTurnRequest) -> ProviderTurnResult:
         payload = self.build_request_payload(request)
         try:
-            response = await self._transport.create_chat_completion(payload)
-            return self.parse_response(response, request=request)
+            transported = await self._transport.create_chat_completion(payload)
+            if isinstance(transported, _DeepSeekDecodedResponse):
+                response = transported.payload
+                http_status = transported.http_status
+            else:
+                response = transported
+                http_status = None
+            if not isinstance(response, Mapping):
+                raise ProviderTurnError(
+                    ProviderErrorCategory.malformed_response,
+                    response_diagnostic=_unavailable_response_diagnostic(
+                        parser_failure_category="transport_non_object",
+                        http_status=http_status,
+                        top_level_shape=_top_level_shape(response),
+                    ),
+                )
+            return self.parse_response(
+                response,
+                request=request,
+                http_status=http_status,
+            )
         except ProviderTurnError:
             raise
         except httpx.TimeoutException:
@@ -114,7 +175,13 @@ class DeepSeekAdapter(ProviderTurnAdapter):
         except httpx.RequestError:
             raise ProviderTurnError(ProviderErrorCategory.unavailable) from None
         except (TypeError, ValueError, ValidationError, json.JSONDecodeError):
-            raise ProviderTurnError(ProviderErrorCategory.malformed_response) from None
+            raise ProviderTurnError(
+                ProviderErrorCategory.malformed_response,
+                response_diagnostic=_unavailable_response_diagnostic(
+                    parser_failure_category="transport_normalization_exception",
+                    http_status=None,
+                ),
+            ) from None
         except Exception:
             raise ProviderTurnError.unknown() from None
 
@@ -146,100 +213,100 @@ class DeepSeekAdapter(ProviderTurnAdapter):
         response: Mapping[str, Any],
         *,
         request: ProviderTurnRequest,
+        http_status: int | None = None,
     ) -> ProviderTurnResult:
         """Normalize one provider-shaped response into the MBB result contract."""
         request_id = _safe_provider_identifier(response.get("id"))
-        choices = response.get("choices")
-        if not isinstance(choices, list) or len(choices) != 1:
-            raise ProviderTurnError(
-                ProviderErrorCategory.malformed_response,
-                provider_request_id=request_id,
-            )
-        choice = choices[0]
-        if not isinstance(choice, Mapping):
-            raise ProviderTurnError(
-                ProviderErrorCategory.malformed_response,
-                provider_request_id=request_id,
-            )
-
-        native_finish_reason = choice.get("finish_reason")
-        if native_finish_reason == "insufficient_system_resource":
-            raise ProviderTurnError(
-                ProviderErrorCategory.unavailable,
-                provider_request_id=request_id,
-            )
-        finish_reason = _normalize_finish_reason(native_finish_reason)
-        message = choice.get("message")
-        if not isinstance(message, Mapping) or message.get("role") != "assistant":
-            raise ProviderTurnError(
-                ProviderErrorCategory.malformed_response,
-                provider_request_id=request_id,
-            )
-
-        raw_content = message.get("content")
-        if raw_content is not None and not isinstance(raw_content, str):
-            raise ProviderTurnError(
-                ProviderErrorCategory.malformed_response,
-                provider_request_id=request_id,
-            )
-        if raw_content is not None and len(raw_content) > MAX_PROVIDER_MESSAGE_CHARS:
-            raise ProviderTurnError(
-                ProviderErrorCategory.malformed_response,
-                provider_request_id=request_id,
-            )
-        text = raw_content if raw_content else None
-        tool_calls, provider_tool_calls = _parse_tool_calls(message.get("tool_calls"))
-        if bool(tool_calls) != (native_finish_reason == "tool_calls"):
-            raise ProviderTurnError(
-                ProviderErrorCategory.malformed_response,
-                provider_request_id=request_id,
-            )
-
-        continuation_state = None
-        reasoning_enabled = (
-            _reasoning_settings(request.reasoning_profile)["thinking"]["type"]
-            == "enabled"
-        )
-        reasoning_content = message.get("reasoning_content")
-        if reasoning_enabled and reasoning_content is not None:
-            if not isinstance(reasoning_content, str) or not reasoning_content:
-                raise ProviderTurnError(
-                    ProviderErrorCategory.malformed_response,
-                    provider_request_id=request_id,
-                )
-            if len(reasoning_content) > _MAX_REASONING_CONTENT_CHARS:
-                raise ProviderTurnError(
-                    ProviderErrorCategory.malformed_response,
-                    provider_request_id=request_id,
-                )
-        if tool_calls:
-            if reasoning_enabled and not isinstance(reasoning_content, str):
-                raise ProviderTurnError(
-                    ProviderErrorCategory.malformed_response,
-                    provider_request_id=request_id,
-                )
-            continuation_state = _next_continuation_state(
-                request.continuation_state,
-                model=self.model,
-                content=raw_content or "",
-                reasoning_content=(reasoning_content if reasoning_enabled else None),
-                tool_calls=provider_tool_calls,
-            )
-
+        diagnostic = _response_shape_diagnostic(response, http_status=http_status)
         try:
+            choices = response.get("choices")
+            if not isinstance(choices, list) or len(choices) != 1:
+                raise _DeepSeekResponseParseFailure("choices_not_single")
+            choice = choices[0]
+            if not isinstance(choice, Mapping):
+                raise _DeepSeekResponseParseFailure("choice_not_object")
+
+            native_finish_reason = choice.get("finish_reason")
+            if native_finish_reason == "insufficient_system_resource":
+                raise ProviderTurnError(
+                    ProviderErrorCategory.unavailable,
+                    provider_request_id=request_id,
+                )
+            finish_reason = _normalize_finish_reason(native_finish_reason)
+            message = choice.get("message")
+            if not isinstance(message, Mapping) or message.get("role") != "assistant":
+                raise _DeepSeekResponseParseFailure("message_not_assistant")
+
+            raw_content = message.get("content")
+            if raw_content is not None and not isinstance(raw_content, str):
+                raise _DeepSeekResponseParseFailure("content_invalid")
+            if (
+                raw_content is not None
+                and len(raw_content) > MAX_PROVIDER_MESSAGE_CHARS
+            ):
+                raise _DeepSeekResponseParseFailure("content_oversized")
+            text = raw_content if raw_content else None
+            tool_calls, provider_tool_calls = _parse_tool_calls(
+                message.get("tool_calls")
+            )
+            if bool(tool_calls) != (native_finish_reason == "tool_calls"):
+                raise _DeepSeekResponseParseFailure("tool_finish_mismatch")
+
+            continuation_state = None
+            reasoning_enabled = (
+                _reasoning_settings(request.reasoning_profile)["thinking"]["type"]
+                == "enabled"
+            )
+            reasoning_content = message.get("reasoning_content")
+            if reasoning_enabled and reasoning_content is not None:
+                if not isinstance(reasoning_content, str) or not reasoning_content:
+                    raise _DeepSeekResponseParseFailure("reasoning_content_invalid")
+                if len(reasoning_content) > _MAX_REASONING_CONTENT_CHARS:
+                    raise _DeepSeekResponseParseFailure("reasoning_content_oversized")
+            if tool_calls:
+                if reasoning_enabled and not isinstance(reasoning_content, str):
+                    raise _DeepSeekResponseParseFailure("tool_reasoning_missing")
+                try:
+                    continuation_state = _next_continuation_state(
+                        request.continuation_state,
+                        model=self.model,
+                        content=raw_content or "",
+                        reasoning_content=(
+                            reasoning_content if reasoning_enabled else None
+                        ),
+                        tool_calls=provider_tool_calls,
+                    )
+                except ProviderTurnError as exc:
+                    if exc.category == ProviderErrorCategory.malformed_response:
+                        raise _DeepSeekResponseParseFailure(
+                            "continuation_limit"
+                        ) from None
+                    raise
+
             return ProviderTurnResult(
                 text=text,
                 tool_calls=tool_calls,
                 finish_reason=finish_reason,
                 usage=_parse_usage(response.get("usage")),
                 provider_request_id=request_id,
+                response_diagnostic=diagnostic,
                 continuation_state=continuation_state,
             )
         except ValidationError:
-            raise ProviderTurnError(
-                ProviderErrorCategory.malformed_response,
-                provider_request_id=request_id,
-            ) from None
+            failure = _DeepSeekResponseParseFailure("result_contract_invalid")
+        except _DeepSeekResponseParseFailure as exc:
+            failure = exc
+        except ProviderTurnError as exc:
+            if exc.category != ProviderErrorCategory.malformed_response:
+                raise
+            failure = _DeepSeekResponseParseFailure("normalization_exception")
+        raise ProviderTurnError(
+            ProviderErrorCategory.malformed_response,
+            provider_request_id=request_id,
+            response_diagnostic=diagnostic.model_copy(
+                update={"parser_failure_category": failure.safe_code}
+            ),
+        ) from None
 
 
 def _reasoning_settings(profile: ProviderReasoningProfile) -> dict[str, Any]:
@@ -336,7 +403,10 @@ def _continuation_messages(
     if value.get("provider") != DEEPSEEK_PROVIDER_NAME or value.get("model") != model:
         raise ProviderTurnError(ProviderErrorCategory.invalid_request)
     messages = value.get("assistant_messages")
-    if not isinstance(messages, list) or not 1 <= len(messages) <= _MAX_CONTINUATION_ASSISTANT_MESSAGES:
+    if (
+        not isinstance(messages, list)
+        or not 1 <= len(messages) <= _MAX_CONTINUATION_ASSISTANT_MESSAGES
+    ):
         raise ProviderTurnError(ProviderErrorCategory.invalid_request)
     for message in messages:
         if not isinstance(message, dict) or message.get("role") != "assistant":
@@ -400,34 +470,40 @@ def _parse_tool_calls(
 ) -> tuple[tuple[ProviderToolCall, ...], list[dict[str, Any]]]:
     if raw_tool_calls is None:
         return (), []
-    if not isinstance(raw_tool_calls, list) or not 1 <= len(raw_tool_calls) <= MAX_PROVIDER_TOOL_CALLS:
-        raise ProviderTurnError(ProviderErrorCategory.malformed_response)
+    if (
+        not isinstance(raw_tool_calls, list)
+        or not 1 <= len(raw_tool_calls) <= MAX_PROVIDER_TOOL_CALLS
+    ):
+        raise _DeepSeekResponseParseFailure("tool_calls_shape")
 
     normalized: list[ProviderToolCall] = []
     provider_calls: list[dict[str, Any]] = []
     seen_call_ids: set[str] = set()
     for raw_call in raw_tool_calls:
         if not isinstance(raw_call, Mapping) or raw_call.get("type") != "function":
-            raise ProviderTurnError(ProviderErrorCategory.malformed_response)
+            raise _DeepSeekResponseParseFailure("tool_call_not_function")
         function = raw_call.get("function")
         if not isinstance(function, Mapping):
-            raise ProviderTurnError(ProviderErrorCategory.malformed_response)
+            raise _DeepSeekResponseParseFailure("tool_function_invalid")
         call_id = raw_call.get("id")
         capability_name = function.get("name")
         raw_arguments = function.get("arguments")
-        if not all(isinstance(value, str) for value in (call_id, capability_name, raw_arguments)):
-            raise ProviderTurnError(ProviderErrorCategory.malformed_response)
+        if not all(
+            isinstance(value, str)
+            for value in (call_id, capability_name, raw_arguments)
+        ):
+            raise _DeepSeekResponseParseFailure("tool_fields_invalid")
         if len(raw_arguments) > _MAX_REASONING_CONTENT_CHARS:
-            raise ProviderTurnError(ProviderErrorCategory.malformed_response)
+            raise _DeepSeekResponseParseFailure("tool_arguments_oversized")
         if call_id in seen_call_ids:
-            raise ProviderTurnError(ProviderErrorCategory.malformed_response)
+            raise _DeepSeekResponseParseFailure("tool_call_id_duplicate")
         seen_call_ids.add(call_id)
         try:
             arguments = json.loads(raw_arguments)
         except json.JSONDecodeError:
-            raise ProviderTurnError(ProviderErrorCategory.malformed_response) from None
+            raise _DeepSeekResponseParseFailure("tool_arguments_invalid_json") from None
         if not isinstance(arguments, dict):
-            raise ProviderTurnError(ProviderErrorCategory.malformed_response)
+            raise _DeepSeekResponseParseFailure("tool_arguments_not_object")
         try:
             normalized.append(
                 ProviderToolCall(
@@ -437,7 +513,7 @@ def _parse_tool_calls(
                 )
             )
         except ValidationError:
-            raise ProviderTurnError(ProviderErrorCategory.malformed_response) from None
+            raise _DeepSeekResponseParseFailure("tool_call_contract_invalid") from None
         provider_calls.append(
             {
                 "id": call_id,
@@ -454,7 +530,11 @@ def _parse_tool_calls(
 def _validate_continuation_tool_calls(tool_calls: list[Any]) -> None:
     seen_call_ids: set[str] = set()
     for tool_call in tool_calls:
-        if not isinstance(tool_call, dict) or set(tool_call) != {"id", "type", "function"}:
+        if not isinstance(tool_call, dict) or set(tool_call) != {
+            "id",
+            "type",
+            "function",
+        }:
             raise ProviderTurnError(ProviderErrorCategory.invalid_request)
         function = tool_call.get("function")
         if (
@@ -485,10 +565,10 @@ def _parse_usage(raw_usage: Any) -> ProviderUsage | None:
     if raw_usage is None:
         return None
     if not isinstance(raw_usage, Mapping):
-        raise ProviderTurnError(ProviderErrorCategory.malformed_response)
+        raise _DeepSeekResponseParseFailure("usage_not_object")
     completion_details = raw_usage.get("completion_tokens_details")
     if completion_details is not None and not isinstance(completion_details, Mapping):
-        raise ProviderTurnError(ProviderErrorCategory.malformed_response)
+        raise _DeepSeekResponseParseFailure("usage_details_invalid")
     try:
         return ProviderUsage(
             input_tokens=raw_usage.get("prompt_tokens"),
@@ -503,12 +583,12 @@ def _parse_usage(raw_usage: Any) -> ProviderUsage | None:
             ),
         )
     except ValidationError:
-        raise ProviderTurnError(ProviderErrorCategory.malformed_response) from None
+        raise _DeepSeekResponseParseFailure("usage_contract_invalid") from None
 
 
 def _normalize_finish_reason(native_reason: Any) -> ProviderFinishReason:
     if not isinstance(native_reason, str):
-        raise ProviderTurnError(ProviderErrorCategory.malformed_response)
+        raise _DeepSeekResponseParseFailure("finish_reason_invalid")
     return {
         "stop": ProviderFinishReason.completed,
         "length": ProviderFinishReason.max_output,
@@ -540,3 +620,212 @@ def _safe_provider_identifier(value: Any) -> str | None:
     if isinstance(value, str) and _SAFE_PROVIDER_IDENTIFIER.fullmatch(value):
         return value
     return None
+
+
+def _top_level_shape(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, Mapping):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    return "scalar"
+
+
+def _unavailable_response_diagnostic(
+    *,
+    parser_failure_category: str,
+    http_status: int | None,
+    top_level_shape: str = "unavailable",
+) -> ProviderResponseDiagnostic:
+    return ProviderResponseDiagnostic(
+        parser_failure_category=parser_failure_category,
+        http_status=http_status,
+        top_level_shape=top_level_shape,
+        request_id_state="unavailable",
+        choices_state="unavailable",
+        message_state="unavailable",
+        content_state="unavailable",
+        auxiliary_text_state="unavailable",
+        finish_reason_state="unavailable",
+        tool_calls_state="unavailable",
+        usage_state="unavailable",
+    )
+
+
+def _response_shape_diagnostic(
+    response: Mapping[str, Any],
+    *,
+    http_status: int | None,
+) -> ProviderResponseDiagnostic:
+    choices = response.get("choices")
+    choice = choices[0] if isinstance(choices, list) and len(choices) == 1 else None
+    message = choice.get("message") if isinstance(choice, Mapping) else None
+    usage = response.get("usage")
+
+    required_presence: dict[str, bool] = {
+        "choices": "choices" in response,
+        "choice_finish_reason": isinstance(choice, Mapping)
+        and "finish_reason" in choice,
+        "choice_message": isinstance(choice, Mapping) and "message" in choice,
+        "message_role": isinstance(message, Mapping) and "role" in message,
+    }
+    usage_presence = {
+        name: isinstance(usage, Mapping) and name in usage
+        for name in (
+            "completion_tokens",
+            "prompt_cache_hit_tokens",
+            "prompt_cache_miss_tokens",
+            "prompt_tokens",
+            "total_tokens",
+        )
+    }
+    request_id = response.get("id")
+    request_id_state = (
+        "missing"
+        if "id" not in response
+        else "null"
+        if request_id is None
+        else "safe"
+        if _safe_provider_identifier(request_id) is not None
+        else "invalid"
+    )
+    choices_state = (
+        "missing"
+        if "choices" not in response
+        else "null"
+        if choices is None
+        else "not_list"
+        if not isinstance(choices, list)
+        else "empty"
+        if not choices
+        else "single"
+        if len(choices) == 1
+        else "multiple"
+    )
+    message_state = _message_state(choice, message)
+    finish_reason_state = _finish_reason_state(choice)
+    content_state = _content_state(message, "content", MAX_PROVIDER_MESSAGE_CHARS)
+    auxiliary_text_state = _content_state(
+        message,
+        "reasoning_content",
+        _MAX_REASONING_CONTENT_CHARS,
+    )
+    tool_calls_state = _tool_calls_state(message)
+    usage_state = _usage_state(response, usage, usage_presence)
+    return ProviderResponseDiagnostic(
+        parser_failure_category="response_normalized",
+        http_status=http_status,
+        top_level_shape="object",
+        request_id_state=request_id_state,
+        choices_state=choices_state,
+        message_state=message_state,
+        content_state=content_state,
+        auxiliary_text_state=auxiliary_text_state,
+        finish_reason_state=finish_reason_state,
+        tool_calls_state=tool_calls_state,
+        usage_state=usage_state,
+        required_fields_present=tuple(
+            name for name, present in required_presence.items() if present
+        ),
+        required_fields_missing=tuple(
+            name for name, present in required_presence.items() if not present
+        ),
+        usage_fields_present=tuple(
+            name for name, present in usage_presence.items() if present
+        ),
+        usage_fields_missing=tuple(
+            name for name, present in usage_presence.items() if not present
+        ),
+    )
+
+
+def _message_state(choice: Any, message: Any) -> str:
+    if not isinstance(choice, Mapping):
+        return "unavailable"
+    if "message" not in choice:
+        return "missing"
+    if message is None:
+        return "null"
+    if not isinstance(message, Mapping):
+        return "not_object"
+    return "assistant" if message.get("role") == "assistant" else "other_role"
+
+
+def _content_state(message: Any, field: str, maximum: int) -> str:
+    if not isinstance(message, Mapping):
+        return "unavailable"
+    if field not in message:
+        return "missing"
+    value = message.get(field)
+    if value is None:
+        return "null"
+    if not isinstance(value, str):
+        return "non_string"
+    if not value:
+        return "empty"
+    return "oversized" if len(value) > maximum else "text"
+
+
+def _finish_reason_state(choice: Any) -> str:
+    if not isinstance(choice, Mapping):
+        return "unavailable"
+    if "finish_reason" not in choice:
+        return "missing"
+    value = choice.get("finish_reason")
+    if value is None:
+        return "null"
+    if not isinstance(value, str):
+        return "non_string"
+    return (
+        "known"
+        if value
+        in {
+            "stop",
+            "length",
+            "content_filter",
+            "tool_calls",
+            "insufficient_system_resource",
+        }
+        else "unusual"
+    )
+
+
+def _tool_calls_state(message: Any) -> str:
+    if not isinstance(message, Mapping):
+        return "unavailable"
+    if "tool_calls" not in message:
+        return "missing"
+    value = message.get("tool_calls")
+    if value is None:
+        return "null"
+    if not isinstance(value, list):
+        return "not_list"
+    return "empty" if not value else "present"
+
+
+def _usage_state(
+    response: Mapping[str, Any],
+    usage: Any,
+    usage_presence: Mapping[str, bool],
+) -> str:
+    if "usage" not in response:
+        return "missing"
+    if usage is None:
+        return "null"
+    if not isinstance(usage, Mapping):
+        return "not_object"
+    numeric_fields = (
+        "completion_tokens",
+        "prompt_cache_hit_tokens",
+        "prompt_cache_miss_tokens",
+        "prompt_tokens",
+        "total_tokens",
+    )
+    if any(
+        name in usage
+        and (not isinstance(usage[name], int) or isinstance(usage[name], bool))
+        for name in numeric_fields
+    ):
+        return "invalid"
+    return "complete" if all(usage_presence.values()) else "partial"

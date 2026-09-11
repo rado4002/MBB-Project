@@ -52,6 +52,7 @@ from app.ai.provider_contract import (
     ProviderFinishReason,
     ProviderMessage,
     ProviderReasoningProfile,
+    ProviderResponseDiagnostic,
     ProviderTurnError,
     ProviderTurnRequest,
     ProviderTurnResult,
@@ -786,10 +787,34 @@ async def test_bridge_deadline_observes_and_discards_real_late_completion() -> N
 async def test_malformed_provider_failure_keeps_precall_reservation() -> None:
     profile = AI5B2BudgetProfile()
     ledger = OfflineBudgetLedger(profile.offline_limits())
+    diagnostic = ProviderResponseDiagnostic(
+        parser_failure_category="choices_not_single",
+        http_status=200,
+        top_level_shape="object",
+        request_id_state="missing",
+        choices_state="empty",
+        message_state="unavailable",
+        content_state="unavailable",
+        auxiliary_text_state="unavailable",
+        finish_reason_state="unavailable",
+        tool_calls_state="unavailable",
+        usage_state="missing",
+        required_fields_present=("choices",),
+        required_fields_missing=(
+            "choice_finish_reason",
+            "choice_message",
+            "message_role",
+        ),
+        usage_fields_missing=("prompt_tokens", "total_tokens"),
+    )
     inner = _SequenceAdapter(
-        ProviderTurnError(ProviderErrorCategory.malformed_response)
+        ProviderTurnError(
+            ProviderErrorCategory.malformed_response,
+            response_diagnostic=diagnostic,
+        )
     )
     adapter = CumulativeBudgetProvider(inner, ledger=ledger, profile=profile)
+    adapter.stop_latch.begin_case("C01")
 
     with pytest.raises(ProviderTurnError) as malformed:
         await adapter.generate_turn(_request())
@@ -801,6 +826,11 @@ async def test_malformed_provider_failure_keeps_precall_reservation() -> None:
     assert ledger.unresolved_reserved_tokens == reservation.total_tokens
     assert ledger.committed_tokens == reservation.total_tokens
     assert adapter.call_evidence[0].outcome == "failed"
+    assert adapter.call_evidence[0].case_id == "C01"
+    assert adapter.call_evidence[0].response_diagnostic == diagnostic
+    serialized = adapter.call_evidence[0].model_dump_json()
+    assert "choices_not_single" in serialized
+    assert "authorization" not in serialized.lower()
     with pytest.raises(AI5B2BridgeConfigurationError, match="stage_dispatch_stopped"):
         await adapter.generate_turn(_request())
     assert inner.calls == 1

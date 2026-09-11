@@ -5,7 +5,11 @@ import inspect
 import pytest
 from pydantic import ValidationError
 
-from app.adapters import ai_adapter_eligibility, get_ai_adapter, get_provider_turn_adapter
+from app.adapters import (
+    ai_adapter_eligibility,
+    get_ai_adapter,
+    get_provider_turn_adapter,
+)
 from app.adapters.ai.disabled_adapter import AIAdapterDisabled, DisabledAIAdapter
 from app.adapters.base import ProviderTurnAdapter
 from app.ai.capabilities import AI_CAPABILITY_REGISTRY
@@ -18,6 +22,7 @@ from app.ai.provider_contract import (
     ProviderIdentity,
     ProviderMessage,
     ProviderReasoningProfile,
+    ProviderResponseDiagnostic,
     ProviderToolCall,
     ProviderToolError,
     ProviderToolResult,
@@ -137,9 +142,12 @@ def test_result_contract_accepts_text_tools_usage_and_rejects_malformed_results(
     assert tool_result.tool_calls[0].capability_name == "search_products"
     assert mixed_result.text == "Je vérifie."
 
-    assert ProviderTurnResult(
-        finish_reason=ProviderFinishReason.error,
-    ).finish_reason == ProviderFinishReason.error
+    assert (
+        ProviderTurnResult(
+            finish_reason=ProviderFinishReason.error,
+        ).finish_reason
+        == ProviderFinishReason.error
+    )
     with pytest.raises(ValidationError):
         ProviderTurnResult(finish_reason=ProviderFinishReason.completed)
 
@@ -172,14 +180,29 @@ def test_tool_call_preserves_provider_correlation_without_authority_fields():
 
 
 def test_provider_errors_are_safe_and_normalized():
+    diagnostic = ProviderResponseDiagnostic(
+        parser_failure_category="choices_not_single",
+        http_status=200,
+        top_level_shape="object",
+        request_id_state="missing",
+        choices_state="empty",
+        message_state="unavailable",
+        content_state="unavailable",
+        auxiliary_text_state="unavailable",
+        finish_reason_state="unavailable",
+        tool_calls_state="unavailable",
+        usage_state="missing",
+    )
     error = ProviderTurnError(
         ProviderErrorCategory.authentication,
         provider_request_id="req_auth_1",
+        response_diagnostic=diagnostic,
     )
     unknown = ProviderTurnError.unknown()
 
     assert error.safe_code == "authentication"
     assert error.provider_request_id == "req_auth_1"
+    assert error.response_diagnostic == diagnostic
     assert "sk-" not in str(error)
     assert "authentication" in str(error)
     assert unknown.safe_code == "unknown"

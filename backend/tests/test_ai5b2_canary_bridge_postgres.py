@@ -1617,6 +1617,19 @@ def test_actual_cli_latches_failure_and_persists_partial_evidence(
     assert evidence["failed_request_index"] == expected_calls
     assert evidence["provider_calls"][-1]["total_tokens"] is None
     assert evidence["provider_calls"][-1]["estimated_cost_usd"] is None
+    diagnostic = evidence["provider_calls"][-1]["response_diagnostic"]
+    assert diagnostic["http_status"] == 200
+    assert diagnostic["top_level_shape"] == "object"
+    if missing_usage:
+        assert diagnostic["parser_failure_category"] == "provider_missing_usage"
+        assert diagnostic["choices_state"] == "single"
+        assert diagnostic["usage_state"] == "missing"
+        assert diagnostic["usage_fields_present"] == []
+    else:
+        assert diagnostic["parser_failure_category"] == "choices_not_single"
+        assert diagnostic["request_id_state"] == "missing"
+        assert diagnostic["choices_state"] == "missing"
+        assert diagnostic["message_state"] == "unavailable"
     assert evidence["actual_provider_api_tokens"] is None
     assert evidence["actual_provider_cost_usd"] is None
     assert evidence["reserved_provider_calls"] == expected_calls

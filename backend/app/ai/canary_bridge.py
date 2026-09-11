@@ -47,6 +47,7 @@ from app.ai.provider_contract import (
     ProviderErrorCategory,
     ProviderFinishReason,
     ProviderReasoningProfile,
+    ProviderResponseDiagnostic,
     ProviderToolCall,
     ProviderTurnError,
     ProviderTurnRequest,
@@ -1627,6 +1628,7 @@ class CumulativeBudgetProvider(ProviderTurnAdapter):
                 latency_ms=self._latency_ms(started),
                 failure_code=exc.safe_code,
                 provider_request_id=exc.provider_request_id,
+                response_diagnostic=exc.response_diagnostic,
             )
             self.stop_latch.stop(exc.safe_code, request_index=request_index)
             raise
@@ -1655,15 +1657,26 @@ class CumulativeBudgetProvider(ProviderTurnAdapter):
         if usage_failure is not None:
             if usage_failure == "provider_missing_usage":
                 self.missing_usage_failures += 1
+            response_diagnostic = result.response_diagnostic
+            if response_diagnostic is not None:
+                response_diagnostic = response_diagnostic.model_copy(
+                    update={"parser_failure_category": usage_failure}
+                )
             self._finish_call(
                 request_index,
                 outcome="failed",
                 latency_ms=self._latency_ms(started),
                 failure_code=usage_failure,
+                usage=usage,
                 provider_request_id=result.provider_request_id,
+                response_diagnostic=response_diagnostic,
             )
             self.stop_latch.stop(usage_failure, request_index=request_index)
-            raise ProviderTurnError(ProviderErrorCategory.malformed_response)
+            raise ProviderTurnError(
+                ProviderErrorCategory.malformed_response,
+                provider_request_id=result.provider_request_id,
+                response_diagnostic=response_diagnostic,
+            )
         assert usage is not None
         assert usage.input_tokens is not None
         assert usage.output_tokens is not None
@@ -1746,6 +1759,7 @@ class CumulativeBudgetProvider(ProviderTurnAdapter):
         finish_reason: ProviderFinishReason | None = None,
         usage: ProviderUsage | None = None,
         provider_request_id: str | None = None,
+        response_diagnostic: ProviderResponseDiagnostic | None = None,
         reservation_settled: bool = False,
         reservation_violation: bool = False,
     ) -> None:
@@ -1757,7 +1771,13 @@ class CumulativeBudgetProvider(ProviderTurnAdapter):
             outcome = "timed_out"
             failure_code = "provider_timeout"
         estimated_cost = None
-        if usage is not None and self.pricing is not None:
+        if (
+            usage is not None
+            and self.pricing is not None
+            and _usage_reconciliation_failure(usage) is None
+            and usage.cache_hit_tokens is not None
+            and usage.cache_miss_tokens is not None
+        ):
             estimated_cost = self.pricing.settled_cost(usage)
         self.call_evidence[index] = current.model_copy(
             update={
@@ -1779,6 +1799,7 @@ class CumulativeBudgetProvider(ProviderTurnAdapter):
                 ),
                 "estimated_cost_usd": estimated_cost,
                 "provider_request_id": provider_request_id,
+                "response_diagnostic": response_diagnostic,
                 "reservation_settled": reservation_settled,
                 "reservation_violation": reservation_violation,
             }
@@ -1834,6 +1855,7 @@ class CanaryProviderCallEvidence(_StrictModel):
     reasoning_tokens: int | None = Field(default=None, ge=0)
     estimated_cost_usd: Decimal | None = Field(default=None, ge=0)
     provider_request_id: str | None = None
+    response_diagnostic: ProviderResponseDiagnostic | None = None
 
 
 class CanaryTranscriptEntry(_StrictModel):

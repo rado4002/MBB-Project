@@ -1,4 +1,5 @@
 """Provider-neutral AI turn contracts for model adapter boundaries."""
+
 from __future__ import annotations
 
 from enum import Enum
@@ -126,6 +127,42 @@ class ProviderErrorCategory(str, Enum):
     unknown = "unknown"
 
 
+class ProviderResponseDiagnostic(StrictProviderModel):
+    """Content-free response-shape metadata for guarded evaluation evidence."""
+
+    parser_failure_category: SafeProviderName
+    http_status: int | None = Field(default=None, ge=100, le=599)
+    top_level_shape: Literal[
+        "object", "array", "scalar", "null", "invalid_json", "unavailable"
+    ]
+    request_id_state: Literal["safe", "missing", "null", "invalid", "unavailable"]
+    choices_state: Literal[
+        "single", "missing", "null", "not_list", "empty", "multiple", "unavailable"
+    ]
+    message_state: Literal[
+        "assistant", "missing", "null", "not_object", "other_role", "unavailable"
+    ]
+    content_state: Literal[
+        "text", "empty", "null", "missing", "non_string", "oversized", "unavailable"
+    ]
+    auxiliary_text_state: Literal[
+        "text", "empty", "null", "missing", "non_string", "oversized", "unavailable"
+    ]
+    finish_reason_state: Literal[
+        "known", "unusual", "missing", "null", "non_string", "unavailable"
+    ]
+    tool_calls_state: Literal[
+        "present", "empty", "missing", "null", "not_list", "unavailable"
+    ]
+    usage_state: Literal[
+        "complete", "partial", "missing", "null", "not_object", "invalid", "unavailable"
+    ]
+    required_fields_present: tuple[SafeProviderName, ...] = ()
+    required_fields_missing: tuple[SafeProviderName, ...] = ()
+    usage_fields_present: tuple[SafeProviderName, ...] = ()
+    usage_fields_missing: tuple[SafeProviderName, ...] = ()
+
+
 class ProviderTurnError(RuntimeError):
     """Safe provider-neutral exception that never includes raw provider payloads."""
 
@@ -134,10 +171,12 @@ class ProviderTurnError(RuntimeError):
         category: ProviderErrorCategory,
         *,
         provider_request_id: str | None = None,
+        response_diagnostic: ProviderResponseDiagnostic | None = None,
     ) -> None:
         self.category = category
         self.safe_code = category.value
         self.provider_request_id = provider_request_id
+        self.response_diagnostic = response_diagnostic
         super().__init__(f"provider_turn_error:{self.safe_code}")
 
     @classmethod
@@ -280,7 +319,9 @@ class ProviderUsage(StrictProviderModel):
 class ProviderTurnResult(StrictProviderModel):
     """Provider-neutral result from one model adapter call."""
 
-    text: str | None = Field(default=None, min_length=1, max_length=MAX_PROVIDER_MESSAGE_CHARS)
+    text: str | None = Field(
+        default=None, min_length=1, max_length=MAX_PROVIDER_MESSAGE_CHARS
+    )
     tool_calls: tuple[ProviderToolCall, ...] = Field(
         default=(),
         max_length=MAX_PROVIDER_TOOL_CALLS,
@@ -288,6 +329,11 @@ class ProviderTurnResult(StrictProviderModel):
     finish_reason: ProviderFinishReason
     usage: ProviderUsage | None = None
     provider_request_id: SafeProviderIdentifier | None = None
+    response_diagnostic: ProviderResponseDiagnostic | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+    )
     continuation_state: ProviderContinuationState | None = Field(
         default=None,
         exclude=True,
@@ -296,6 +342,10 @@ class ProviderTurnResult(StrictProviderModel):
 
     @model_validator(mode="after")
     def result_has_model_output_or_error(self) -> ProviderTurnResult:
-        if self.text is None and not self.tool_calls and self.finish_reason != ProviderFinishReason.error:
+        if (
+            self.text is None
+            and not self.tool_calls
+            and self.finish_reason != ProviderFinishReason.error
+        ):
             raise ValueError("provider result must contain text, tool calls, or error")
         return self

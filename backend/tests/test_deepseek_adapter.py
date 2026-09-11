@@ -151,7 +151,8 @@ async def test_http_transport_uses_fixed_endpoint_bearer_auth_and_one_offline_at
 
     decoded = await transport.create_chat_completion({"stream": False})
 
-    assert decoded == {"id": "safe", "choices": []}
+    assert decoded.payload == {"id": "safe", "choices": []}
+    assert decoded.http_status == 200
     assert len(attempts) == 1
     assert str(attempts[0].url) == "https://api.deepseek.com/chat/completions"
     assert attempts[0].headers["authorization"] == "Bearer fake-key"
@@ -353,6 +354,17 @@ async def test_thinking_tool_continuation_replays_opaque_assistant_state() -> No
     assert projected_items[1]["derived_cdf_quote"]["amount"] == "196000.00"
     assert "continuation_state" not in continuation_request.model_dump(mode="json")
     assert "private synthetic continuation" not in repr(continuation_request)
+
+    first_transport.response = _response(
+        content="Le MBB Test Air Fryer 6L est disponible à 55 USD.",
+        reasoning_content="private synthetic final reasoning",
+    )
+    final_result = await adapter.generate_turn(continuation_request)
+
+    assert final_result.finish_reason == ProviderFinishReason.completed
+    assert final_result.text == ("Le MBB Test Air Fryer 6L est disponible à 55 USD.")
+    assert final_result.tool_calls == ()
+    assert len(first_transport.calls) == 2
 
 
 def test_tampered_continuation_state_fails_closed() -> None:
@@ -588,6 +600,134 @@ async def test_malformed_provider_payload_fails_safely(payload) -> None:
         await adapter.generate_turn(_request())
 
     assert captured.value.category == ProviderErrorCategory.malformed_response
+
+
+@pytest.mark.asyncio
+async def test_response_shape_diagnostics_cover_safe_optional_field_variants() -> None:
+    payload = _response(reasoning_content=None)
+    payload.pop("id")
+    payload["unexpected_metadata"] = {"future": True}
+    payload["choices"][0]["finish_reason"] = "future_reason"
+    payload["usage"] = {"prompt_tokens": 17, "completion_tokens": 9}
+    adapter = DeepSeekAdapter(api_key="fake-key", transport=_FakeTransport(payload))
+
+    result = await adapter.generate_turn(_request())
+
+    assert result.provider_request_id is None
+    assert result.finish_reason == ProviderFinishReason.unknown
+    assert result.response_diagnostic is not None
+    diagnostic = result.response_diagnostic
+    assert diagnostic.request_id_state == "missing"
+    assert diagnostic.finish_reason_state == "unusual"
+    assert diagnostic.auxiliary_text_state == "missing"
+    assert diagnostic.tool_calls_state == "missing"
+    assert diagnostic.usage_state == "partial"
+    assert set(diagnostic.usage_fields_missing) == {
+        "prompt_cache_hit_tokens",
+        "prompt_cache_miss_tokens",
+        "total_tokens",
+    }
+    serialized = result.model_dump_json()
+    assert "response_diagnostic" not in serialized
+    assert "unexpected_metadata" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_nullable_optional_response_fields_remain_accepted() -> None:
+    payload = _response()
+    message = payload["choices"][0]["message"]
+    message["reasoning_content"] = None
+    message["tool_calls"] = None
+    payload["usage"]["completion_tokens_details"] = None
+    adapter = DeepSeekAdapter(api_key="fake-key", transport=_FakeTransport(payload))
+
+    result = await adapter.generate_turn(_request())
+
+    assert result.text == "Bonjour, comment puis-je aider ?"
+    assert result.finish_reason == ProviderFinishReason.completed
+    assert result.response_diagnostic is not None
+    assert result.response_diagnostic.auxiliary_text_state == "null"
+    assert result.response_diagnostic.tool_calls_state == "null"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "failure_category", "shape_state"),
+    [
+        ({"id": "safe-id", "choices": []}, "choices_not_single", "empty"),
+        (
+            {
+                "id": "safe-id",
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            },
+            "finish_reason_invalid",
+            "single",
+        ),
+        (
+            {
+                "id": "safe-id",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": 42},
+                    }
+                ],
+            },
+            "content_invalid",
+            "single",
+        ),
+    ],
+)
+async def test_malformed_response_diagnostic_identifies_parser_guard_without_content(
+    payload,
+    failure_category,
+    shape_state,
+) -> None:
+    adapter = DeepSeekAdapter(api_key="fake-key", transport=_FakeTransport(payload))
+
+    with pytest.raises(ProviderTurnError) as captured:
+        await adapter.generate_turn(_request())
+
+    diagnostic = captured.value.response_diagnostic
+    assert diagnostic is not None
+    assert diagnostic.parser_failure_category == failure_category
+    assert diagnostic.choices_state == shape_state
+    safe_dump = diagnostic.model_dump_json()
+    assert "safe-id" not in safe_dump
+    assert "authorization" not in safe_dump.lower()
+
+
+@pytest.mark.asyncio
+async def test_truncated_http_response_has_content_free_transport_diagnostic() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b'{"id":"must-not-persist","choices":[',
+            headers={
+                "content-type": "application/json",
+                "x-request-id": "req_safe_truncated",
+            },
+        )
+
+    adapter = DeepSeekAdapter(
+        api_key="fake-key",
+        transport=_DeepSeekHTTPTransport(
+            api_key="fake-key",
+            timeout_s=60,
+            http_transport=httpx.MockTransport(handler),
+        ),
+    )
+
+    with pytest.raises(ProviderTurnError) as captured:
+        await adapter.generate_turn(_request())
+
+    diagnostic = captured.value.response_diagnostic
+    assert diagnostic is not None
+    assert captured.value.provider_request_id == "req_safe_truncated"
+    assert diagnostic.parser_failure_category == "transport_invalid_json"
+    assert diagnostic.http_status == 200
+    assert diagnostic.top_level_shape == "invalid_json"
+    assert "must-not-persist" not in diagnostic.model_dump_json()
 
 
 @pytest.mark.asyncio
