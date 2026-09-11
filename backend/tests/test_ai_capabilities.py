@@ -265,17 +265,19 @@ def test_provider_neutral_specification_exposes_only_allowed_registered_tools():
 
 
 def test_production_registry_contains_only_approved_capabilities():
-    assert len(AI_CAPABILITY_REGISTRY) == 3
+    assert len(AI_CAPABILITY_REGISTRY) == 4
     assert AI_CAPABILITY_REGISTRY.specifications(set()) == ()
     specifications = AI_CAPABILITY_REGISTRY.specifications(
         {
             "get_product_details",
+            "prepare_order_draft",
             "request_human_handoff",
             "search_products",
         }
     )
     assert [specification.name for specification in specifications] == [
         "get_product_details",
+        "prepare_order_draft",
         "request_human_handoff",
         "search_products",
     ]
@@ -283,11 +285,15 @@ def test_production_registry_contains_only_approved_capabilities():
         "sellable_item_id"
     }
     assert set(specifications[1].input_schema["properties"]) == {
+        "selected_sellable_item_id",
+        "quantity",
+    }
+    assert set(specifications[2].input_schema["properties"]) == {
         "reason_category",
         "selected_sellable_item_id",
         "purchase_intent",
     }
-    assert set(specifications[2].input_schema["properties"]) == {
+    assert set(specifications[3].input_schema["properties"]) == {
         "query",
         "category_code",
         "max_budget",
@@ -341,6 +347,8 @@ async def test_handoff_requires_separate_server_transaction_runtime():
         "conversation_id",
         "turn_id",
         "expected_ownership_version",
+        "source_message_id",
+        "commercial_state_revision",
     }
 
 

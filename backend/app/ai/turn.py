@@ -6,7 +6,7 @@ import json
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Mapping, Sequence
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +31,7 @@ from app.ai.capabilities import (
     CapabilityRegistry,
     CapabilitySuccess,
     CapabilityTransactionRetry,
+    PrepareOrderDraftOutput,
     RequestHumanHandoffOutput,
     TrustedCapabilityContext,
 )
@@ -177,21 +178,24 @@ class FinalizedAITurnResult:
     outbound_message_id: uuid.UUID | None = None
 
     def __post_init__(self) -> None:
-        is_handoff = self.audit_record.outcome == AITurnOutcome.handoff_requested
-        if not is_handoff and self.text is None:
+        is_terminal = self.audit_record.outcome in {
+            AITurnOutcome.handoff_requested,
+            AITurnOutcome.order_draft_presented,
+        }
+        if not is_terminal and self.text is None:
             raise ValueError("non-terminal finalized turn requires customer text")
-        if is_handoff and (self.text is None) != (self.outbound_message_id is None):
+        if is_terminal and (self.text is None) != (self.outbound_message_id is None):
             raise ValueError(
                 "terminal text and persisted outbound must appear together"
             )
-        if not is_handoff and self.outbound_message_id is not None:
+        if not is_terminal and self.outbound_message_id is not None:
             raise ValueError("normal turn cannot pre-persist its outbound message")
-        if is_handoff != self.audit_persisted:
-            raise ValueError("only terminal handoff audit is pre-persisted")
+        if is_terminal != self.audit_persisted:
+            raise ValueError("only terminal action audit is pre-persisted")
         if self.commercial_state_snapshot_revision < 0:
             raise ValueError("commercial-state snapshot revision cannot be negative")
-        if is_handoff and self.commercial_state_update is not None:
-            raise ValueError("terminal handoff cannot carry a commercial-state update")
+        if is_terminal and self.commercial_state_update is not None:
+            raise ValueError("terminal action cannot carry a commercial-state update")
 
 
 class AITurnService:
@@ -241,6 +245,7 @@ class AITurnService:
             conversation_id=turn.conversation_id,
             turn_id=turn.turn_id,
             expected_ownership_version=turn.expected_ownership_version,
+            source_message_id=turn.source_message_id,
         )
         if turn.allowed_capabilities and self._authority_checker is None:
             raise ProviderTurnError(ProviderErrorCategory.configuration)
@@ -279,6 +284,10 @@ class AITurnService:
                 )
                 commercial_state_revision = (
                     commercial_state.revision if commercial_state is not None else 0
+                )
+                context = replace(
+                    context,
+                    commercial_state_revision=commercial_state_revision,
                 )
             base_messages = (
                 ProviderMessage(
@@ -494,7 +503,11 @@ class AITurnService:
                     return (
                         CapabilityFailure(
                             CapabilityErrorCategory.execution_failed,
-                            safe_code="handoff_unavailable",
+                            safe_code=(
+                                "order_draft_unavailable"
+                                if tool_call.capability_name == "prepare_order_draft"
+                                else "handoff_unavailable"
+                            ),
                         ),
                         None,
                     )
@@ -515,19 +528,27 @@ class AITurnService:
                         for remaining in remaining_calls
                     ),
                 )
+                is_handoff = isinstance(
+                    execution_result.output, RequestHumanHandoffOutput
+                )
+                is_order_draft = isinstance(
+                    execution_result.output, PrepareOrderDraftOutput
+                )
+                terminal_output = execution_result.output
                 audit_record = self._audit_record(
                     turn=turn,
                     policy_version=policy_version,
                     exposed_capabilities=exposed_capabilities,
                     capability_activity=activity,
-                    outcome=AITurnOutcome.handoff_requested,
+                    outcome=(
+                        AITurnOutcome.order_draft_presented
+                        if is_order_draft
+                        else AITurnOutcome.handoff_requested
+                    ),
                     commercial_state_revision=commercial_state_revision,
                     commercial_state_revision_after=(
-                        execution_result.output.commercial_state_revision_after
-                        if isinstance(
-                            execution_result.output,
-                            RequestHumanHandoffOutput,
-                        )
+                        terminal_output.commercial_state_revision_after
+                        if is_handoff or is_order_draft
                         else None
                     ),
                     commercial_state_changed_fields=(
@@ -539,11 +560,8 @@ class AITurnService:
                         else ()
                     ),
                     outbound_message_id=(
-                        execution_result.output.outbound_message_id
-                        if isinstance(
-                            execution_result.output,
-                            RequestHumanHandoffOutput,
-                        )
+                        terminal_output.outbound_message_id
+                        if is_handoff or is_order_draft
                         else None
                     ),
                 )
@@ -557,22 +575,20 @@ class AITurnService:
                     execution_result,
                     FinalizedAITurnResult(
                         text=(
-                            execution_result.output.acknowledgment_text
-                            if isinstance(
-                                execution_result.output,
-                                RequestHumanHandoffOutput,
+                            terminal_output.acknowledgment_text
+                            if is_handoff
+                            else (
+                                terminal_output.confirmation_text
+                                if is_order_draft
+                                else None
                             )
-                            else None
                         ),
                         audit_record=audit_record,
                         audit_persisted=True,
                         commercial_state_snapshot_revision=commercial_state_revision,
                         outbound_message_id=(
-                            execution_result.output.outbound_message_id
-                            if isinstance(
-                                execution_result.output,
-                                RequestHumanHandoffOutput,
-                            )
+                            terminal_output.outbound_message_id
+                            if is_handoff or is_order_draft
                             else None
                         ),
                     ),

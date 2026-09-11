@@ -40,6 +40,8 @@ _MODEL_FORBIDDEN_ARGUMENTS = frozenset(
         "owner_id",
         "owner_type",
         "ownership_version",
+        "source_message_id",
+        "commercial_state_revision",
         "permissions",
         "tenant_id",
         "turn_id",

@@ -45,6 +45,8 @@ _MODEL_FORBIDDEN_ARGUMENTS = frozenset(
         "permissions",
         "owner_id",
         "internal_account_id",
+        "source_message_id",
+        "commercial_state_revision",
     }
 )
 
@@ -66,10 +68,18 @@ class TrustedCapabilityContext:
     conversation_id: uuid.UUID
     turn_id: uuid.UUID
     expected_ownership_version: int
+    source_message_id: uuid.UUID | None = None
+    commercial_state_revision: int = 0
 
     def __post_init__(self) -> None:
         if self.expected_ownership_version <= 0:
             raise ValueError("expected ownership version must be positive")
+        if self.source_message_id is not None and not isinstance(
+            self.source_message_id, uuid.UUID
+        ):
+            raise ValueError("source message ID must be a UUID")
+        if self.commercial_state_revision < 0:
+            raise ValueError("commercial-state revision cannot be negative")
 
 
 CapabilityHandler = Callable[
@@ -324,6 +334,25 @@ class RequestHumanHandoffOutput(StrictCapabilityModel):
     commercial_state_changed_fields: tuple[str, ...] = Field(default=(), max_length=8)
 
 
+class PrepareOrderDraftInput(StrictCapabilityModel):
+    selected_sellable_item_id: str = Field(
+        pattern=(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
+            r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        )
+    )
+    quantity: int = Field(default=1, ge=1, le=1000)
+
+
+class PrepareOrderDraftOutput(StrictCapabilityModel):
+    state: Literal["awaiting_confirmation"]
+    draft_id: uuid.UUID
+    draft_version: int = Field(gt=0)
+    confirmation_text: str = Field(min_length=1, max_length=700)
+    outbound_message_id: uuid.UUID
+    commercial_state_revision_after: int = Field(ge=0)
+
+
 _HANDOFF_REASON_ALIASES = {
     "customer_requested_human": "explicit_human_request",
     "unsupported_action": "authority_required",
@@ -546,6 +575,48 @@ async def _get_product_details(
     return {"product": _project_offer(offer, include_details=True)}
 
 
+async def _prepare_order_draft(
+    session: AsyncSession,
+    context: TrustedCapabilityContext,
+    arguments: StrictCapabilityModel,
+) -> object:
+    from app.modules.m7_conversion.order_drafts import (
+        OrderDraftError,
+        OrderDraftOfferUnavailable,
+        StaleOrderDraftAuthority,
+        prepare_order_draft,
+    )
+
+    assert isinstance(arguments, PrepareOrderDraftInput)
+    if context.source_message_id is None:
+        raise SafeCapabilityError("source_message_required")
+    try:
+        result = await prepare_order_draft(
+            session,
+            conversation_id=context.conversation_id,
+            source_message_id=context.source_message_id,
+            turn_id=context.turn_id,
+            expected_ownership_version=context.expected_ownership_version,
+            expected_commercial_state_revision=context.commercial_state_revision,
+            sellable_item_id=uuid.UUID(arguments.selected_sellable_item_id),
+            quantity=arguments.quantity,
+        )
+    except OrderDraftOfferUnavailable as exc:
+        raise SafeCapabilityError(exc.safe_code) from exc
+    except StaleOrderDraftAuthority as exc:
+        raise SafeCapabilityError("stale_ai_authority") from exc
+    except OrderDraftError as exc:
+        raise SafeCapabilityError("order_draft_unavailable") from exc
+    return {
+        "state": "awaiting_confirmation",
+        "draft_id": result.draft_id,
+        "draft_version": result.draft_version,
+        "confirmation_text": result.confirmation_text,
+        "outbound_message_id": result.outbound_message_id,
+        "commercial_state_revision_after": result.commercial_state_revision,
+    }
+
+
 async def _request_human_handoff(
     session: AsyncSession,
     context: TrustedCapabilityContext,
@@ -676,6 +747,18 @@ AI_CAPABILITY_REGISTRY = CapabilityRegistry(
             input_model=GetProductDetailsInput,
             output_model=GetProductDetailsOutput,
             handler=_get_product_details,
+        ),
+        CapabilityDefinition(
+            name="prepare_order_draft",
+            description=(
+                "Prepare a non-binding product-and-quantity draft from a current "
+                "MBB offer; it creates no order or payment."
+            ),
+            input_model=PrepareOrderDraftInput,
+            output_model=PrepareOrderDraftOutput,
+            handler=None,
+            transactional_handler=_prepare_order_draft,
+            terminal_on_success=True,
         ),
         CapabilityDefinition(
             name="request_human_handoff",

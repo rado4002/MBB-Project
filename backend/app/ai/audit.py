@@ -126,6 +126,7 @@ class AITurnOutcome(str, Enum):
     response_generated = "response_generated"
     fallback_used = "fallback_used"
     handoff_requested = "handoff_requested"
+    order_draft_presented = "order_draft_presented"
     failed = "failed"
     no_action = "no_action"
 

@@ -22,6 +22,7 @@ from app.ai.provider_contract import (
 from app.ai.turn import AITurnExecutionError, AITurnService, FinalizedAITurnResult
 from app.modules.m1_gateway.service import ProcessedInbound
 from app.modules.m1_gateway.session_cache import SessionState
+from app.schemas.order_drafts import OrderDraftReplyResult
 from app.tasks import m1
 
 _DEFAULT_CACHED_SESSION = object()
@@ -434,6 +435,45 @@ def test_m1_binds_trusted_context_and_explicit_capability_exposure(monkeypatch):
     assert turn.expected_ownership_version == 4
     assert turn.allowed_capabilities == m1._M1_AI_CAPABILITIES
     assert turn.source_message_id == uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+
+
+def test_exact_order_draft_reply_is_handled_before_provider_inference(monkeypatch):
+    class _NeverAI:
+        async def generate_finalized(self, _turn):
+            raise AssertionError("provider inference must not run")
+
+    outbound_id = uuid.uuid4()
+    _events, messaging = _patch_normal_flow(
+        monkeypatch,
+        outbound_id=outbound_id,
+        ai=_NeverAI(),
+    )
+    draft_id = uuid.uuid4()
+
+    async def handle_reply(*_args, **_kwargs):
+        return OrderDraftReplyResult(
+            state="confirmed",
+            draft_id=draft_id,
+            draft_version=3,
+            customer_text="Brouillon confirmé; aucune commande créée.",
+            outbound_message_id=outbound_id,
+        )
+
+    import app.modules.m7_conversion.order_drafts as order_drafts
+
+    monkeypatch.setattr(order_drafts, "handle_order_draft_reply", handle_reply)
+    result = _run(_process(_Task()))
+
+    assert result["status"] == "order_draft_confirmed"
+    assert result["draft_id"] == str(draft_id)
+    assert result["draft_version"] == 3
+    assert messaging.calls == [
+        (
+            "+243812345678",
+            "Brouillon confirmé; aucune commande créée.",
+            str(outbound_id),
+        )
+    ]
 
 
 def test_cold_history_excludes_the_current_inbound_from_ai_context(monkeypatch):

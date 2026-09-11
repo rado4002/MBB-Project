@@ -1161,7 +1161,7 @@ def test_policy_is_explicitly_versioned_and_contains_authority_limits():
     policy = get_system_policy("french")
     normalized_policy = " ".join(policy.text.split())
 
-    assert AI_SYSTEM_POLICY_VERSION == "mbb-ai-policy-v2-ai4-v3"
+    assert AI_SYSTEM_POLICY_VERSION == "mbb-ai-policy-v2-ai6b-v1"
     assert policy.version == AI_SYSTEM_POLICY_VERSION
     assert "MBB AI Assistant" in policy.text
     for prohibited_fact in (

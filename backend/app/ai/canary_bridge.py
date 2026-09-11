@@ -1139,7 +1139,9 @@ class CanaryAuthorizationRecord(_StrictModel):
         AI5B2_DEEPSEEK_MODEL_VERSION
     )
     contract_version: Literal["mbb-ai5b-contract-v2"] = AI5B_CONTRACT_VERSION
-    policy_version: Literal["mbb-ai-policy-v2-ai4-v3"] = AI_SYSTEM_POLICY_VERSION
+    policy_version: Literal[
+        "mbb-ai-policy-v2-ai4-v3", "mbb-ai-policy-v2-ai6b-v1"
+    ] = AI_SYSTEM_POLICY_VERSION
     synthetic: bool = False
 
 
@@ -1886,7 +1888,9 @@ class CanaryCaseEvidence(_StrictModel):
 class CanaryBridgeEvidence(_StrictModel):
     contract_version: Literal["mbb-ai5b-contract-v2"] = AI5B_CONTRACT_VERSION
     bridge_version: Literal["mbb-ai5b2-bridge-v3"] = AI5B2_BRIDGE_VERSION
-    policy_version: Literal["mbb-ai-policy-v2-ai4-v3"] = AI_SYSTEM_POLICY_VERSION
+    policy_version: Literal[
+        "mbb-ai-policy-v2-ai4-v3", "mbb-ai-policy-v2-ai6b-v1"
+    ] = AI_SYSTEM_POLICY_VERSION
     run_id: str | None = None
     baseline_commit: str | None = None
     authorization_record_id: str | None = None

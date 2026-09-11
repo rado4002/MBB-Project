@@ -127,7 +127,7 @@ def test_server_acknowledgments_are_short_and_make_no_transaction_claim(
 def test_ai4e_policy_is_versioned_and_encodes_fresh_evidence_boundary() -> None:
     policy = " ".join(get_system_policy("french").text.split())
 
-    assert AI_SYSTEM_POLICY_VERSION == "mbb-ai-policy-v2-ai4-v3"
+    assert AI_SYSTEM_POLICY_VERSION == "mbb-ai-policy-v2-ai6b-v1"
     for required in (
         "Purchase interest is not commitment",
         "Conditional commitment remains considering",

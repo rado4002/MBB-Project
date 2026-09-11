@@ -34,6 +34,7 @@ settings = get_settings()
 _INBOUND_WHATSAPP_UNIQUE_INDEX = "uq_messages_inbound_whatsapp_message_id"
 _M1_AI_CAPABILITIES = (
     "get_product_details",
+    "prepare_order_draft",
     "request_human_handoff",
     "search_products",
 )
@@ -467,6 +468,57 @@ async def _process(
                 "send_status": send_result["status"],
             }
 
+        # ── Confirmable order draft reply ────────────────────────────────────
+        # Exact code-bound confirm/cancel replies are application-owned and
+        # resolved before any provider inference.
+        from app.modules.m7_conversion.order_drafts import (
+            StaleOrderDraftAuthority,
+            handle_order_draft_reply,
+        )
+
+        try:
+            draft_reply = await handle_order_draft_reply(
+                session,
+                conversation_id=inbound.conversation_id,
+                source_message_id=inbound.message_id,
+                expected_ownership_version=expected_ownership_version,
+                customer_text=content,
+            )
+            if draft_reply is not None:
+                await session.commit()
+        except StaleOrderDraftAuthority:
+            await session.rollback()
+            log.info("m1.order_draft.stale_authority", conv_id=conv_id)
+            return {
+                "status": "stale_order_draft_authority",
+                "conversation_id": conv_id,
+                "send_status": "skipped",
+            }
+        except Exception as exc:
+            await session.rollback()
+            log.error(
+                "m1.order_draft.persistence_failed",
+                conv_id=conv_id,
+                error_type=type(exc).__name__,
+            )
+            return _persistence_failure_result(conv_id)
+        if draft_reply is not None:
+            send_result = await _send_safe(
+                customer_phone,
+                draft_reply.customer_text,
+                idempotency_key=str(draft_reply.outbound_message_id),
+                conversation_id=inbound.conversation_id,
+                expected_ownership_version=expected_ownership_version,
+            )
+            return {
+                "status": f"order_draft_{draft_reply.state}",
+                "conversation_id": conv_id,
+                "draft_id": str(draft_reply.draft_id),
+                "draft_version": draft_reply.draft_version,
+                "outbound_message_id": str(draft_reply.outbound_message_id),
+                "send_status": send_result["status"],
+            }
+
         # ── Step 5: Load Redis session cache ──────────────────────────────────
         session_state = await get_session(conv_id)
         if (
@@ -567,6 +619,29 @@ async def _process(
                 )
                 return {
                     "status": "waiting_for_human",
+                    "conversation_id": conv_id,
+                    "outbound_message_id": str(finalized_turn.outbound_message_id),
+                    "send_status": send_result["status"],
+                }
+            if (
+                finalized_turn.audit_record.outcome
+                == AITurnOutcome.order_draft_presented
+            ):
+                if (
+                    finalized_turn.text is None
+                    or finalized_turn.outbound_message_id is None
+                ):
+                    log.error("m1.order_draft.missing_persisted_prompt", conv_id=conv_id)
+                    return _persistence_failure_result(conv_id)
+                send_result = await _send_safe(
+                    customer_phone,
+                    finalized_turn.text,
+                    idempotency_key=str(finalized_turn.outbound_message_id),
+                    conversation_id=inbound.conversation_id,
+                    expected_ownership_version=expected_ownership_version,
+                )
+                return {
+                    "status": "awaiting_order_draft_confirmation",
                     "conversation_id": conv_id,
                     "outbound_message_id": str(finalized_turn.outbound_message_id),
                     "send_status": send_result["status"],

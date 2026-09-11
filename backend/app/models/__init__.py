@@ -10,6 +10,7 @@ from app.models.lead import Lead
 from app.models.relance import Relance
 from app.models.maps_tag import MapsTag
 from app.models.order import Order
+from app.models.order_draft import OrderDraft
 from app.models.payment import Payment
 from app.models.escalation_ticket import EscalationTicket
 from app.models.admin_audit_log import AdminAuditLog
@@ -37,6 +38,7 @@ __all__ = [
     "Relance",
     "MapsTag",
     "Order",
+    "OrderDraft",
     "Payment",
     "EscalationTicket",
     "AdminAuditLog",

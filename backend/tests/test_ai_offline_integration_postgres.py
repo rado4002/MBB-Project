@@ -497,6 +497,7 @@ def _assert_common_audit(
     assert audit.model == "offline-ai3f"
     assert set(audit.exposed_capabilities) == {
         "get_product_details",
+        "prepare_order_draft",
         "request_human_handoff",
         "search_products",
     }
@@ -607,6 +608,8 @@ async def test_scenario_a_product_inquiry_through_real_m1(
         "conversation_id",
         "turn_id",
         "expected_ownership_version",
+        "source_message_id",
+        "commercial_state_revision",
     }
     _assert_requests_exclude_authority_values(
         adapter,
@@ -752,6 +755,8 @@ async def test_scenario_b_two_round_product_continuation_is_bounded(
         "conversation_id",
         "turn_id",
         "expected_ownership_version",
+        "source_message_id",
+        "commercial_state_revision",
     }
     _assert_requests_exclude_authority_values(
         adapter,

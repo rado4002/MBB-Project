@@ -22,7 +22,7 @@ class AITurnAudit(Base):
         ),
         CheckConstraint(
             "outcome IN ('response_generated', 'fallback_used', "
-            "'handoff_requested', 'failed', 'no_action')",
+            "'handoff_requested', 'order_draft_presented', 'failed', 'no_action')",
             name="chk_ai_turn_audits_outcome",
         ),
         CheckConstraint(
