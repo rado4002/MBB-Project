@@ -117,7 +117,19 @@ cleanup. Pending tool calls remain recorded as not executed and make the tool
 trace incomplete; evidence collection does not execute them. Historical
 evidence remains immutable. This correction provides no live-run authorization.
 
-The bounded official-source investigation on 2026-09-03 checked:
+AI-5B2-R7 rolls the guarded canary provider profile from the retired
+`DeepSeek-V4-Flash-0731` model and compatibility-only `deepseek-v4-flash`
+alias to the current canonical `deepseek-flash` API model, which resolves to
+`DeepSeek-V4.1-Flash`. It records both current peak and off-peak cache-hit
+input, cache-miss input and output rates, identifies the authorized billing
+window, reserves estimated input at the active cache-miss rate, and settles a
+completed request from the API-returned cache-hit, cache-miss and output token
+counts. Incomplete cache usage remains an uncertain-usage failure. This
+provider-profile correction changes no canary fixture, Product Offer behavior,
+grounding rule, business capability, limit, deadline, external-effect gate or
+live-run authorization.
+
+The historical bounded official-source investigation on 2026-09-03 checked:
 
 - DeepSeek API **Token & Token Usage**, current page, which gives approximate
   character ratios, warns that tokenization varies by model, provides the
@@ -143,6 +155,31 @@ renderer without additional server framing, or give a hard upper bound for the
 complete hosted prompt. Local tokenizer parity, raw JSON size and HTTPX wire
 serialization therefore cannot establish the required pre-dispatch maximum.
 The 512-token limit bounds requested completion only, not input.
+
+The current official-source verification on 2026-09-11 supersedes that
+historical provider identity and pricing for future AI-5B2 authorization:
+
+- DeepSeek's 2026-09-10 changelog and release note retire V4 Flash, state that
+  `deepseek-v4-flash` is temporarily compatibility-routed to V4.1 Flash, and
+  identify `deepseek-flash` as the canonical model ID for
+  `DeepSeek-V4.1-Flash`:
+  <https://api-docs.deepseek.com/updates/> and
+  <https://api-docs.deepseek.com/news/news260910/>;
+- the current **Models & Pricing** page lists, per million tokens, off-peak
+  cache-hit input USD 0.003, cache-miss input USD 0.15 and output USD 0.60;
+  peak cache-hit input USD 0.006, cache-miss input USD 0.30 and output USD
+  1.20. Peak periods are 01:00--04:00 and 06:00--10:00 UTC Monday through
+  Friday; all other periods are off-peak:
+  <https://api-docs.deepseek.com/quick_start/pricing/>;
+- the current **Token & Token Usage** and Chat Completions references continue
+  to make API-returned usage the authoritative post-dispatch token record and
+  expose prompt cache-hit, prompt cache-miss, completion and total token counts:
+  <https://api-docs.deepseek.com/quick_start/token_usage/> and
+  <https://api-docs.deepseek.com/api/create-chat-completion/>.
+
+Provider prices remain externally supplied, freshly verified authorization
+metadata rather than hard-coded runtime constants. A future authorization must
+record both windows and select the window applicable to its planned dispatch.
 
 Known complete returned usage settles its request estimate before another
 request may be admitted. Ceiling checks use settled returned usage/cost plus
@@ -287,7 +324,8 @@ refresh result must still be sellable-now before the handoff can commit.
 
 The frozen future live profile is:
 
-- model alias `deepseek-v4-flash`;
+- canonical model ID `deepseek-flash`;
+- actual model `DeepSeek-V4.1-Flash`;
 - `ProviderReasoningProfile.default`;
 - thinking enabled;
 - reasoning effort high;
@@ -513,13 +551,14 @@ settlement, budget, deadline or authorization control. The external run
 authorization must still use an explicit live flag, safe run identifier, exact
 frozen case set, disabled business effects, newly verified official pricing
 and an assigned Human reviewer.
-The authorization record is bound to the run identifier, current Git baseline
-and exact frozen case set. Pricing-verification and reviewer-assignment records
-are explicit metadata; reviewer assignment is not completed review. Live mode
-rejects synthetic records. It also requires the configured application database
-to match the uniquely identified, loopback-only disposable PostgreSQL database
-and verifies the actual external-effect settings, rather than accepting command
-flags alone.
+The authorization record is bound to the run identifier, current Git baseline,
+exact frozen case set, provider, canonical model ID, actual model version,
+contract and policy. Pricing-verification metadata records the same canonical
+model identity, the selected peak/off-peak window, and both official rate sets;
+reviewer assignment is not completed review. Live mode rejects synthetic
+records. It also requires the configured application database to match the
+uniquely identified, loopback-only disposable PostgreSQL database and verifies
+the actual external-effect settings, rather than accepting command flags alone.
 
 The guarded stage function performs ordered preflight, credential loading,
 provider construction and stage execution. After all gates pass, the CLI uses
@@ -562,11 +601,13 @@ runner-owned disposable PostgreSQL database. Those seven mocked HTTP dispatches
 remain zero real provider network calls, zero provider API tokens and zero
 provider cost.
 
-Offline admission-estimate tests use clearly synthetic fixture rates of USD
-0.50 per million input tokens and USD 1.00 per million output tokens.
-Request-sized input estimates and the full 512-token output allowance are
-costed at those rates. These figures are not DeepSeek pricing and cannot be
-reused for live cost authorization.
+Offline admission-estimate tests use clearly synthetic peak fixture rates of
+USD 0.25/0.50 per million cache-hit/cache-miss input tokens and USD 1.00 per
+million output tokens, with corresponding synthetic off-peak rates of USD
+0.125/0.25/0.50. Request-sized input estimates use the active cache-miss rate
+and the full 512-token output allowance; returned usage settlement uses its
+cache-hit/cache-miss split. These figures are not DeepSeek pricing and cannot
+be reused for live cost authorization.
 
 The 12-second bridge deadline is evaluation-owned and applies separately to
 each provider request. The 60-second watchdog supervises one evaluation-owned

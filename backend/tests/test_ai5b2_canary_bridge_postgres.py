@@ -33,6 +33,7 @@ from app.ai.canary_bridge import (
     CanaryCaseEvidence,
     CanaryManualReviewStatus,
     CanaryProviderMode,
+    CanaryPricingRateSet,
     CanaryPricingVerificationRecord,
     CanaryReviewerAssignmentRecord,
     CanaryTranscriptEntry,
@@ -315,10 +316,20 @@ def _cli_arguments(tmp_path, run_id: str) -> tuple[str, ...]:
         "synthetic://offline-cli-mocked-http",
         "--pricing-verified-at",
         "synthetic-offline-verification",
-        "--input-usd-per-million",
+        "--pricing-window",
+        "peak",
+        "--peak-cache-hit-input-usd-per-million",
+        "0.25",
+        "--peak-cache-miss-input-usd-per-million",
         "0.50",
-        "--output-usd-per-million",
+        "--peak-output-usd-per-million",
         "1.00",
+        "--off-peak-cache-hit-input-usd-per-million",
+        "0.125",
+        "--off-peak-cache-miss-input-usd-per-million",
+        "0.25",
+        "--off-peak-output-usd-per-million",
+        "0.50",
         "--reviewer-record-id",
         f"synthetic:reviewer:{run_id}",
         "--reviewer-id",
@@ -531,7 +542,7 @@ def _mocked_cli_transport(
             response = {
                 "id": f"chatcmpl_cli_{index}",
                 "object": "chat.completion",
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
                 "choices": [
                     {
                         "index": 0,
@@ -730,7 +741,7 @@ async def test_four_frozen_canaries_traverse_real_m1_and_postgres(
             json={
                 "id": f"chatcmpl_b2_all_{index}",
                 "object": "chat.completion",
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
                 "choices": [
                     {
                         "index": 0,
@@ -768,8 +779,17 @@ async def test_four_frozen_canaries_traverse_real_m1_and_postgres(
         record_id="synthetic:pricing:ai5b2-postgres",
         source="synthetic://offline-fixture-not-official-pricing",
         verified_at="synthetic-not-a-real-verification-time",
-        input_usd_per_million=Decimal("0.50"),
-        output_usd_per_million=Decimal("1.00"),
+        active_window="peak",
+        peak_rates=CanaryPricingRateSet(
+            cache_hit_input_usd_per_million=Decimal("0.25"),
+            cache_miss_input_usd_per_million=Decimal("0.50"),
+            output_usd_per_million=Decimal("1.00"),
+        ),
+        off_peak_rates=CanaryPricingRateSet(
+            cache_hit_input_usd_per_million=Decimal("0.125"),
+            cache_miss_input_usd_per_million=Decimal("0.25"),
+            output_usd_per_million=Decimal("0.50"),
+        ),
         synthetic=True,
     )
     ledger = OfflineBudgetLedger(profile.offline_limits())
@@ -954,7 +974,7 @@ async def test_four_frozen_canaries_traverse_real_m1_and_postgres(
     report = CanaryBridgeEvidence(
         evidence_label=CanaryProviderMode.offline_mocked_http,
         provider="deepseek",
-        model="deepseek-v4-flash",
+        model="deepseek-flash",
         reasoning_profile=ProviderReasoningProfile.default,
         configured_provider_deadline_seconds=12,
         configured_outer_watchdog_seconds=60,
@@ -1022,7 +1042,7 @@ async def test_deepseek_adapter_mocked_http_continues_through_real_application(
         return {
             "id": f"chatcmpl_b2_mock_{index}",
             "object": "chat.completion",
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-flash",
             "choices": [
                 {
                     "index": 0,
@@ -1225,6 +1245,17 @@ def test_actual_cli_orchestrates_complete_mocked_stage_and_cleanup(
     assert evidence["budget_decision_metadata"]["accepted_by"] == "project-owner"
     assert evidence["budget_decision_metadata"]["run_id"] == run_id
     assert evidence["budget_decision_metadata"]["baseline_commit"]
+    assert evidence["authorization_metadata"]["model"] == "deepseek-flash"
+    assert (
+        evidence["authorization_metadata"]["provider_model_version"]
+        == "DeepSeek-V4.1-Flash"
+    )
+    assert evidence["pricing_metadata"]["active_window"] == "peak"
+    assert (
+        evidence["pricing_metadata"]["peak_rates"]
+        != evidence["pricing_metadata"]["off_peak_rates"]
+    )
+    assert all(payload["model"] == "deepseek-flash" for payload in payloads)
     assert evidence["external_effect_guards"] == {
         "AI_ADAPTER": "disabled",
         "AI_TURN_PROVIDER": "deepseek",

@@ -95,7 +95,7 @@ class Settings(BaseSettings):
         default=_read_secret("deepseek_api_key", ""),
         repr=False,
     )
-    deepseek_model: str = "deepseek-v4-flash"
+    deepseek_model: str = "deepseek-flash"
     deepseek_timeout_s: int = Field(default=60, ge=1, le=120)
 
     # ── CRM — Airtable ────────────────────────────────────────────────────────

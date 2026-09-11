@@ -26,6 +26,7 @@ from app.ai.canary_bridge import (
     CanaryCaseEvidence,
     CanaryManualReviewStatus,
     CanaryProviderMode,
+    CanaryPricingRateSet,
     CanaryPricingVerificationRecord,
     CanaryReviewerAssignmentRecord,
     CanaryTranscriptEntry,
@@ -120,8 +121,17 @@ def _synthetic_dispatch_records(run_id: str = "synthetic-ai5b2-run") -> dict:
             record_id="synthetic:pricing:ai5b2",
             source="synthetic://offline-fixture-not-official-pricing",
             verified_at="synthetic-not-a-real-verification-time",
-            input_usd_per_million=Decimal("0.50"),
-            output_usd_per_million=Decimal("1.00"),
+            active_window="peak",
+            peak_rates=CanaryPricingRateSet(
+                cache_hit_input_usd_per_million=Decimal("0.25"),
+                cache_miss_input_usd_per_million=Decimal("0.50"),
+                output_usd_per_million=Decimal("1.00"),
+            ),
+            off_peak_rates=CanaryPricingRateSet(
+                cache_hit_input_usd_per_million=Decimal("0.125"),
+                cache_miss_input_usd_per_million=Decimal("0.25"),
+                output_usd_per_million=Decimal("0.50"),
+            ),
             synthetic=True,
         ),
         "reviewer_assignment": CanaryReviewerAssignmentRecord(
@@ -134,6 +144,45 @@ def _synthetic_dispatch_records(run_id: str = "synthetic-ai5b2-run") -> dict:
         "external_effects_disabled": True,
         "disposable_database_isolated": True,
     }
+
+
+def test_v41_flash_pricing_distinguishes_windows_and_settles_from_usage() -> None:
+    pricing = CanaryPricingVerificationRecord(
+        record_id="synthetic:pricing:v41-flash",
+        source="synthetic://current-pricing-shape-only",
+        verified_at="synthetic-not-a-real-verification-time",
+        active_window="peak",
+        peak_rates=CanaryPricingRateSet(
+            cache_hit_input_usd_per_million=Decimal("0.006"),
+            cache_miss_input_usd_per_million=Decimal("0.30"),
+            output_usd_per_million=Decimal("1.20"),
+        ),
+        off_peak_rates=CanaryPricingRateSet(
+            cache_hit_input_usd_per_million=Decimal("0.003"),
+            cache_miss_input_usd_per_million=Decimal("0.15"),
+            output_usd_per_million=Decimal("0.60"),
+        ),
+        synthetic=True,
+    )
+    usage = ProviderUsage(
+        input_tokens=300,
+        output_tokens=50,
+        total_tokens=350,
+        cache_hit_tokens=100,
+        cache_miss_tokens=200,
+    )
+
+    assert pricing.model == "deepseek-flash"
+    assert pricing.provider_model_version == "DeepSeek-V4.1-Flash"
+    assert pricing.reserved_cost(input_tokens=300, output_tokens=50) == Decimal(
+        "0.00015"
+    )
+    assert pricing.settled_cost(usage) == Decimal("0.0001206")
+    assert pricing.model_copy(update={"active_window": "off_peak"}).settled_cost(
+        usage
+    ) == Decimal("0.0000603")
+    assert pricing.evidence()["active_window"] == "peak"
+    assert pricing.evidence()["peak_rates"] != pricing.evidence()["off_peak_rates"]
 
 
 class _SequenceAdapter(ProviderTurnAdapter):
@@ -224,6 +273,8 @@ def test_frozen_cases_and_default_cli_are_zero_dispatch(monkeypatch, capsys) -> 
     output = capsys.readouterr().out
     assert output.strip() == dry_run_manifest()
     assert '"mode":"dry_run"' in output
+    assert '"model":"deepseek-flash"' in output
+    assert '"provider_model_version":"DeepSeek-V4.1-Flash"' in output
     assert '"provider_dispatches":0' in output
     assert "ambient-must-not-activate" not in output
 
@@ -1001,7 +1052,7 @@ def test_evidence_redaction_and_live_manual_review_gate() -> None:
     )
     common = {
         "provider": "deepseek",
-        "model": "deepseek-v4-flash",
+        "model": "deepseek-flash",
         "reasoning_profile": ProviderReasoningProfile.default,
         "configured_provider_deadline_seconds": 12,
         "configured_outer_watchdog_seconds": 60,

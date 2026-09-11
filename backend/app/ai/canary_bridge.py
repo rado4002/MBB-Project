@@ -64,6 +64,8 @@ AI5B2_MAX_COST_USD = Decimal("0.05")
 AI5B2_EXPECTED_PROVIDER_CALLS = 7
 AI5B2_BUDGET_DECISION_VERSION = "mbb-ai5b2-budget-decision-v1"
 AI5B2_BUDGET_DECISION_MAX_AGE = timedelta(hours=24)
+AI5B2_DEEPSEEK_MODEL = "deepseek-flash"
+AI5B2_DEEPSEEK_MODEL_VERSION = "DeepSeek-V4.1-Flash"
 
 # These are deliberately synthetic accounting fixtures, not provider pricing.
 OFFLINE_FIXTURE_INPUT_USD_PER_MILLION = Decimal("0.50")
@@ -1127,25 +1129,66 @@ class CanaryAuthorizationRecord(_StrictModel):
     run_id: str
     baseline_commit: str
     case_ids: tuple[str, ...] = AI5B2_CANARY_IDS
+    provider: Literal["deepseek"] = "deepseek"
+    model: Literal["deepseek-flash"] = AI5B2_DEEPSEEK_MODEL
+    provider_model_version: Literal["DeepSeek-V4.1-Flash"] = (
+        AI5B2_DEEPSEEK_MODEL_VERSION
+    )
+    contract_version: Literal["mbb-ai5b-contract-v2"] = AI5B_CONTRACT_VERSION
+    policy_version: Literal["mbb-ai-policy-v2-ai4-v3"] = AI_SYSTEM_POLICY_VERSION
     synthetic: bool = False
+
+
+class CanaryPricingRateSet(_StrictModel):
+    """One official DeepSeek billing-window rate set, in USD per million tokens."""
+
+    cache_hit_input_usd_per_million: Decimal = Field(gt=0)
+    cache_miss_input_usd_per_million: Decimal = Field(gt=0)
+    output_usd_per_million: Decimal = Field(gt=0)
 
 
 class CanaryPricingVerificationRecord(_StrictModel):
     """Pricing metadata supplied by the authorizer, never fetched by the bridge."""
 
     record_id: str
-    model: str = "deepseek-v4-flash"
+    model: Literal["deepseek-flash"] = AI5B2_DEEPSEEK_MODEL
+    provider_model_version: Literal["DeepSeek-V4.1-Flash"] = (
+        AI5B2_DEEPSEEK_MODEL_VERSION
+    )
     source: str
     verified_at: str
-    input_usd_per_million: Decimal = Field(gt=0)
-    output_usd_per_million: Decimal = Field(gt=0)
+    active_window: Literal["peak", "off_peak"]
+    peak_rates: CanaryPricingRateSet
+    off_peak_rates: CanaryPricingRateSet
     synthetic: bool = False
 
+    @property
+    def active_rates(self) -> CanaryPricingRateSet:
+        return self.peak_rates if self.active_window == "peak" else self.off_peak_rates
+
     def reserved_cost(self, *, input_tokens: int, output_tokens: int) -> Decimal:
+        rates = self.active_rates
         return (
-            Decimal(input_tokens) * self.input_usd_per_million
-            + Decimal(output_tokens) * self.output_usd_per_million
+            Decimal(input_tokens) * rates.cache_miss_input_usd_per_million
+            + Decimal(output_tokens) * rates.output_usd_per_million
         ) / Decimal(1_000_000)
+
+    def settled_cost(self, usage: ProviderUsage) -> Decimal:
+        if (
+            usage.cache_hit_tokens is None
+            or usage.cache_miss_tokens is None
+            or usage.output_tokens is None
+        ):
+            raise ValueError("complete provider cache usage is required")
+        rates = self.active_rates
+        return (
+            Decimal(usage.cache_hit_tokens) * rates.cache_hit_input_usd_per_million
+            + Decimal(usage.cache_miss_tokens) * rates.cache_miss_input_usd_per_million
+            + Decimal(usage.output_tokens) * rates.output_usd_per_million
+        ) / Decimal(1_000_000)
+
+    def evidence(self) -> dict[str, JsonValue]:
+        return self.model_dump(mode="json")
 
 
 class CanaryReviewerAssignmentRecord(_StrictModel):
@@ -1212,7 +1255,7 @@ class AI5B2ProviderSelection(_StrictModel):
     current_baseline_commit: str | None = None
     case_ids: tuple[str, ...] = AI5B2_CANARY_IDS
     budget: AI5B2BudgetProfile = AI5B2BudgetProfile()
-    model: str = "deepseek-v4-flash"
+    model: str = AI5B2_DEEPSEEK_MODEL
     reasoning_profile: ProviderReasoningProfile = ProviderReasoningProfile.default
     authorization: CanaryAuthorizationRecord | None = None
     pricing_verification: CanaryPricingVerificationRecord | None = None
@@ -1271,7 +1314,7 @@ def _validate_live_selection(selection: AI5B2ProviderSelection) -> None:
         raise AI5B2BridgeConfigurationError("outer_watchdog_invalid")
     if selection.budget.stage_ceiling_seconds != AI5B2_STAGE_CEILING_SECONDS:
         raise AI5B2BridgeConfigurationError("stage_ceiling_invalid")
-    if selection.model != "deepseek-v4-flash":
+    if selection.model != AI5B2_DEEPSEEK_MODEL:
         raise AI5B2BridgeConfigurationError("model_invalid")
     if selection.reasoning_profile != ProviderReasoningProfile.default:
         raise AI5B2BridgeConfigurationError("reasoning_profile_invalid")
@@ -1289,6 +1332,10 @@ def _validate_live_selection(selection: AI5B2ProviderSelection) -> None:
         authorization.run_id != selection.run_id
         or authorization.baseline_commit != selection.current_baseline_commit
         or authorization.case_ids != selection.case_ids
+        or authorization.model != selection.model
+        or authorization.provider_model_version != AI5B2_DEEPSEEK_MODEL_VERSION
+        or authorization.contract_version != AI5B_CONTRACT_VERSION
+        or authorization.policy_version != AI_SYSTEM_POLICY_VERSION
     ):
         raise AI5B2BridgeConfigurationError("authorization_scope_mismatch")
 
@@ -1300,6 +1347,7 @@ def _validate_live_selection(selection: AI5B2ProviderSelection) -> None:
         or not pricing.source.strip()
         or not pricing.verified_at.strip()
         or pricing.model != selection.model
+        or pricing.provider_model_version != AI5B2_DEEPSEEK_MODEL_VERSION
     ):
         raise AI5B2BridgeConfigurationError("pricing_verification_invalid")
     minimum_request_cost = pricing.reserved_cost(
@@ -1594,6 +1642,13 @@ class CumulativeBudgetProvider(ProviderTurnAdapter):
             raise
         usage = result.usage
         usage_failure = _usage_reconciliation_failure(usage)
+        if (
+            usage_failure is None
+            and self.pricing is not None
+            and usage is not None
+            and (usage.cache_hit_tokens is None or usage.cache_miss_tokens is None)
+        ):
+            usage_failure = "provider_missing_usage"
         if usage_failure is not None:
             if usage_failure == "provider_missing_usage":
                 self.missing_usage_failures += 1
@@ -1610,10 +1665,7 @@ class CumulativeBudgetProvider(ProviderTurnAdapter):
         assert usage.input_tokens is not None
         assert usage.output_tokens is not None
         actual_cost = (
-            self.pricing.reserved_cost(
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-            )
+            self.pricing.settled_cost(usage)
             if self.pricing is not None
             else (
                 Decimal(usage.input_tokens) * OFFLINE_FIXTURE_INPUT_USD_PER_MILLION
@@ -1703,10 +1755,7 @@ class CumulativeBudgetProvider(ProviderTurnAdapter):
             failure_code = "provider_timeout"
         estimated_cost = None
         if usage is not None and self.pricing is not None:
-            estimated_cost = self.pricing.reserved_cost(
-                input_tokens=usage.input_tokens or 0,
-                output_tokens=usage.output_tokens or 0,
-            )
+            estimated_cost = self.pricing.settled_cost(usage)
         self.call_evidence[index] = current.model_copy(
             update={
                 "outcome": outcome,
@@ -1824,6 +1873,9 @@ class CanaryBridgeEvidence(_StrictModel):
     evidence_label: CanaryProviderMode
     provider: str
     model: str
+    provider_model_version: Literal["DeepSeek-V4.1-Flash"] = (
+        AI5B2_DEEPSEEK_MODEL_VERSION
+    )
     reasoning_profile: ProviderReasoningProfile
     returned_provider: str | None = None
     returned_model: str | None = None
@@ -1892,6 +1944,10 @@ def dry_run_manifest() -> str:
             "policy_version": AI_SYSTEM_POLICY_VERSION,
             "mode": CanaryProviderMode.dry_run.value,
             "case_ids": AI5B2_CANARY_IDS,
+            "provider": "deepseek",
+            "model": AI5B2_DEEPSEEK_MODEL,
+            "provider_model_version": AI5B2_DEEPSEEK_MODEL_VERSION,
+            "reasoning_profile": ProviderReasoningProfile.default.value,
             "provider_dispatches": 0,
             "real_provider_network_calls": 0,
             "actual_provider_api_tokens": 0,

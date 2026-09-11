@@ -25,7 +25,7 @@ from app.ai.provider_contract import (
 )
 
 DEEPSEEK_PROVIDER_NAME = "deepseek"
-DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
+DEEPSEEK_DEFAULT_MODEL = "deepseek-flash"
 
 _CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions"
 _SAFE_PROVIDER_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")

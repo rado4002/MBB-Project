@@ -34,6 +34,7 @@ from app.adapters.ai.disabled_adapter import DisabledAIAdapter  # noqa: E402
 from app.adapters.base import ProviderTurnAdapter  # noqa: E402
 from app.ai.canary_bridge import (  # noqa: E402
     AI5B2_CANARIES,
+    AI5B2_DEEPSEEK_MODEL,
     AI5B2BudgetDecision,
     AI5B2BridgeConfigurationError,
     AI5B2BudgetProfile,
@@ -44,6 +45,7 @@ from app.ai.canary_bridge import (  # noqa: E402
     CanaryCaseEvidence,
     CanaryManualReviewStatus,
     CanaryPricingVerificationRecord,
+    CanaryPricingRateSet,
     CanaryProviderMode,
     CanaryReviewerAssignmentRecord,
     CanaryStageStopLatch,
@@ -161,8 +163,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pricing-record-id")
     parser.add_argument("--pricing-source")
     parser.add_argument("--pricing-verified-at")
-    parser.add_argument("--input-usd-per-million", type=Decimal)
-    parser.add_argument("--output-usd-per-million", type=Decimal)
+    parser.add_argument("--pricing-window", choices=("peak", "off_peak"))
+    parser.add_argument("--peak-cache-hit-input-usd-per-million", type=Decimal)
+    parser.add_argument("--peak-cache-miss-input-usd-per-million", type=Decimal)
+    parser.add_argument("--peak-output-usd-per-million", type=Decimal)
+    parser.add_argument("--off-peak-cache-hit-input-usd-per-million", type=Decimal)
+    parser.add_argument("--off-peak-cache-miss-input-usd-per-million", type=Decimal)
+    parser.add_argument("--off-peak-output-usd-per-million", type=Decimal)
     parser.add_argument("--reviewer-record-id")
     parser.add_argument("--reviewer-id")
     parser.add_argument("--reviewer-drc-language-familiarity", action="store_true")
@@ -1182,13 +1189,7 @@ async def _dispatch_authorized_canaries(
             selection.authorization.record_id if selection.authorization else None
         ),
         authorization_metadata=(
-            {
-                "record_id": selection.authorization.record_id,
-                "run_id": selection.authorization.run_id,
-                "baseline_commit": selection.authorization.baseline_commit,
-                "case_ids": list(selection.authorization.case_ids),
-                "synthetic": selection.authorization.synthetic,
-            }
+            selection.authorization.model_dump(mode="json")
             if selection.authorization
             else {}
         ),
@@ -1197,19 +1198,7 @@ async def _dispatch_authorized_canaries(
             if selection.budget_decision is not None
             else {}
         ),
-        pricing_metadata=(
-            {
-                "record_id": pricing.record_id,
-                "model": pricing.model,
-                "source": pricing.source,
-                "verified_at": pricing.verified_at,
-                "input_usd_per_million": str(pricing.input_usd_per_million),
-                "output_usd_per_million": str(pricing.output_usd_per_million),
-                "synthetic": pricing.synthetic,
-            }
-            if pricing
-            else {}
-        ),
+        pricing_metadata=(pricing.evidence() if pricing else {}),
         reviewer_assignment_metadata=(
             {
                 "record_id": reviewer.record_id,
@@ -1312,16 +1301,38 @@ def _records(args: argparse.Namespace, *, synthetic: bool):
             args.pricing_record_id,
             args.pricing_source,
             args.pricing_verified_at,
-            args.input_usd_per_million,
-            args.output_usd_per_million,
+            args.pricing_window,
+            args.peak_cache_hit_input_usd_per_million,
+            args.peak_cache_miss_input_usd_per_million,
+            args.peak_output_usd_per_million,
+            args.off_peak_cache_hit_input_usd_per_million,
+            args.off_peak_cache_miss_input_usd_per_million,
+            args.off_peak_output_usd_per_million,
         )
     ):
         pricing = CanaryPricingVerificationRecord(
             record_id=args.pricing_record_id,
             source=args.pricing_source,
             verified_at=args.pricing_verified_at,
-            input_usd_per_million=args.input_usd_per_million,
-            output_usd_per_million=args.output_usd_per_million,
+            active_window=args.pricing_window,
+            peak_rates=CanaryPricingRateSet(
+                cache_hit_input_usd_per_million=(
+                    args.peak_cache_hit_input_usd_per_million
+                ),
+                cache_miss_input_usd_per_million=(
+                    args.peak_cache_miss_input_usd_per_million
+                ),
+                output_usd_per_million=args.peak_output_usd_per_million,
+            ),
+            off_peak_rates=CanaryPricingRateSet(
+                cache_hit_input_usd_per_million=(
+                    args.off_peak_cache_hit_input_usd_per_million
+                ),
+                cache_miss_input_usd_per_million=(
+                    args.off_peak_cache_miss_input_usd_per_million
+                ),
+                output_usd_per_million=args.off_peak_output_usd_per_million,
+            ),
             synthetic=synthetic,
         )
     reviewer = None
@@ -1402,6 +1413,7 @@ async def _execute_isolated_stage(
         def live_factory(credential: str) -> ProviderTurnAdapter:
             deepseek = DeepSeekAdapter(
                 api_key=credential,
+                model=AI5B2_DEEPSEEK_MODEL,
                 **(
                     {"transport": overrides.transport_builder(credential, truth)}
                     if overrides
