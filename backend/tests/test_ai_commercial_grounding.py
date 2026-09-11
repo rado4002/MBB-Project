@@ -53,6 +53,91 @@ def test_claim_boundary_review_accepts_valid_mixed_assertions(response):
     validate_commercial_grounding(response, _offers())
 
 
+@pytest.mark.parametrize(
+    "response",
+    (
+        "Le MBB Test Air Fryer 6L est disponible.",
+        "Le MBB Test Air Fryer 6L est disponible à $55.",
+        "Le MBB Test Air Fryer 6L est disponible à 55 USD.",
+        "Le MBB Test Air Fryer 6L est disponible à 55 dollars.",
+        "Le modèle 6L est disponible, au prix de 55 USD.",
+        "Le 6L est disponible et coûte 55 USD.",
+        "MBB Test Air Fryer 6L : disponible, 55 USD.",
+        "Le MBB Test Air Fryer 6L coûte 55 USD / 154 000 FC et est disponible.",
+    ),
+)
+def test_c01_authoritative_natural_french_forms_remain_accepted(response):
+    validate_commercial_grounding(response, (_offers()[0],))
+
+
+@pytest.mark.parametrize(
+    "response",
+    (
+        "Oui, le MBB Test Air Fryer 6L est disponible. Son prix est de 55 USD.",
+        "Le MBB Test Air Fryer 6L est disponible. Il coûte 55 dollars.",
+        "Le modèle 6L est disponible! Son prix actuel est $55.",
+        "Le 6L est en stock. Son prix est de 55 USD / 154 000 FC.",
+        "Le modèle 8L est en rupture de stock. Il coûte 70 USD.",
+    ),
+)
+def test_accepts_unambiguous_immediate_local_product_price_reference(response):
+    validate_commercial_grounding(response, _offers())
+
+
+@pytest.mark.parametrize(
+    "response",
+    (
+        "Le modèle 6L est disponible. Il coûte 70 USD.",
+        "Les modèles 6L et 8L sont disponibles. Il coûte 55 USD.",
+        "Le MBB Test Air Fryer est disponible. Il coûte 55 USD.",
+        "Le modèle 6L est disponible. Je peux vous aider. Il coûte 55 USD.",
+        "Le Blender X est disponible. Son prix est de 55 USD.",
+        "Le modèle 6L est disponible à 55 USD. Il coûte 55 USD.",
+        "Le modèle 6L est indisponible. Son prix est de 55 USD.",
+        "Le modèle 6L n'est pas disponible. Son prix est de 55 USD.",
+        "Le modèle 8L est disponible. Il coûte 70 USD.",
+    ),
+)
+def test_rejects_unsafe_or_nonlocal_product_price_reference(response):
+    with pytest.raises(CommercialGroundingError):
+        validate_commercial_grounding(response, _offers())
+
+
+def test_rejection_diagnostic_distinguishes_association_from_price_mismatch():
+    detached = (
+        "Oui, le MBB Test Air Fryer 6L est disponible. "
+        "Je peux vous aider. Son prix est de 55 USD."
+    )
+    with pytest.raises(CommercialGroundingError) as unresolved:
+        validate_commercial_grounding(detached, (_offers()[0],))
+    unresolved_evidence = unresolved.value.diagnostic.evidence()
+    assert unresolved_evidence == {
+        "validator_version": COMMERCIAL_GROUNDING_VALIDATOR_VERSION,
+        "failure_category": "product_association_unresolved",
+        "assertion_role": "unresolved",
+        "claim_currency": "USD",
+        "claim_amount": "55",
+        "assertion_start": detached.index("Son prix"),
+        "claim_start": detached.index("55 USD"),
+        "claim_end": detached.index("55 USD") + len("55 USD"),
+        "resolved_offers": [],
+    }
+    assert str(unresolved.value) == COMMERCIAL_GROUNDING_FAILURE_CODE
+    assert detached not in str(unresolved.value)
+
+    with pytest.raises(CommercialGroundingError) as mismatched:
+        validate_commercial_grounding(
+            "Le modèle 6L est disponible. Il coûte 70 USD.",
+            (_offers()[0],),
+        )
+    mismatch_evidence = mismatched.value.diagnostic.evidence()
+    assert mismatch_evidence["failure_category"] == "authoritative_price_mismatch"
+    assert mismatch_evidence["claim_amount"] == "70"
+    assert mismatch_evidence["resolved_offers"] == [
+        {"sellable_item_id": str(P6_ID), "expected_amount": "55.00"}
+    ]
+
+
 def _offers() -> tuple[AuthoritativeCommercialOffer, ...]:
     return (
         AuthoritativeCommercialOffer(
@@ -63,6 +148,8 @@ def _offers() -> tuple[AuthoritativeCommercialOffer, ...]:
             sku="MBB-AF-6L",
             current_usd_price=Decimal("55.00"),
             derived_cdf_price=Decimal("154000.00"),
+            availability="available",
+            is_sellable_now=True,
         ),
         AuthoritativeCommercialOffer(
             product_id=PRODUCT_ID,
@@ -72,6 +159,8 @@ def _offers() -> tuple[AuthoritativeCommercialOffer, ...]:
             sku="MBB-AF-8L",
             current_usd_price=Decimal("70.00"),
             derived_cdf_price=Decimal("196000.00"),
+            availability="out_of_stock",
+            is_sellable_now=False,
         ),
     )
 

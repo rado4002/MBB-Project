@@ -62,6 +62,7 @@ from app.ai.canary_bridge import (  # noqa: E402
 )
 from app.ai.commercial_grounding import (  # noqa: E402
     AuthoritativeCommercialOffer,
+    CommercialGroundingError,
     merge_authoritative_offers,
     offers_from_capability_output,
 )
@@ -120,6 +121,46 @@ class CanaryBusinessTruth:
 class CanaryRuntimeEvidence:
     terminal_offer_reads: list[uuid.UUID] = field(default_factory=list)
     blocked_external_actions: list[str] = field(default_factory=list)
+
+
+GroundingEvidencePersistence = Callable[[tuple[dict[str, object], ...]], None]
+
+
+class CanaryGroundingRejectionRecorder:
+    """Evaluation-only capture of rejected customer-facing candidates."""
+
+    def __init__(self, persist: GroundingEvidencePersistence | None = None) -> None:
+        self._persist_callback = persist
+        self._records: list[dict[str, object]] = []
+
+    @property
+    def records(self) -> tuple[dict[str, object], ...]:
+        return tuple(self._records)
+
+    def for_case(self, case_id: str) -> tuple[dict[str, object], ...]:
+        return tuple(item for item in self._records if item["case_id"] == case_id)
+
+    def record(
+        self,
+        *,
+        case_id: str | None,
+        turn_id: str | None,
+        provider_request_index: int,
+        candidate_text: str,
+        error: CommercialGroundingError,
+    ) -> None:
+        self._records.append(
+            {
+                "sequence": len(self._records) + 1,
+                "case_id": case_id,
+                "turn_id": turn_id,
+                "provider_request_index": provider_request_index,
+                "candidate_text": candidate_text,
+                "diagnostic": error.diagnostic.evidence(),
+            }
+        )
+        if self._persist_callback is not None:
+            self._persist_callback(self.records)
 
 
 @dataclass(frozen=True)
@@ -584,6 +625,7 @@ def _closed_application_runtime(
     budgeted: CumulativeBudgetProvider,
     runtime_evidence: CanaryRuntimeEvidence,
     tool_trace_recorder: CanaryToolTraceRecorder,
+    grounding_rejection_recorder: CanaryGroundingRejectionRecorder,
 ) -> Iterator[None]:
     import app.adapters as adapters
     import app.ai.turn as turn_module
@@ -607,6 +649,7 @@ def _closed_application_runtime(
         "require_offer": offer_service.require_product_offer,
         "turn_service": turn_module.get_ai_turn_service,
         "capability_audit_summary": turn_module._capability_audit_summary,
+        "validate_commercial_grounding": turn_module.validate_commercial_grounding,
     }
 
     def blocked(name: str):
@@ -659,6 +702,19 @@ def _closed_application_runtime(
         tool_trace_recorder.record_execution(tool_call, execution_result)
         return summary
 
+    def recording_commercial_grounding(text, offers):
+        try:
+            originals["validate_commercial_grounding"](text, offers)
+        except CommercialGroundingError as exc:
+            grounding_rejection_recorder.record(
+                case_id=latch.current_case_id,
+                turn_id=tool_trace_recorder.current_turn_id(),
+                provider_request_index=budgeted.dispatched_requests,
+                candidate_text=text,
+                error=exc,
+            )
+            raise
+
     class EvaluationAITurnService(turn_module.AITurnService):
         async def generate_finalized(self, turn):
             with tool_trace_recorder.turn_scope(turn.turn_id):
@@ -689,6 +745,7 @@ def _closed_application_runtime(
         )
         offer_service.require_product_offer = record_offer
         turn_module._capability_audit_summary = recording_capability_audit_summary
+        turn_module.validate_commercial_grounding = recording_commercial_grounding
         turn_module.get_ai_turn_service = get_budgeted_turn_service
         yield
     finally:
@@ -704,6 +761,9 @@ def _closed_application_runtime(
         m1.settings = originals["m1_settings"]
         offer_service.require_product_offer = originals["require_offer"]
         turn_module._capability_audit_summary = originals["capability_audit_summary"]
+        turn_module.validate_commercial_grounding = originals[
+            "validate_commercial_grounding"
+        ]
         turn_module.get_ai_turn_service = originals["turn_service"]
 
 
@@ -715,6 +775,7 @@ async def _supervised_application_runtime(
     budgeted: CumulativeBudgetProvider,
     runtime_evidence: CanaryRuntimeEvidence,
     tool_trace_recorder: CanaryToolTraceRecorder,
+    grounding_rejection_recorder: CanaryGroundingRejectionRecorder,
 ) -> AsyncIterator[None]:
     with _closed_application_runtime(
         provider,
@@ -723,6 +784,7 @@ async def _supervised_application_runtime(
         budgeted,
         runtime_evidence,
         tool_trace_recorder,
+        grounding_rejection_recorder,
     ):
         try:
             yield
@@ -824,6 +886,7 @@ def _case_evidence(
     failure: str | None = None,
     provider_calls=(),
     tool_traces: Sequence[CanaryToolTraceRecord] = (),
+    grounding_rejections: Sequence[dict[str, object]] = (),
 ) -> CanaryCaseEvidence:
     conversation, messages, audits, tickets, state = stored or (None, [], [], [], None)
     activities = [item for audit in audits for item in audit.capability_activity]
@@ -938,6 +1001,7 @@ def _case_evidence(
         persisted_outbound=persisted_outbound,
         replay=replay or {},
         commercial_evaluation=commercial_evaluation,
+        grounding_rejections=tuple(grounding_rejections),
     )
 
 
@@ -1040,6 +1104,7 @@ async def _dispatch_authorized_canaries(
     selection: AI5B2ProviderSelection,
     snapshot_before: dict[str, str],
     tool_trace_recorder: CanaryToolTraceRecorder,
+    grounding_rejection_recorder: CanaryGroundingRejectionRecorder,
 ) -> CanaryBridgeEvidence:
     from app.tasks import m1
 
@@ -1055,6 +1120,7 @@ async def _dispatch_authorized_canaries(
         budgeted,
         runtime_evidence,
         tool_trace_recorder,
+        grounding_rejection_recorder,
     ):
         for spec in AI5B2_CANARIES:
             if latch.stopped:
@@ -1146,6 +1212,9 @@ async def _dispatch_authorized_canaries(
                     failure=failure,
                     provider_calls=budgeted.call_evidence,
                     tool_traces=tool_trace_recorder.records,
+                    grounding_rejections=grounding_rejection_recorder.for_case(
+                        spec.case_id
+                    ),
                 )
             )
         completed_ids = {case.case_id for case in cases}
@@ -1376,12 +1445,11 @@ async def _execute_isolated_stage(
             budget=profile,
         )
         holder: dict[str, object] = {}
+        latest_tool_traces: tuple[CanaryToolTraceRecord, ...] = ()
+        latest_tool_trace_complete = False
+        latest_grounding_rejections: tuple[dict[str, object], ...] = ()
 
-        def persist_tool_trace(
-            records: tuple[CanaryToolTraceRecord, ...], complete: bool
-        ) -> None:
-            if overrides and overrides.tool_trace_persist_hook:
-                overrides.tool_trace_persist_hook(records, complete)
+        def persist_partial_evidence() -> None:
             budgeted = holder.get("budgeted")
             _write_atomic(
                 partial_evidence_path,
@@ -1390,8 +1458,9 @@ async def _execute_isolated_stage(
                     "baseline_commit": selection.current_baseline_commit,
                     "budget_decision_metadata": budget_decision.evidence(),
                     "evidence_state": "partial",
-                    "tool_traces": records,
-                    "tool_trace_complete": complete,
+                    "tool_traces": latest_tool_traces,
+                    "tool_trace_complete": latest_tool_trace_complete,
+                    "grounding_rejections": latest_grounding_rejections,
                     "provider_calls": (
                         budgeted.call_evidence
                         if isinstance(budgeted, CumulativeBudgetProvider)
@@ -1399,6 +1468,23 @@ async def _execute_isolated_stage(
                     ),
                 },
             )
+
+        def persist_tool_trace(
+            records: tuple[CanaryToolTraceRecord, ...], complete: bool
+        ) -> None:
+            nonlocal latest_tool_traces, latest_tool_trace_complete
+            if overrides and overrides.tool_trace_persist_hook:
+                overrides.tool_trace_persist_hook(records, complete)
+            latest_tool_traces = records
+            latest_tool_trace_complete = complete
+            persist_partial_evidence()
+
+        def persist_grounding_rejections(
+            records: tuple[dict[str, object], ...],
+        ) -> None:
+            nonlocal latest_grounding_rejections
+            latest_grounding_rejections = records
+            persist_partial_evidence()
 
         from app.ai.capabilities import AI_CAPABILITY_REGISTRY
 
@@ -1408,7 +1494,11 @@ async def _execute_isolated_stage(
             stop_latch=latch,
             persist=persist_tool_trace,
         )
+        grounding_rejection_recorder = CanaryGroundingRejectionRecorder(
+            persist=persist_grounding_rejections
+        )
         holder["tool_trace_recorder"] = tool_trace_recorder
+        holder["grounding_rejection_recorder"] = grounding_rejection_recorder
 
         def live_factory(credential: str) -> ProviderTurnAdapter:
             deepseek = DeepSeekAdapter(
@@ -1461,6 +1551,7 @@ async def _execute_isolated_stage(
                 selection=selection,
                 snapshot_before=snapshot_before,
                 tool_trace_recorder=tool_trace_recorder,
+                grounding_rejection_recorder=grounding_rejection_recorder,
             )
 
         try:
@@ -1477,6 +1568,7 @@ async def _execute_isolated_stage(
             budgeted = holder.get("budgeted")
             controller = holder.get("controller")
             trace_recorder = holder.get("tool_trace_recorder")
+            grounding_recorder = holder.get("grounding_rejection_recorder")
             if isinstance(budgeted, CumulativeBudgetProvider):
                 latch.stop(
                     exc.safe_code
@@ -1507,6 +1599,13 @@ async def _execute_isolated_stage(
                         trace_recorder.persistence_failed
                         if isinstance(trace_recorder, CanaryToolTraceRecorder)
                         else False
+                    ),
+                    "grounding_rejections": (
+                        grounding_recorder.records
+                        if isinstance(
+                            grounding_recorder, CanaryGroundingRejectionRecorder
+                        )
+                        else []
                     ),
                     "reserved_provider_calls": budgeted.ledger.provider_calls,
                     "reserved_durable_actions": budgeted.ledger.durable_actions,

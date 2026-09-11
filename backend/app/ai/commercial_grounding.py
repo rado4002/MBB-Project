@@ -94,6 +94,64 @@ _PRODUCT_TAIL = re.compile(
     r"(?:\s+(?:maintenant|now))?)?\s*",
     re.IGNORECASE,
 )
+_HARD_SENTENCE_BOUNDARY = re.compile(r"[.!?]+")
+_LOCAL_PRODUCT_REFERENCE_HEAD = re.compile(
+    r"\s*(?:(?:son|sa)\s+prix(?:\s+(?:actuel|actuelle))?\s*"
+    r"(?:est|reste)?\s*(?:de|a|à)?|(?:il|elle)\s+(?:coute|coûte))\s*",
+    re.IGNORECASE,
+)
+_LOCAL_ANTECEDENT_LEADER = re.compile(r"\s*(?:oui\b\s*[,]?\s*)?", re.IGNORECASE)
+_LOCAL_POSITIVE_AVAILABILITY = re.compile(
+    r"\b(?:disponible|available|vendable|en\s+stock)\b", re.IGNORECASE
+)
+_LOCAL_NEGATIVE_AVAILABILITY = re.compile(
+    r"\b(?:n['’ ]?est\s+)?(?:pas|non|plus)\s+(?:du\s+tout\s+)?"
+    r"(?:disponible|available|vendable|en\s+stock)\b|"
+    r"\b(?:indisponible|unavailable|en\s+rupture(?:\s+de\s+stock)?)\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class CommercialGroundingDiagnostic:
+    """Normalized first-failure detail safe for evaluation-owned evidence."""
+
+    category: Literal[
+        "invalid_amount",
+        "product_association_unresolved",
+        "unsupported_currency",
+        "authoritative_price_mismatch",
+    ]
+    assertion_role: Literal["product_price", "non_product", "unresolved"] | None
+    claim_currency: str
+    claim_amount: Decimal | None
+    assertion_start: int
+    claim_start: int
+    claim_end: int
+    resolved_offers: tuple[tuple[str, Decimal | None], ...] = ()
+
+    def evidence(self) -> dict[str, object]:
+        return {
+            "validator_version": COMMERCIAL_GROUNDING_VALIDATOR_VERSION,
+            "failure_category": self.category,
+            "assertion_role": self.assertion_role,
+            "claim_currency": self.claim_currency,
+            "claim_amount": (
+                None if self.claim_amount is None else str(self.claim_amount)
+            ),
+            "assertion_start": self.assertion_start,
+            "claim_start": self.claim_start,
+            "claim_end": self.claim_end,
+            "resolved_offers": [
+                {
+                    "sellable_item_id": sellable_item_id,
+                    "expected_amount": (
+                        None if expected_amount is None else str(expected_amount)
+                    ),
+                }
+                for sellable_item_id, expected_amount in self.resolved_offers
+            ],
+        }
 
 
 class CommercialGroundingError(RuntimeError):
@@ -102,7 +160,8 @@ class CommercialGroundingError(RuntimeError):
     safe_code = COMMERCIAL_GROUNDING_FAILURE_CODE
     validator_version = COMMERCIAL_GROUNDING_VALIDATOR_VERSION
 
-    def __init__(self) -> None:
+    def __init__(self, diagnostic: CommercialGroundingDiagnostic) -> None:
+        self.diagnostic = diagnostic
         super().__init__(COMMERCIAL_GROUNDING_FAILURE_CODE)
 
 
@@ -238,8 +297,10 @@ def validate_commercial_grounding(
     Supported product claims identify one item through adjacent authoritative aliases,
     or identify several items through explicit conjunctive coordination. A parent name
     may be narrowed by an adjacent model/SKU alias. Identity-free, unfamiliar,
-    disjunctive, or cross-clause associations fail closed. Clearly marked budgets and
-    delivery/payment/fee heads govern only their local amounts. Only an adjacent
+    disjunctive, or cross-clause associations fail closed. The sole cross-sentence
+    exception is an explicit short French price reference immediately following a
+    sentence that resolves to exactly one authoritative offer. Clearly marked budgets
+    and delivery/payment/fee heads govern only their local amounts. Only an adjacent
     bare USD/CDF pair can continue an association without another explicit head.
     Non-product exemption does not validate the truth of those amounts.
     """
@@ -248,10 +309,37 @@ def validate_commercial_grounding(
     for assertion in _money_assertions(text, claims, offer_list):
         if assertion.role == "non_product":
             continue
-        if assertion.role == "unresolved" or any(
-            not _claim_matches(offer, assertion.claim) for offer in assertion.offers
-        ):
-            raise CommercialGroundingError
+        mismatched = tuple(
+            offer
+            for offer in assertion.offers
+            if not _claim_matches(offer, assertion.claim)
+        )
+        if assertion.role == "unresolved" or mismatched:
+            category = (
+                "unsupported_currency"
+                if assertion.claim.currency == "unsupported"
+                else "product_association_unresolved"
+                if assertion.role == "unresolved"
+                else "authoritative_price_mismatch"
+            )
+            raise CommercialGroundingError(
+                CommercialGroundingDiagnostic(
+                    category=category,
+                    assertion_role=assertion.role,
+                    claim_currency=assertion.claim.currency,
+                    claim_amount=assertion.claim.amount,
+                    assertion_start=assertion.assertion_start,
+                    claim_start=assertion.claim.start,
+                    claim_end=assertion.claim.end,
+                    resolved_offers=tuple(
+                        (
+                            str(offer.sellable_item_id),
+                            _expected_amount(offer, assertion.claim.currency),
+                        )
+                        for offer in assertion.offers
+                    ),
+                )
+            )
 
 
 def _optional_decimal(value: object) -> Decimal | None:
@@ -271,22 +359,34 @@ def _money_claims(text: str) -> tuple[_MoneyClaim, ...]:
         try:
             amount = _parse_amount(raw_amount)
         except InvalidOperation:
-            raise CommercialGroundingError from None
+            raise CommercialGroundingError(
+                CommercialGroundingDiagnostic(
+                    category="invalid_amount",
+                    assertion_role=None,
+                    claim_currency=_normalized_currency(currency),
+                    claim_amount=None,
+                    assertion_start=match.start(),
+                    claim_start=match.start(),
+                    claim_end=match.end(),
+                )
+            ) from None
         claims.append(
             _MoneyClaim(
                 start=match.start(),
                 end=match.end(),
-                currency=(
-                    "USD"
-                    if currency in {"$", "usd", "dollar", "dollars"}
-                    else "CDF"
-                    if currency in {"cdf", "fc"}
-                    else "unsupported"
-                ),
+                currency=_normalized_currency(currency),
                 amount=amount,
             )
         )
     return tuple(claims)
+
+
+def _normalized_currency(currency: str) -> str:
+    if currency in {"$", "usd", "dollar", "dollars"}:
+        return "USD"
+    if currency in {"cdf", "fc"}:
+        return "CDF"
+    return "unsupported"
 
 
 def _parse_amount(raw: str) -> Decimal:
@@ -361,12 +461,21 @@ def _money_assertions(
         else:
             # Inspect only the gap after the previous amount. Decimal punctuation
             # inside a money token can never become a sentence boundary here.
-            start = previous_end + (boundaries[-1].end() if boundaries else 0)
+            last_boundary = boundaries[-1] if boundaries else None
+            start = previous_end + (last_boundary.end() if last_boundary else 0)
             leader = _ASSERTION_LEADER.match(text, start, claim.start)
             assert leader is not None
             start = leader.end()
             head = text[start : claim.start]
             resolved = _resolve_offers(head, offers)
+            if resolved is None and last_boundary is not None:
+                resolved = _resolve_immediate_local_reference(
+                    text,
+                    boundary_start=previous_end + last_boundary.start(),
+                    boundary_text=last_boundary.group(),
+                    head=head,
+                    offers=offers,
+                )
             if resolved is not None and claim.currency in {"USD", "CDF"}:
                 role = "product_price"
             elif not _identity_mentions(head, offers) and (
@@ -416,6 +525,52 @@ def _money_assertions(
             # A following predicate cannot turn a fee into a product's price.
             assertions[index] = replace(assertion, role="unresolved")
     return tuple(assertions)
+
+
+def _resolve_immediate_local_reference(
+    text: str,
+    *,
+    boundary_start: int,
+    boundary_text: str,
+    head: str,
+    offers: tuple[AuthoritativeCommercialOffer, ...],
+) -> tuple[AuthoritativeCommercialOffer, ...] | None:
+    """Resolve one explicit anaphoric price head to its immediate sentence."""
+    if not _HARD_SENTENCE_BOUNDARY.fullmatch(boundary_text):
+        return None
+    if not _LOCAL_PRODUCT_REFERENCE_HEAD.fullmatch(head):
+        return None
+
+    prior_boundaries = tuple(_HARD_SENTENCE_BOUNDARY.finditer(text, 0, boundary_start))
+    antecedent_start = prior_boundaries[-1].end() if prior_boundaries else 0
+    antecedent = text[antecedent_start:boundary_start]
+    if _MONEY.search(antecedent):
+        return None
+    antecedent = _LOCAL_ANTECEDENT_LEADER.sub("", antecedent, count=1)
+    resolved = _resolve_offers(antecedent, offers)
+    if resolved is None or len(resolved) != 1:
+        return None
+    if not _local_availability_is_consistent(antecedent, resolved[0]):
+        return None
+    return resolved
+
+
+def _local_availability_is_consistent(
+    antecedent: str,
+    offer: AuthoritativeCommercialOffer,
+) -> bool:
+    positive = bool(_LOCAL_POSITIVE_AVAILABILITY.search(antecedent))
+    negative = bool(_LOCAL_NEGATIVE_AVAILABILITY.search(antecedent))
+    if positive and negative:
+        return False
+    if not positive and not negative:
+        return True
+    sellable = offer.is_sellable_now
+    if sellable is None and offer.availability is not None:
+        sellable = offer.availability.casefold() == "available"
+    if sellable is None:
+        return False
+    return sellable if positive else not sellable
 
 
 def _resolve_offers(
@@ -494,11 +649,18 @@ def _claim_matches(
     offer: AuthoritativeCommercialOffer,
     claim: _MoneyClaim,
 ) -> bool:
-    expected = (
+    expected = _expected_amount(offer, claim.currency)
+    return expected is not None and claim.amount == expected
+
+
+def _expected_amount(
+    offer: AuthoritativeCommercialOffer,
+    currency: str,
+) -> Decimal | None:
+    return (
         offer.current_usd_price
-        if claim.currency == "USD"
+        if currency == "USD"
         else offer.derived_cdf_price
-        if claim.currency == "CDF"
+        if currency == "CDF"
         else None
     )
-    return expected is not None and claim.amount == expected

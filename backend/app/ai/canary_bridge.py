@@ -591,6 +591,9 @@ class CanaryToolTraceRecorder:
         finally:
             self._turn_id.reset(token)
 
+    def current_turn_id(self) -> str | None:
+        return self._turn_id.get()
+
     def observe_provider_result(
         self,
         *,
@@ -1855,6 +1858,7 @@ class CanaryCaseEvidence(_StrictModel):
     persisted_outbound: dict[str, JsonValue] = Field(default_factory=dict)
     replay: dict[str, JsonValue] = Field(default_factory=dict)
     commercial_evaluation: dict[str, JsonValue] = Field(default_factory=dict)
+    grounding_rejections: tuple[dict[str, JsonValue], ...] = ()
 
 
 class CanaryBridgeEvidence(_StrictModel):

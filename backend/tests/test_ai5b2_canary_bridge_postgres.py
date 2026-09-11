@@ -357,6 +357,7 @@ def _mocked_cli_transport(
     outcome_probe: bool = False,
     c03_use_search: bool = False,
     c01_budget_exhaustion: bool = False,
+    c01_response_text: str | None = None,
 ):
     def build(credential, truth):
         response_tool_rounds = (
@@ -378,8 +379,11 @@ def _mocked_cli_transport(
                     "propose_commercial_state_update",
                     {
                         "response_text": (
-                            f"Le {truth.available_product_name} 6L coûte 55 USD, "
-                            "est disponible et vendable maintenant."
+                            c01_response_text
+                            or (
+                                f"Le {truth.available_product_name} 6L coûte 55 USD, "
+                                "est disponible et vendable maintenant."
+                            )
                         ),
                         "state_update": {
                             "selected_sellable_item_ids": [
@@ -1383,6 +1387,82 @@ def test_actual_cli_orchestrates_complete_mocked_stage_and_cleanup(
         encoding="utf-8"
     )
     assert '"secret":"omit"' not in evidence_path.read_text(encoding="utf-8")
+
+
+def test_actual_cli_preserves_rejected_c01_diagnostic_outside_persistence(
+    tmp_path, capsys
+) -> None:
+    run_id = "synthetic-cli-c01-grounding-diagnostic"
+    payloads: list[dict] = []
+    rejected_candidate = (
+        "Oui, le MBB Test Air Fryer 6L est disponible. "
+        "Je peux vous aider. Son prix est de 55 USD."
+    )
+
+    result = bridge_main(
+        _cli_arguments(tmp_path, run_id),
+        _test_overrides=CanaryCLIOverrides(
+            credential_loader=lambda: "inert-cli-test-credential",
+            transport_builder=_mocked_cli_transport(
+                payloads,
+                c01_response_text=rejected_candidate,
+            ),
+        ),
+    )
+    capsys.readouterr()
+    evidence = json.loads(
+        (tmp_path / run_id / "evidence.json").read_text(encoding="utf-8")
+    )
+
+    assert result == 1 and len(payloads) == 2
+    assert evidence["overall_decision"] == "failed"
+    assert evidence["failed_case_id"] == AI5B2_CANARIES[0].case_id
+    assert evidence["stop_reason"] == "commercial_grounding_failed"
+    assert evidence["real_provider_network_calls"] == 0
+    assert evidence["actual_provider_api_tokens"] == 0
+    assert evidence["actual_provider_cost_usd"] == "0"
+    assert [case["deterministic_status"] for case in evidence["cases"]] == [
+        "failed",
+        "skipped",
+        "skipped",
+        "skipped",
+    ]
+
+    c01 = evidence["cases"][0]
+    assert c01["grounding_rejections"] == [
+        {
+            "sequence": 1,
+            "case_id": AI5B2_CANARIES[0].case_id,
+            "turn_id": c01["grounding_rejections"][0]["turn_id"],
+            "provider_request_index": 2,
+            "candidate_text": rejected_candidate,
+            "diagnostic": {
+                "validator_version": "mbb-commercial-grounding-validator-v3",
+                "failure_category": "product_association_unresolved",
+                "assertion_role": "unresolved",
+                "claim_currency": "USD",
+                "claim_amount": "55",
+                "assertion_start": rejected_candidate.index("Son prix"),
+                "claim_start": rejected_candidate.index("55 USD"),
+                "claim_end": rejected_candidate.index("55 USD") + len("55 USD"),
+                "resolved_offers": [],
+            },
+        }
+    ]
+    assert c01["grounding_rejections"][0]["turn_id"]
+    persisted = json.dumps(
+        {
+            "transcript": c01["transcript"],
+            "persisted_outbound": c01["persisted_outbound"],
+            "persistence": c01["persistence"],
+        }
+    )
+    assert rejected_candidate not in persisted
+    assert c01["persisted_outbound"]["outcome"] == "fallback_used"
+    assert c01["persisted_outbound"]["safe_error_code"] == "commercial_grounding_failed"
+    assert evidence["tool_trace_complete"] is True
+    assert evidence["cleanup"]["database_dropped"] is True
+    assert evidence["cleanup"]["temporary_directory_removed"] is True
 
 
 def test_actual_cli_distinguishes_denied_and_failed_capabilities(
