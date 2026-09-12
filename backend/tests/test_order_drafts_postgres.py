@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from dataclasses import dataclass
@@ -8,7 +9,7 @@ from decimal import Decimal
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from app.ai.commercial_state import CommercialStateUpdate, update_commercial_state
@@ -22,6 +23,7 @@ from app.models.catalog import Product, SellableItem
 from app.models.conversation import Conversation
 from app.models.customer import Customer
 from app.models.inventory import InventoryRecord
+from app.models.lead import Lead
 from app.models.message import Message
 from app.models.order import Order
 from app.models.order_draft import OrderDraft
@@ -51,6 +53,7 @@ class SeededJourney:
     conversation_id: uuid.UUID
     source_message_id: uuid.UUID
     sellable_item_id: uuid.UUID
+    lead_id: uuid.UUID
     price_id: uuid.UUID
     inventory_id: uuid.UUID
 
@@ -143,15 +146,41 @@ async def _seed(factory) -> SeededJourney:
         whatsapp_message_id=f"ai6b-{uuid.uuid4()}",
         created_at=now,
     )
+    lead = Lead(
+        lead_id=uuid.uuid4(),
+        customer_id=customer.phone_number,
+        conversation_id=conversation.conversation_id,
+        score="hot",
+        score_value=9,
+        stage="decision",
+        intent="product_inquiry",
+        product_interest=["air_fryer"],
+        source="whatsapp",
+        relance_count=0,
+        qualified_at=now,
+        created_at=now,
+        updated_at=now,
+    )
     async with factory() as session:
         session.add_all(
-            [customer, conversation, product, item, price, rate, inventory, source]
+            [
+                customer,
+                conversation,
+                product,
+                item,
+                price,
+                rate,
+                inventory,
+                source,
+                lead,
+            ]
         )
         await session.commit()
     return SeededJourney(
         conversation_id=conversation.conversation_id,
         source_message_id=source.message_id,
         sellable_item_id=item.sellable_item_id,
+        lead_id=lead.lead_id,
         price_id=price.price_id,
         inventory_id=inventory.inventory_id,
     )
@@ -208,9 +237,9 @@ async def _reply(
         return result, inbound_id
 
 
-async def _assert_no_consequential_state(factory) -> None:
+async def _assert_state_counts(factory, *, orders: int = 0) -> None:
     async with factory() as session:
-        assert await session.scalar(select(func.count()).select_from(Order)) == 0
+        assert await session.scalar(select(func.count()).select_from(Order)) == orders
         assert await session.scalar(select(func.count()).select_from(Payment)) == 0
 
 
@@ -275,11 +304,11 @@ async def test_real_ai_turn_terminal_draft_uses_authoritative_offer(
         assert draft is not None
         assert draft.price_id == seeded.price_id
         assert draft.total_cdf == Decimal("308000.00")
-    await _assert_no_consequential_state(factory)
+    await _assert_state_counts(factory)
 
 
 @pytest.mark.asyncio
-async def test_authoritative_draft_and_confirmation_create_no_order_or_payment(
+async def test_customer_confirmation_creates_one_authoritative_pending_order_without_payment(
     engine: AsyncEngine,
 ) -> None:
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -299,7 +328,7 @@ async def test_authoritative_draft_and_confirmation_create_no_order_or_payment(
         assert draft.total_cdf == Decimal("308000.00")
         assert draft.status == "awaiting_confirmation"
         assert draft.confirmation_code in prepared.confirmation_text
-    await _assert_no_consequential_state(factory)
+    await _assert_state_counts(factory)
 
     result, _ = await _reply(
         factory,
@@ -307,12 +336,42 @@ async def test_authoritative_draft_and_confirmation_create_no_order_or_payment(
         content=f"OUI {draft.confirmation_code}",
     )
     assert result is not None and result.state == "confirmed"
+    assert result.order_id is not None
     async with factory() as session:
         stored = await session.scalar(
             select(OrderDraft).where(OrderDraft.draft_id == prepared.draft_id)
         )
+        order = await session.get(Order, result.order_id)
+        inventory = await session.get(InventoryRecord, seeded.inventory_id)
         assert stored is not None and stored.status == "confirmed"
-    await _assert_no_consequential_state(factory)
+        assert stored.order_id == result.order_id
+        assert order is not None
+        assert order.lead_id == seeded.lead_id
+        assert order.customer_id == "+243810006001"
+        assert order.status == "pending"
+        assert order.total_amount == Decimal("308000.00")
+        assert order.currency == "CDF"
+        assert order.payment_type == "mobile_money"
+        assert order.delivery_zone == "Kinshasa"
+        assert order.delivery_method == "moto_taxi"
+        assert order.hub_crm_synced is False
+        assert order.hub_crm_order_id is None
+        assert order.items == [
+            {
+                "product_id": str(stored.product_id),
+                "sellable_item_id": str(stored.sellable_item_id),
+                "product_name": "MBB Test Air Fryer",
+                "model_label": "6L",
+                "quantity": 2,
+                "price_id": str(stored.price_id),
+                "unit_price_usd": "55.00",
+                "exchange_rate_id": str(stored.exchange_rate_id),
+                "usd_to_cdf_rate": "2800.000000",
+                "unit_price_cdf": "154000.00",
+            }
+        ]
+        assert inventory is not None and inventory.status == "available"
+    await _assert_state_counts(factory, orders=1)
 
 
 @pytest.mark.asyncio
@@ -339,7 +398,7 @@ async def test_cancel_and_duplicate_cancel_are_idempotent(engine: AsyncEngine) -
             )
             == 1
         )
-    await _assert_no_consequential_state(factory)
+    await _assert_state_counts(factory)
 
 
 @pytest.mark.asyncio
@@ -395,7 +454,7 @@ async def test_new_draft_supersedes_the_only_active_draft(engine: AsyncEngine) -
             )
             == 1
         )
-    await _assert_no_consequential_state(factory)
+    await _assert_state_counts(factory)
 
 
 @pytest.mark.asyncio
@@ -413,7 +472,57 @@ async def test_duplicate_confirmation_is_safe(engine: AsyncEngine) -> None:
     second, _ = await _reply(factory, seeded, content=f"OUI {code}")
     assert first is not None and first.state == "confirmed"
     assert second is not None and second.state == "already_confirmed"
-    await _assert_no_consequential_state(factory)
+    assert first.order_id is not None and second.order_id == first.order_id
+    await _assert_state_counts(factory, orders=1)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_confirmation_replay_creates_exactly_one_order(
+    engine: AsyncEngine,
+) -> None:
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    seeded = await _seed(factory)
+    prepared = await _prepare(factory, seeded)
+    inbound_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    async with factory() as session:
+        code = await session.scalar(
+            select(OrderDraft.confirmation_code).where(
+                OrderDraft.draft_id == prepared.draft_id
+            )
+        )
+        session.add(
+            Message(
+                message_id=inbound_id,
+                conversation_id=seeded.conversation_id,
+                timestamp=now,
+                direction="inbound",
+                content=f"OUI {code}",
+                content_type="text",
+                language="french",
+                whatsapp_message_id=f"ai6c-{inbound_id}",
+                created_at=now,
+            )
+        )
+        await session.commit()
+
+    async def confirm_once():
+        async with factory() as session:
+            result = await handle_order_draft_reply(
+                session,
+                conversation_id=seeded.conversation_id,
+                source_message_id=inbound_id,
+                expected_ownership_version=1,
+                customer_text=f"OUI {code}",
+            )
+            await session.commit()
+            return result
+
+    first, second = await asyncio.gather(confirm_once(), confirm_once())
+    assert first is not None and second is not None
+    assert {first.state, second.state} == {"confirmed", "already_confirmed"}
+    assert first.order_id is not None and second.order_id == first.order_id
+    await _assert_state_counts(factory, orders=1)
 
 
 @pytest.mark.asyncio
@@ -437,7 +546,7 @@ async def test_stale_ownership_blocks_confirmation(engine: AsyncEngine) -> None:
             select(OrderDraft.status).where(OrderDraft.draft_id == prepared.draft_id)
         )
         assert status == "awaiting_confirmation"
-    await _assert_no_consequential_state(factory)
+    await _assert_state_counts(factory)
 
 
 @pytest.mark.asyncio
@@ -462,7 +571,7 @@ async def test_stale_commercial_state_invalidates_confirmation(
         await session.commit()
     result, _ = await _reply(factory, seeded, content=f"OUI {code}")
     assert result is not None and result.state == "invalidated"
-    await _assert_no_consequential_state(factory)
+    await _assert_state_counts(factory)
 
 
 @pytest.mark.asyncio
@@ -526,7 +635,83 @@ async def test_changed_price_creates_a_new_version_requiring_reconfirmation(
         assert active is not None
         assert active.status == "awaiting_confirmation"
         assert active.confirmation_code == new_code
-    await _assert_no_consequential_state(factory)
+    await _assert_state_counts(factory)
+
+
+@pytest.mark.asyncio
+async def test_changed_exchange_rate_requires_reconfirmation_before_order(
+    engine: AsyncEngine,
+) -> None:
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    seeded = await _seed(factory)
+    prepared = await _prepare(factory, seeded)
+    async with factory() as session:
+        draft = await session.scalar(
+            select(OrderDraft).where(OrderDraft.draft_id == prepared.draft_id)
+        )
+        current_rate = await session.scalar(
+            select(ExchangeRate).where(ExchangeRate.ended_at.is_(None))
+        )
+        assert draft is not None and current_rate is not None
+        code = draft.confirmation_code
+        changed_at = datetime.now(timezone.utc)
+        current_rate.ended_at = changed_at
+        session.add(
+            ExchangeRate(
+                exchange_rate_id=uuid.uuid4(),
+                base_currency="USD",
+                quote_currency="CDF",
+                rate=Decimal("3000.000000"),
+                effective_at=changed_at + timedelta(microseconds=1),
+                ended_at=None,
+            )
+        )
+        await session.commit()
+
+    result, _ = await _reply(factory, seeded, content=f"OUI {code}")
+    assert result is not None and result.state == "refreshed"
+    async with factory() as session:
+        replacement = await session.scalar(
+            select(OrderDraft).where(
+                OrderDraft.draft_id == prepared.draft_id,
+                OrderDraft.draft_version == 2,
+            )
+        )
+        assert replacement is not None
+        assert replacement.unit_price_cdf == Decimal("165000.00")
+        assert replacement.total_cdf == Decimal("330000.00")
+        assert replacement.order_id is None
+    await _assert_state_counts(factory)
+
+
+@pytest.mark.asyncio
+async def test_missing_lead_authority_invalidates_without_order_or_payment(
+    engine: AsyncEngine,
+) -> None:
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    seeded = await _seed(factory)
+    prepared = await _prepare(factory, seeded)
+    async with factory() as session:
+        draft = await session.scalar(
+            select(OrderDraft).where(OrderDraft.draft_id == prepared.draft_id)
+        )
+        lead = await session.get(Lead, seeded.lead_id)
+        assert draft is not None and lead is not None
+        code = draft.confirmation_code
+        await session.execute(delete(Lead).where(Lead.lead_id == seeded.lead_id))
+        await session.commit()
+
+    result, _ = await _reply(factory, seeded, content=f"OUI {code}")
+    assert result is not None and result.state == "invalidated"
+    async with factory() as session:
+        draft = await session.scalar(
+            select(OrderDraft).where(OrderDraft.draft_id == prepared.draft_id)
+        )
+        assert draft is not None
+        assert draft.status == "invalidated"
+        assert draft.resolution_code == "order_authority_unavailable"
+        assert draft.order_id is None
+    await _assert_state_counts(factory)
 
 
 @pytest.mark.asyncio
@@ -546,4 +731,4 @@ async def test_unavailable_offer_blocks_confirmation(engine: AsyncEngine) -> Non
         await session.commit()
     result, _ = await _reply(factory, seeded, content=f"OUI {code}")
     assert result is not None and result.state == "invalidated"
-    await _assert_no_consequential_state(factory)
+    await _assert_state_counts(factory)

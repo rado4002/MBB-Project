@@ -449,14 +449,16 @@ def test_exact_order_draft_reply_is_handled_before_provider_inference(monkeypatc
         ai=_NeverAI(),
     )
     draft_id = uuid.uuid4()
+    order_id = uuid.uuid4()
 
     async def handle_reply(*_args, **_kwargs):
         return OrderDraftReplyResult(
             state="confirmed",
             draft_id=draft_id,
             draft_version=3,
-            customer_text="Brouillon confirmé; aucune commande créée.",
+            customer_text="Brouillon confirmé; commande en attente créée.",
             outbound_message_id=outbound_id,
+            order_id=order_id,
         )
 
     import app.modules.m7_conversion.order_drafts as order_drafts
@@ -467,13 +469,9 @@ def test_exact_order_draft_reply_is_handled_before_provider_inference(monkeypatc
     assert result["status"] == "order_draft_confirmed"
     assert result["draft_id"] == str(draft_id)
     assert result["draft_version"] == 3
-    assert messaging.calls == [
-        (
-            "+243812345678",
-            "Brouillon confirmé; aucune commande créée.",
-            str(outbound_id),
-        )
-    ]
+    assert result["order_id"] == str(order_id)
+    assert result["send_status"] == "skipped"
+    assert messaging.calls == []
 
 
 def test_cold_history_excludes_the_current_inbound_from_ai_context(monkeypatch):

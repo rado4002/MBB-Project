@@ -59,6 +59,10 @@ class OrderDraft(Base):
             name="chk_order_drafts_offer_fingerprint",
         ),
         CheckConstraint(
+            "order_id IS NULL OR status = 'confirmed'",
+            name="chk_order_drafts_order_binding",
+        ),
+        CheckConstraint(
             "(status = 'awaiting_confirmation' AND resolved_by_message_id IS NULL "
             "AND resolution_outbound_message_id IS NULL AND resolved_at IS NULL "
             "AND resolution_code IS NULL) OR "
@@ -88,6 +92,12 @@ class OrderDraft(Base):
             "resolved_by_message_id",
             unique=True,
             postgresql_where=text("resolved_by_message_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_order_drafts_order_id",
+            "order_id",
+            unique=True,
+            postgresql_where=text("order_id IS NOT NULL"),
         ),
         Index(
             "idx_order_drafts_conversation_created",
@@ -143,6 +153,15 @@ class OrderDraft(Base):
     )
     resolution_outbound_message_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True
+    )
+    order_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "mbb.orders.order_id",
+            name="fk_order_drafts_order_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
     )
     created_by_turn_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), nullable=False

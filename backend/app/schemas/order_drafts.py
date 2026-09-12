@@ -1,4 +1,4 @@
-"""Strict contracts for non-consequential order drafts."""
+"""Strict contracts for authoritative order drafts and their resolution."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ class OrderDraftReplyResult(StrictOrderDraftModel):
     draft_version: int = Field(gt=0)
     customer_text: str = Field(min_length=1, max_length=700)
     outbound_message_id: uuid.UUID
+    order_id: uuid.UUID | None = None
 
 
 class OrderDraftSnapshot(StrictOrderDraftModel):

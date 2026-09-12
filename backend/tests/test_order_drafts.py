@@ -111,7 +111,7 @@ def test_prepare_capability_has_no_model_price_or_rate_field(forbidden_field):
         )
 
 
-def test_order_draft_domain_has_no_consequential_m7_or_external_call():
+def test_order_draft_domain_uses_no_payment_inventory_or_external_call():
     import app.modules.m7_conversion.order_drafts as module
 
     source = inspect.getsource(module)
@@ -123,3 +123,4 @@ def test_order_draft_domain_has_no_consequential_m7_or_external_call():
         "set_inventory_status(",
     ):
         assert forbidden not in source
+    assert "Order(" in source

@@ -503,14 +503,21 @@ async def _process(
             )
             return _persistence_failure_result(conv_id)
         if draft_reply is not None:
-            send_result = await _send_safe(
-                customer_phone,
-                draft_reply.customer_text,
-                idempotency_key=str(draft_reply.outbound_message_id),
-                conversation_id=inbound.conversation_id,
-                expected_ownership_version=expected_ownership_version,
-            )
-            return {
+            if draft_reply.order_id is None:
+                send_result = await _send_safe(
+                    customer_phone,
+                    draft_reply.customer_text,
+                    idempotency_key=str(draft_reply.outbound_message_id),
+                    conversation_id=inbound.conversation_id,
+                    expected_ownership_version=expected_ownership_version,
+                )
+            else:
+                log.info(
+                    "m1.order_draft.order_reply_send_skipped",
+                    order_id=str(draft_reply.order_id),
+                )
+                send_result = {"status": "skipped"}
+            result = {
                 "status": f"order_draft_{draft_reply.state}",
                 "conversation_id": conv_id,
                 "draft_id": str(draft_reply.draft_id),
@@ -518,6 +525,9 @@ async def _process(
                 "outbound_message_id": str(draft_reply.outbound_message_id),
                 "send_status": send_result["status"],
             }
+            if draft_reply.order_id is not None:
+                result["order_id"] = str(draft_reply.order_id)
+            return result
 
         # ── Step 5: Load Redis session cache ──────────────────────────────────
         session_state = await get_session(conv_id)

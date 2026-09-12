@@ -1,4 +1,4 @@
-"""Authoritative, non-consequential order-draft creation and resolution."""
+"""Authoritative order-draft creation, resolution, and pending-order binding."""
 
 from __future__ import annotations
 
@@ -16,7 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.commercial_state import read_commercial_state
 from app.i18n.messages import t
 from app.models.conversation import Conversation
+from app.models.customer import Customer
+from app.models.lead import Lead
 from app.models.message import Message
+from app.models.order import Order
 from app.models.order_draft import OrderDraft
 from app.modules.m1_gateway.service import persist_outbound
 from app.modules.product_offer.service import get_product_offer
@@ -26,6 +29,7 @@ from app.schemas.product_offer import ProductOfferResponse
 _REPLY_PATTERN = re.compile(r"^\s*([A-Za-zÀ-ÿ]+)\s+([A-Fa-f0-9]{8})[.!]?\s*$")
 _CONFIRM_WORDS = frozenset({"oui", "confirme", "iyo", "nandimi", "ndiyo", "nakubali"})
 _CANCEL_WORDS = frozenset({"non", "annule", "te", "boya", "hapana", "ghairi"})
+_ORDER_TOTAL_MAX = Decimal("9999999999.99")
 
 
 class OrderDraftError(Exception):
@@ -40,6 +44,10 @@ class OrderDraftOfferUnavailable(OrderDraftError):
     def __init__(self, safe_code: str) -> None:
         super().__init__(safe_code)
         self.safe_code = safe_code
+
+
+class OrderDraftOrderUnavailable(OrderDraftError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -377,8 +385,11 @@ async def _repeat_reply(
     state: str,
     text_key: str,
     language: str,
+    order_id: uuid.UUID | None = None,
 ) -> OrderDraftReplyResult:
     text_value = t(text_key, language)
+    if order_id is not None:
+        text_value = text_value.format(order_id=order_id)
     outbound_id = await _persist_application_message(
         session,
         conversation_id=draft.conversation_id,
@@ -391,7 +402,82 @@ async def _repeat_reply(
         draft_version=draft.draft_version,
         customer_text=text_value,
         outbound_message_id=outbound_id,
+        order_id=order_id,
     )
+
+
+async def _create_pending_order_from_revalidated_draft(
+    session: AsyncSession,
+    *,
+    draft: OrderDraft,
+    conversation: Conversation,
+    offer: ProductOfferResponse,
+) -> Order:
+    """Create one local pending Order without Payment or external side effects."""
+    if draft.order_id is not None:
+        existing = await session.get(Order, draft.order_id)
+        if existing is None:
+            raise OrderDraftOrderUnavailable("bound_order_missing")
+        return existing
+
+    confirmed = _require_confirmable_offer(offer)
+    if _offer_fingerprint(confirmed) != draft.offer_fingerprint:
+        raise StaleOrderDraftAuthority
+    assert confirmed.price_id is not None
+    assert confirmed.current_usd_price is not None
+    assert confirmed.derived_cdf_quote is not None
+
+    lead = await session.scalar(
+        select(Lead)
+        .where(Lead.conversation_id == conversation.conversation_id)
+        .with_for_update()
+    )
+    customer = await session.scalar(
+        select(Customer)
+        .where(Customer.phone_number == conversation.customer_id)
+        .with_for_update()
+    )
+    if lead is None or customer is None or lead.customer_id != conversation.customer_id:
+        raise OrderDraftOrderUnavailable("order_party_authority_unavailable")
+    delivery_zone = customer.city.strip()
+    if not delivery_zone or len(delivery_zone) > 50:
+        raise OrderDraftOrderUnavailable("delivery_zone_unavailable")
+
+    quote = confirmed.derived_cdf_quote
+    total_cdf = quote.cdf_amount * draft.quantity
+    if total_cdf <= 0 or total_cdf > _ORDER_TOTAL_MAX:
+        raise OrderDraftOrderUnavailable("order_total_out_of_range")
+    order = Order(
+        order_id=uuid.uuid4(),
+        lead_id=lead.lead_id,
+        customer_id=conversation.customer_id,
+        items=[
+            {
+                "product_id": str(confirmed.product_id),
+                "sellable_item_id": str(confirmed.sellable_item_id),
+                "product_name": confirmed.product_name,
+                "model_label": confirmed.model_label,
+                "quantity": draft.quantity,
+                "price_id": str(confirmed.price_id),
+                "unit_price_usd": _decimal_text(confirmed.current_usd_price),
+                "exchange_rate_id": str(quote.exchange_rate_id),
+                "usd_to_cdf_rate": _decimal_text(quote.usd_to_cdf_rate),
+                "unit_price_cdf": _decimal_text(quote.cdf_amount),
+            }
+        ],
+        total_amount=total_cdf,
+        currency="CDF",
+        payment_type="mobile_money",
+        delivery_zone=delivery_zone,
+        delivery_method="moto_taxi",
+        status="pending",
+        hub_crm_synced=False,
+        hub_crm_order_id=None,
+        club_points_credited=0,
+    )
+    session.add(order)
+    await session.flush()
+    return order
 
 
 async def handle_order_draft_reply(
@@ -435,12 +521,30 @@ async def handle_order_draft_reply(
 
     language = conversation.language_detected
     if draft.status == "confirmed" and action == "confirm":
+        if draft.order_id is not None:
+            return await _repeat_reply(
+                session,
+                draft=draft,
+                state="already_confirmed",
+                text_key="order_draft_already_confirmed",
+                language=language,
+                order_id=draft.order_id,
+            )
         return await _repeat_reply(
             session,
             draft=draft,
             state="already_confirmed",
-            text_key="order_draft_already_confirmed",
+            text_key="order_draft_confirmed_without_order",
             language=language,
+        )
+    if draft.status == "confirmed" and draft.order_id is not None:
+        return await _repeat_reply(
+            session,
+            draft=draft,
+            state="already_confirmed",
+            text_key="order_draft_order_pending",
+            language=language,
+            order_id=draft.order_id,
         )
     if draft.status == "confirmed" and action == "cancel":
         text_value = t("order_draft_cancelled", language)
@@ -607,7 +711,33 @@ async def handle_order_draft_reply(
             outbound_message_id=outbound_id,
         )
 
-    text_value = t("order_draft_confirmed", language)
+    try:
+        order = await _create_pending_order_from_revalidated_draft(
+            session,
+            draft=draft,
+            conversation=conversation,
+            offer=offer,
+        )
+    except OrderDraftOrderUnavailable:
+        text_value = t("order_draft_unavailable", language)
+        outbound_id = await _resolve_with_message(
+            session,
+            draft=draft,
+            source_message_id=source_message_id,
+            status="invalidated",
+            resolution_code="order_authority_unavailable",
+            text_value=text_value,
+            language=language,
+        )
+        return OrderDraftReplyResult(
+            state="invalidated",
+            draft_id=draft.draft_id,
+            draft_version=draft.draft_version,
+            customer_text=text_value,
+            outbound_message_id=outbound_id,
+        )
+
+    text_value = t("order_draft_confirmed", language).format(order_id=order.order_id)
     outbound_id = await _resolve_with_message(
         session,
         draft=draft,
@@ -617,10 +747,13 @@ async def handle_order_draft_reply(
         text_value=text_value,
         language=language,
     )
+    draft.order_id = order.order_id
+    await session.flush()
     return OrderDraftReplyResult(
         state="confirmed",
         draft_id=draft.draft_id,
         draft_version=draft.draft_version,
         customer_text=text_value,
         outbound_message_id=outbound_id,
+        order_id=order.order_id,
     )
