@@ -1,0 +1,1 @@
+"""Foreign-exchange provider adapters."""

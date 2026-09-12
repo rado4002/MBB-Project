@@ -25,7 +25,7 @@ from app.models.operator_escalation_idempotency import (
     OperatorEscalationIdempotency,
 )
 from app.models.catalog import Product, ProductMedia, SellableItem
-from app.models.pricing import ExchangeRate, SellableItemPrice
+from app.models.pricing import ExchangeRate, ExchangeRateAuthority, SellableItemPrice
 from app.models.inventory import InventoryRecord
 
 __all__ = [
@@ -53,5 +53,6 @@ __all__ = [
     "SellableItem",
     "SellableItemPrice",
     "ExchangeRate",
+    "ExchangeRateAuthority",
     "InventoryRecord",
 ]

@@ -19,7 +19,11 @@ from app.models.catalog import (
 )
 from app.models.inventory import InventoryRecord
 from app.models.pricing import ExchangeRate, SellableItemPrice
-from app.modules.pricing.service import CDF, USD, calculate_cdf_amount
+from app.modules.pricing.service import (
+    USD,
+    calculate_cdf_amount,
+    get_active_usd_cdf_rate,
+)
 from app.schemas.product_offer import (
     DerivedCdfQuoteResponse,
     OfferReasonCode,
@@ -160,7 +164,7 @@ def _compose_offer(row: ProductOfferRow, *, read_at: datetime) -> ProductOfferRe
     )
 
 
-def _current_offer_statement():
+def _current_offer_statement(exchange_rate_id: uuid.UUID | None):
     item_media = aliased(ProductMedia, name="item_primary_media")
     product_media = aliased(ProductMedia, name="product_primary_media")
     return (
@@ -188,11 +192,7 @@ def _current_offer_statement():
         )
         .outerjoin(
             ExchangeRate,
-            and_(
-                ExchangeRate.base_currency == USD,
-                ExchangeRate.quote_currency == CDF,
-                ExchangeRate.ended_at.is_(None),
-            ),
+            ExchangeRate.exchange_rate_id == exchange_rate_id,
         )
         .outerjoin(
             item_media,
@@ -232,37 +232,23 @@ def _status_rank_expression():
     )
 
 
-def _current_fx_filter():
-    return (
-        ExchangeRate.base_currency == USD,
-        ExchangeRate.quote_currency == CDF,
-        ExchangeRate.ended_at.is_(None),
-    )
-
-
-async def _has_current_usd_cdf_rate(session: AsyncSession) -> bool:
-    return (
-        await session.scalar(
-            select(ExchangeRate.exchange_rate_id).where(*_current_fx_filter()).limit(1)
-        )
-    ) is not None
-
-
 async def get_product_offer(
     session: AsyncSession,
     sellable_item_id: uuid.UUID,
     *,
     read_at: datetime | None = None,
 ) -> ProductOfferResponse | None:
+    offer_read_at = read_at or _utcnow()
+    exchange_rate = await get_active_usd_cdf_rate(session, at=offer_read_at)
     result = await session.execute(
-        _current_offer_statement().where(
-            SellableItem.sellable_item_id == sellable_item_id
-        )
+        _current_offer_statement(
+            None if exchange_rate is None else exchange_rate.exchange_rate_id
+        ).where(SellableItem.sellable_item_id == sellable_item_id)
     )
     row = result.one_or_none()
     if row is None:
         return None
-    return _compose_offer(ProductOfferRow(*row), read_at=read_at or _utcnow())
+    return _compose_offer(ProductOfferRow(*row), read_at=offer_read_at)
 
 
 async def require_product_offer(
@@ -293,8 +279,12 @@ async def search_product_offers(
         None if category_code is None else normalize_category_code(category_code)
     )
     safe_limit = _clamp_limit(limit)
+    offer_read_at = read_at or _utcnow()
+    exchange_rate = await get_active_usd_cdf_rate(session, at=offer_read_at)
 
-    statement = _current_offer_statement()
+    statement = _current_offer_statement(
+        None if exchange_rate is None else exchange_rate.exchange_rate_id
+    )
     if search_mode == "sellable_only":
         statement = statement.where(
             Product.active.is_(True),
@@ -333,7 +323,7 @@ async def search_product_offers(
         )
     if max_budget_cdf is not None:
         budget_cdf = _validate_budget(max_budget_cdf, field="max_budget_cdf")
-        if not await _has_current_usd_cdf_rate(session):
+        if exchange_rate is None:
             raise ProductOfferCdfQuoteUnavailable(
                 "current USD to CDF exchange rate is unavailable"
             )
@@ -351,7 +341,6 @@ async def search_product_offers(
         SellableItem.sellable_item_id,
     ).limit(safe_limit)
     rows = await session.execute(statement)
-    offer_read_at = read_at or _utcnow()
     return [
         _compose_offer(ProductOfferRow(*row), read_at=offer_read_at)
         for row in rows.all()

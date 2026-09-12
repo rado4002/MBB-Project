@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import fakeredis.aioredis
 import httpx
@@ -13,6 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.adapters.fx.exchange_rate_api import ExchangeRateAPIObservation
 from app.api.browser_auth_deps import get_browser_redis, get_browser_settings
 from app.api.browser_auth_errors import (
     BrowserAuthError,
@@ -54,6 +56,16 @@ def _settings() -> Settings:
         operator_audit_retention_days=365,
         operator_security_metadata_retention_days=90,
     )
+
+
+class _AutomaticRateProvider:
+    async def fetch_usd_cdf(self) -> ExchangeRateAPIObservation:
+        return ExchangeRateAPIObservation(
+            base_currency="USD",
+            quote_currency="CDF",
+            rate=Decimal("3000.000000"),
+            published_at=datetime.now(timezone.utc),
+        )
 
 
 def _account(username: str, role: str, password: str) -> OperatorAccount:
@@ -98,6 +110,14 @@ async def harness():
     )
     async with engine.begin() as connection:
         await connection.execute(truncate)
+        await connection.execute(
+            text(
+                "UPDATE mbb.exchange_rate_authorities "
+                "SET mode = 'MANUAL', revision = 1, updated_at = NOW(), "
+                "updated_by_account_id = NULL "
+                "WHERE base_currency = 'USD' AND quote_currency = 'CDF'"
+            )
+        )
     administrator = _account("commerce.admin", "administrator", ADMIN_PASSWORD)
     operator = _account("commerce.operator", "operator", OPERATOR_PASSWORD)
     async with factory() as session:
@@ -111,6 +131,9 @@ async def harness():
     app.include_router(commerce_admin.router, prefix="/api/v1")
     app.dependency_overrides[get_browser_settings] = _settings
     app.dependency_overrides[get_browser_redis] = lambda: redis_client
+    app.dependency_overrides[commerce_admin.get_exchange_rate_api_adapter] = (
+        _AutomaticRateProvider
+    )
 
     async def _db_override():
         async with factory() as session:
@@ -123,6 +146,14 @@ async def harness():
     finally:
         async with engine.begin() as connection:
             await connection.execute(truncate)
+            await connection.execute(
+                text(
+                    "UPDATE mbb.exchange_rate_authorities "
+                    "SET mode = 'MANUAL', revision = 1, updated_at = NOW(), "
+                    "updated_by_account_id = NULL "
+                    "WHERE base_currency = 'USD' AND quote_currency = 'CDF'"
+                )
+            )
         await redis_client.flushall()
         await redis_client.aclose()
         await engine.dispose()
@@ -149,7 +180,9 @@ async def _login(client: httpx.AsyncClient, username: str, password: str) -> str
 
 
 @pytest.mark.asyncio
-async def test_administrator_allowed_operator_and_unauthenticated_denied(harness) -> None:
+async def test_administrator_allowed_operator_and_unauthenticated_denied(
+    harness,
+) -> None:
     transport, factory, _administrator_id = harness
     product_body = {
         "name": "Fictional Air Fryer",
@@ -157,9 +190,13 @@ async def test_administrator_allowed_operator_and_unauthenticated_denied(harness
         "description": "Fictional API fixture.",
     }
     async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as anonymous:
-        assert (await anonymous.get("/api/v1/operator/commerce/products")).status_code == 401
+        assert (
+            await anonymous.get("/api/v1/operator/commerce/products")
+        ).status_code == 401
         anonymous.cookies.set(SESSION_COOKIE_NAME, "invalid-session-token")
-        assert (await anonymous.get("/api/v1/operator/commerce/products")).status_code == 401
+        assert (
+            await anonymous.get("/api/v1/operator/commerce/products")
+        ).status_code == 401
 
     async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as operator:
         operator_csrf = await _login(operator, "commerce.operator", OPERATOR_PASSWORD)
@@ -186,13 +223,20 @@ async def test_administrator_allowed_operator_and_unauthenticated_denied(harness
 
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(Product)) == 1
-        assert await session.scalar(
-            select(func.count()).select_from(Product).where(Product.name == "Denied Product")
-        ) == 0
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(Product)
+                .where(Product.name == "Denied Product")
+            )
+            == 0
+        )
 
 
 @pytest.mark.asyncio
-async def test_commerce_writes_preserve_csrf_origin_and_strict_payload_guards(harness) -> None:
+async def test_commerce_writes_preserve_csrf_origin_and_strict_payload_guards(
+    harness,
+) -> None:
     transport, _factory, _administrator_id = harness
     body = {
         "name": "Fictional Air Fryer",
@@ -234,6 +278,51 @@ async def test_disabled_browser_account_session_fails_closed(harness) -> None:
             await session.commit()
         response = await client.get("/api/v1/operator/commerce/products")
         assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_exchange_rate_authority_endpoints_are_explicit_and_provider_backed(
+    harness,
+) -> None:
+    transport, _factory, _administrator_id = harness
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        csrf = await _login(client, "commerce.admin", ADMIN_PASSWORD)
+        authority_url = "/api/v1/operator/commerce/exchange-rates/usd-cdf/authority"
+
+        initial = await client.get(authority_url)
+        assert initial.status_code == 200
+        assert initial.json()["mode"] == "MANUAL"
+
+        manual = await client.put(
+            "/api/v1/operator/commerce/exchange-rates/usd-cdf",
+            headers=_headers(csrf),
+            json={"base_currency": "USD", "quote_currency": "CDF", "rate": "2800"},
+        )
+        assert manual.status_code == 200
+        assert manual.json()["authority_mode"] == "MANUAL"
+        assert manual.json()["source"] == "MBB_ADMIN"
+
+        automatic = await client.post(
+            "/api/v1/operator/commerce/exchange-rates/usd-cdf/automatic/refresh",
+            headers=_headers(csrf),
+        )
+        assert automatic.status_code == 200
+        assert automatic.json()["authority_mode"] == "AUTOMATIC"
+        assert automatic.json()["source"] == "EXCHANGE_RATE_API"
+        assert automatic.json()["rate"] == "3000.000000"
+
+        still_manual = await client.get(authority_url)
+        assert still_manual.status_code == 200
+        assert still_manual.json()["mode"] == "MANUAL"
+
+        switched = await client.put(
+            authority_url,
+            headers=_headers(csrf),
+            json={"mode": "AUTOMATIC"},
+        )
+        assert switched.status_code == 200
+        assert switched.json()["mode"] == "AUTOMATIC"
+        assert switched.json()["revision"] == 2
 
 
 @pytest.mark.asyncio

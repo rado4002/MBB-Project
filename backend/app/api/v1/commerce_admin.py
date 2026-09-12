@@ -9,6 +9,10 @@ from fastapi import APIRouter, Depends, Request, Response, status
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.adapters.fx.exchange_rate_api import (
+    ExchangeRateAPIAdapter,
+    ExchangeRateAPIError,
+)
 from app.api.browser_auth_deps import (
     BrowserPrincipal,
     get_browser_settings,
@@ -30,7 +34,9 @@ from app.modules.pricing import service as pricing_service
 from app.request_ids import normalize_or_generate_request_id
 from app.schemas.commerce_admin import (
     CurrentUsdPriceSet,
+    ExchangeRateAuthorityResponse,
     ExchangeRateHistoryResponse,
+    ExchangeRateModeSet,
     ExchangeRateResponse,
     ExchangeRateSet,
     InventoryStatusResponse,
@@ -75,17 +81,46 @@ def _map_error(exc: Exception) -> BrowserAuthError:
             inventory_service.InventoryNotFound,
         ),
     ):
-        return _error(404, "COMMERCE_RESOURCE_NOT_FOUND", "The commerce resource was not found.")
+        return _error(
+            404, "COMMERCE_RESOURCE_NOT_FOUND", "The commerce resource was not found."
+        )
     if isinstance(exc, catalog_service.CatalogConflict):
-        return _error(409, "COMMERCE_CONFLICT", "The commerce data conflicts with current state.")
+        return _error(
+            409, "COMMERCE_CONFLICT", "The commerce data conflicts with current state."
+        )
+    if isinstance(exc, pricing_service.ExchangeRateAuthorityUnavailable):
+        return _error(
+            409,
+            "EXCHANGE_RATE_AUTHORITY_UNAVAILABLE",
+            "The requested exchange-rate authority is unavailable.",
+        )
     if isinstance(exc, CommerceAuthorizationDenied):
-        return _error(403, "COMMERCE_ADMINISTRATOR_REQUIRED", "Administrator authority is required.")
+        return _error(
+            403,
+            "COMMERCE_ADMINISTRATOR_REQUIRED",
+            "Administrator authority is required.",
+        )
     if isinstance(exc, (ValueError, pricing_service.UnsupportedCurrency)):
-        return _error(422, "COMMERCE_VALIDATION_FAILED", "The commerce data is invalid.")
-    return _error(503, "SERVICE_UNAVAILABLE", "Commerce maintenance is temporarily unavailable.")
+        return _error(
+            422, "COMMERCE_VALIDATION_FAILED", "The commerce data is invalid."
+        )
+    if isinstance(
+        exc,
+        (ExchangeRateAPIError, pricing_service.AutomaticExchangeRateRejected),
+    ):
+        return _error(
+            503,
+            "AUTOMATIC_EXCHANGE_RATE_UNAVAILABLE",
+            "The automatic exchange rate is temporarily unavailable.",
+        )
+    return _error(
+        503, "SERVICE_UNAVAILABLE", "Commerce maintenance is temporarily unavailable."
+    )
 
 
-def _administrator(request: Request, principal: BrowserPrincipal) -> CommerceAdminContext:
+def _administrator(
+    request: Request, principal: BrowserPrincipal
+) -> CommerceAdminContext:
     return CommerceAdminContext(
         actor_account_id=principal.account.account_id,
         request_id=normalize_or_generate_request_id(
@@ -114,6 +149,9 @@ async def _commit_or_raise(db: AsyncSession, operation: Any) -> Any:
         catalog_service.CatalogConflict,
         pricing_service.PricingNotFound,
         pricing_service.UnsupportedCurrency,
+        pricing_service.ExchangeRateAuthorityUnavailable,
+        pricing_service.AutomaticExchangeRateRejected,
+        ExchangeRateAPIError,
         inventory_service.InventoryNotFound,
         CommerceAuthorizationDenied,
     ) as exc:
@@ -132,6 +170,15 @@ def _no_store(response: Response) -> None:
     response.headers["Cache-Control"] = "no-store"
 
 
+def get_exchange_rate_api_adapter(
+    settings: Annotated[Settings, Depends(get_browser_settings)],
+) -> ExchangeRateAPIAdapter:
+    return ExchangeRateAPIAdapter(
+        api_key=settings.exchange_rate_api_key,
+        timeout_s=settings.exchange_rate_api_timeout_s,
+    )
+
+
 @router.get("/products", response_model=ProductListResponse)
 async def list_products(
     response: Response,
@@ -140,7 +187,9 @@ async def list_products(
 ) -> ProductListResponse:
     items = await _read_or_raise(catalog_service.list_products(db))
     _no_store(response)
-    return ProductListResponse(items=[ProductResponse.model_validate(item) for item in items])
+    return ProductListResponse(
+        items=[ProductResponse.model_validate(item) for item in items]
+    )
 
 
 @router.get("/products/{product_id}", response_model=ProductResponse)
@@ -157,7 +206,9 @@ async def get_product(
     return ProductResponse.model_validate(product)
 
 
-@router.post("/products", response_model=ProductResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/products", response_model=ProductResponse, status_code=status.HTTP_201_CREATED
+)
 async def create_product(
     body: ProductCreate,
     request: Request,
@@ -231,9 +282,7 @@ async def get_sellable_item(
     _principal: Annotated[BrowserPrincipal, Depends(_require_commerce_manager)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SellableItemResponse:
-    item = await _read_or_raise(
-        catalog_service.get_sellable_item(db, sellable_item_id)
-    )
+    item = await _read_or_raise(catalog_service.get_sellable_item(db, sellable_item_id))
     if item is None:
         raise _map_error(catalog_service.CatalogNotFound())
     _no_store(response)
@@ -310,9 +359,7 @@ async def get_product_media(
     return ProductMediaResponse.model_validate(media)
 
 
-@router.get(
-    "/products/{product_id}/media", response_model=ProductMediaListResponse
-)
+@router.get("/products/{product_id}/media", response_model=ProductMediaListResponse)
 async def list_product_media(
     product_id: UUID,
     response: Response,
@@ -403,9 +450,7 @@ async def update_product_media(
     return ProductMediaResponse.model_validate(media)
 
 
-@router.put(
-    "/product-media/{media_id}/primary", response_model=ProductMediaResponse
-)
+@router.put("/product-media/{media_id}/primary", response_model=ProductMediaResponse)
 async def set_primary_product_media(
     media_id: UUID,
     _body: ProductMediaSetPrimary,
@@ -430,7 +475,9 @@ async def set_primary_product_media(
     return ProductMediaResponse.model_validate(media)
 
 
-@router.get("/sellable-items/{sellable_item_id}/prices", response_model=PriceHistoryResponse)
+@router.get(
+    "/sellable-items/{sellable_item_id}/prices", response_model=PriceHistoryResponse
+)
 async def get_price_history(
     sellable_item_id: UUID,
     response: Response,
@@ -441,7 +488,9 @@ async def get_price_history(
         pricing_service.list_price_history(db, sellable_item_id)
     )
     _no_store(response)
-    return PriceHistoryResponse(items=[PriceResponse.model_validate(item) for item in items])
+    return PriceHistoryResponse(
+        items=[PriceResponse.model_validate(item) for item in items]
+    )
 
 
 @router.put("/sellable-items/{sellable_item_id}/price", response_model=PriceResponse)
@@ -533,6 +582,26 @@ async def get_exchange_rate_history(
     )
 
 
+@router.get(
+    "/exchange-rates/usd-cdf/authority",
+    response_model=ExchangeRateAuthorityResponse,
+)
+async def get_exchange_rate_authority(
+    response: Response,
+    _principal: Annotated[BrowserPrincipal, Depends(_require_commerce_manager)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ExchangeRateAuthorityResponse:
+    authority = await _read_or_raise(pricing_service.get_exchange_rate_authority(db))
+    if authority is None:
+        raise _map_error(
+            pricing_service.ExchangeRateAuthorityUnavailable(
+                "exchange_rate_authority_missing"
+            )
+        )
+    _no_store(response)
+    return ExchangeRateAuthorityResponse.model_validate(authority)
+
+
 @router.put("/exchange-rates/usd-cdf", response_model=ExchangeRateResponse)
 async def set_exchange_rate(
     body: ExchangeRateSet,
@@ -550,6 +619,60 @@ async def set_exchange_rate(
         pricing_service.set_current_exchange_rate(
             db,
             **body.model_dump(),
+            administrator=_administrator(request, principal),
+        ),
+    )
+    _no_store(response)
+    return ExchangeRateResponse.model_validate(rate)
+
+
+@router.put(
+    "/exchange-rates/usd-cdf/authority",
+    response_model=ExchangeRateAuthorityResponse,
+)
+async def set_exchange_rate_authority(
+    body: ExchangeRateModeSet,
+    request: Request,
+    response: Response,
+    principal: Annotated[BrowserPrincipal, Depends(_require_commerce_manager)],
+    _csrf: Annotated[BrowserPrincipal, Depends(require_csrf)],
+    _recent: Annotated[BrowserPrincipal, Depends(require_recent_reauthentication)],
+    settings: Annotated[Settings, Depends(get_browser_settings)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ExchangeRateAuthorityResponse:
+    _write_guard(request, settings)
+    authority = await _commit_or_raise(
+        db,
+        pricing_service.set_exchange_rate_authority_mode(
+            db,
+            mode=body.mode,
+            administrator=_administrator(request, principal),
+        ),
+    )
+    _no_store(response)
+    return ExchangeRateAuthorityResponse.model_validate(authority)
+
+
+@router.post(
+    "/exchange-rates/usd-cdf/automatic/refresh",
+    response_model=ExchangeRateResponse,
+)
+async def refresh_automatic_exchange_rate(
+    request: Request,
+    response: Response,
+    principal: Annotated[BrowserPrincipal, Depends(_require_commerce_manager)],
+    _csrf: Annotated[BrowserPrincipal, Depends(require_csrf)],
+    _recent: Annotated[BrowserPrincipal, Depends(require_recent_reauthentication)],
+    settings: Annotated[Settings, Depends(get_browser_settings)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    provider: Annotated[ExchangeRateAPIAdapter, Depends(get_exchange_rate_api_adapter)],
+) -> ExchangeRateResponse:
+    _write_guard(request, settings)
+    rate = await _commit_or_raise(
+        db,
+        pricing_service.refresh_automatic_exchange_rate(
+            db,
+            provider=provider,
             administrator=_administrator(request, principal),
         ),
     )

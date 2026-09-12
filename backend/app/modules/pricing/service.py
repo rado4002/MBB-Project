@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from typing import Protocol
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.catalog import SellableItem
-from app.models.pricing import ExchangeRate, SellableItemPrice
+from app.adapters.fx.exchange_rate_api import (
+    EXCHANGE_RATE_API_SOURCE,
+    ExchangeRateAPIObservation,
+)
+from app.models.pricing import ExchangeRate, ExchangeRateAuthority, SellableItemPrice
 from app.modules.commerce_admin import (
     CommerceAdminContext,
     require_commerce_administrator,
@@ -24,6 +29,10 @@ CDF_QUOTE_QUANTUM = Decimal("0.01")
 USD_AMOUNT_MAX = Decimal("9999999999.99")
 EXCHANGE_RATE_MAX = Decimal("999999999999.999999")
 EXCHANGE_RATE_QUANTUM = Decimal("0.000001")
+MANUAL = "MANUAL"
+AUTOMATIC = "AUTOMATIC"
+MBB_ADMIN_SOURCE = "MBB_ADMIN"
+AUTOMATIC_RATE_MAX_AGE = timedelta(hours=36)
 
 
 class PricingNotFound(Exception):
@@ -32,6 +41,18 @@ class PricingNotFound(Exception):
 
 class UnsupportedCurrency(Exception):
     pass
+
+
+class ExchangeRateAuthorityUnavailable(Exception):
+    pass
+
+
+class AutomaticExchangeRateRejected(Exception):
+    pass
+
+
+class AutomaticRateProvider(Protocol):
+    async def fetch_usd_cdf(self) -> ExchangeRateAPIObservation: ...
 
 
 @dataclass(frozen=True)
@@ -181,13 +202,67 @@ async def set_current_usd_price(
 
 
 async def get_current_usd_cdf_rate(session: AsyncSession) -> ExchangeRate | None:
+    return await get_active_usd_cdf_rate(session)
+
+
+def _is_fresh_automatic_rate(rate: ExchangeRate, *, at: datetime) -> bool:
+    if (
+        at.tzinfo is None
+        or rate.authority_mode != AUTOMATIC
+        or rate.source != EXCHANGE_RATE_API_SOURCE
+        or rate.validation_status != "VALIDATED"
+        or rate.fetched_at is None
+        or rate.published_at is None
+        or rate.validated_at is None
+    ):
+        return False
+    published_at = rate.published_at
+    if published_at.tzinfo is None:
+        return False
+    normalized_at = at.astimezone(timezone.utc)
+    normalized_published = published_at.astimezone(timezone.utc)
+    return (
+        normalized_published <= normalized_at
+        and normalized_at - normalized_published <= AUTOMATIC_RATE_MAX_AGE
+    )
+
+
+async def get_exchange_rate_authority(
+    session: AsyncSession,
+) -> ExchangeRateAuthority | None:
     return await session.scalar(
+        select(ExchangeRateAuthority).where(
+            ExchangeRateAuthority.base_currency == USD,
+            ExchangeRateAuthority.quote_currency == CDF,
+        )
+    )
+
+
+async def get_active_usd_cdf_rate(
+    session: AsyncSession,
+    *,
+    at: datetime | None = None,
+) -> ExchangeRate | None:
+    authority = await get_exchange_rate_authority(session)
+    if authority is None:
+        return None
+    rate = await session.scalar(
         select(ExchangeRate).where(
             ExchangeRate.base_currency == USD,
             ExchangeRate.quote_currency == CDF,
+            ExchangeRate.authority_mode == authority.mode,
             ExchangeRate.ended_at.is_(None),
         )
     )
+    if rate is None:
+        return None
+    if authority.mode == AUTOMATIC and not _is_fresh_automatic_rate(
+        rate, at=at or _utcnow()
+    ):
+        return None
+    if authority.mode != MANUAL and authority.mode != AUTOMATIC:
+        return None
+    return rate
 
 
 async def list_usd_cdf_rate_history(
@@ -201,7 +276,10 @@ async def list_usd_cdf_rate_history(
                     ExchangeRate.base_currency == USD,
                     ExchangeRate.quote_currency == CDF,
                 )
-                .order_by(ExchangeRate.effective_at.desc(), ExchangeRate.exchange_rate_id.desc())
+                .order_by(
+                    ExchangeRate.effective_at.desc(),
+                    ExchangeRate.exchange_rate_id.desc(),
+                )
                 .limit(limit)
             )
         ).all()
@@ -230,6 +308,7 @@ async def set_current_exchange_rate(
         .where(
             ExchangeRate.base_currency == USD,
             ExchangeRate.quote_currency == CDF,
+            ExchangeRate.authority_mode == MANUAL,
             ExchangeRate.ended_at.is_(None),
         )
         .with_for_update()
@@ -243,6 +322,12 @@ async def set_current_exchange_rate(
         base_currency=USD,
         quote_currency=CDF,
         rate=rate,
+        authority_mode=MANUAL,
+        source=MBB_ADMIN_SOURCE,
+        fetched_at=None,
+        published_at=None,
+        validated_at=None,
+        validation_status="ADMIN_APPROVED",
         effective_at=event_time,
         ended_at=None,
     )
@@ -264,6 +349,8 @@ async def set_current_exchange_rate(
         metadata={
             "base_currency": USD,
             "quote_currency": CDF,
+            "authority_mode": MANUAL,
+            "source": MBB_ADMIN_SOURCE,
             "previous_exchange_rate_id": (
                 str(previous_rate_id) if previous_rate_id else None
             ),
@@ -275,13 +362,177 @@ async def set_current_exchange_rate(
     return replacement
 
 
+async def refresh_automatic_exchange_rate(
+    session: AsyncSession,
+    *,
+    provider: AutomaticRateProvider,
+    administrator: CommerceAdminContext,
+    now: datetime | None = None,
+) -> ExchangeRate:
+    actor = await require_commerce_administrator(session, administrator)
+    observation = await provider.fetch_usd_cdf()
+    event_time = now or _utcnow()
+    if event_time.tzinfo is None:
+        raise ValueError("automatic exchange-rate clock must be timezone-aware")
+    if (
+        observation.base_currency != USD
+        or observation.quote_currency != CDF
+        or observation.source != EXCHANGE_RATE_API_SOURCE
+    ):
+        raise AutomaticExchangeRateRejected("provider_pair_or_source_mismatch")
+    try:
+        _validate_exchange_rate(observation.rate)
+    except ValueError as exc:
+        raise AutomaticExchangeRateRejected("provider_rate_invalid") from exc
+    if observation.published_at.tzinfo is None:
+        raise AutomaticExchangeRateRejected("provider_timestamp_invalid")
+    normalized_event_time = event_time.astimezone(timezone.utc)
+    normalized_published_at = observation.published_at.astimezone(timezone.utc)
+    age = normalized_event_time - normalized_published_at
+    if age < timedelta(0):
+        raise AutomaticExchangeRateRejected("provider_timestamp_in_future")
+    if age > AUTOMATIC_RATE_MAX_AGE:
+        raise AutomaticExchangeRateRejected("provider_data_stale")
+
+    await session.execute(text("SELECT pg_advisory_xact_lock(723201)"))
+    current = await session.scalar(
+        select(ExchangeRate)
+        .where(
+            ExchangeRate.base_currency == USD,
+            ExchangeRate.quote_currency == CDF,
+            ExchangeRate.authority_mode == AUTOMATIC,
+            ExchangeRate.ended_at.is_(None),
+        )
+        .with_for_update()
+    )
+    previous_rate_id: uuid.UUID | None = None
+    if current is not None:
+        previous_rate_id = current.exchange_rate_id
+        current.ended_at = event_time
+        await session.flush()
+    replacement = ExchangeRate(
+        base_currency=USD,
+        quote_currency=CDF,
+        rate=observation.rate,
+        authority_mode=AUTOMATIC,
+        source=EXCHANGE_RATE_API_SOURCE,
+        fetched_at=event_time,
+        published_at=observation.published_at,
+        validated_at=event_time,
+        validation_status="VALIDATED",
+        effective_at=event_time,
+        ended_at=None,
+    )
+    session.add(replacement)
+    await session.flush()
+    await append_operator_audit_event(
+        session,
+        category="business",
+        actor_kind="human",
+        actor_account_id=actor.account_id,
+        actor_display_name=actor.display_name,
+        effective_role=actor.role,
+        request_id=administrator.request_id,
+        action="commerce.usd_cdf_rate.automatic_refreshed",
+        target_type="exchange_rate",
+        target_id=str(replacement.exchange_rate_id),
+        reason_code="commerce_administrator",
+        outcome="succeeded",
+        metadata={
+            "base_currency": USD,
+            "quote_currency": CDF,
+            "authority_mode": AUTOMATIC,
+            "source": EXCHANGE_RATE_API_SOURCE,
+            "published_at": normalized_published_at.isoformat(),
+            "previous_exchange_rate_id": (
+                str(previous_rate_id) if previous_rate_id else None
+            ),
+        },
+        source_network_fingerprint=administrator.source_network_fingerprint,
+        user_agent_fingerprint=administrator.user_agent_fingerprint,
+        occurred_at=event_time,
+    )
+    return replacement
+
+
+async def set_exchange_rate_authority_mode(
+    session: AsyncSession,
+    *,
+    mode: str,
+    administrator: CommerceAdminContext,
+    now: datetime | None = None,
+) -> ExchangeRateAuthority:
+    if mode not in {MANUAL, AUTOMATIC}:
+        raise ValueError("exchange-rate authority mode must be MANUAL or AUTOMATIC")
+    actor = await require_commerce_administrator(session, administrator)
+    event_time = now or _utcnow()
+    if event_time.tzinfo is None:
+        raise ValueError("exchange-rate authority clock must be timezone-aware")
+    await session.execute(text("SELECT pg_advisory_xact_lock(723201)"))
+    authority = await session.scalar(
+        select(ExchangeRateAuthority)
+        .where(
+            ExchangeRateAuthority.base_currency == USD,
+            ExchangeRateAuthority.quote_currency == CDF,
+        )
+        .with_for_update()
+    )
+    if authority is None:
+        raise ExchangeRateAuthorityUnavailable("exchange_rate_authority_missing")
+    candidate = await session.scalar(
+        select(ExchangeRate).where(
+            ExchangeRate.base_currency == USD,
+            ExchangeRate.quote_currency == CDF,
+            ExchangeRate.authority_mode == mode,
+            ExchangeRate.ended_at.is_(None),
+        )
+    )
+    if candidate is None or (
+        mode == AUTOMATIC and not _is_fresh_automatic_rate(candidate, at=event_time)
+    ):
+        raise ExchangeRateAuthorityUnavailable("requested_mode_rate_unavailable")
+    previous_mode = authority.mode
+    if previous_mode == mode:
+        return authority
+    authority.mode = mode
+    authority.revision += 1
+    authority.updated_at = event_time
+    authority.updated_by_account_id = actor.account_id
+    await session.flush()
+    await append_operator_audit_event(
+        session,
+        category="business",
+        actor_kind="human",
+        actor_account_id=actor.account_id,
+        actor_display_name=actor.display_name,
+        effective_role=actor.role,
+        request_id=administrator.request_id,
+        action="commerce.usd_cdf_rate.authority_mode_changed",
+        target_type="exchange_rate_authority",
+        target_id=f"{USD}:{CDF}",
+        reason_code="commerce_administrator",
+        outcome="succeeded",
+        metadata={
+            "base_currency": USD,
+            "quote_currency": CDF,
+            "previous_mode": previous_mode,
+            "mode": mode,
+            "exchange_rate_id": str(candidate.exchange_rate_id),
+        },
+        source_network_fingerprint=administrator.source_network_fingerprint,
+        user_agent_fingerprint=administrator.user_agent_fingerprint,
+        occurred_at=event_time,
+    )
+    return authority
+
+
 async def get_current_cdf_quote(
     session: AsyncSession, sellable_item_id: uuid.UUID
 ) -> DerivedCdfQuote | None:
     price = await get_current_price(session, sellable_item_id, USD)
     if price is None:
         return None
-    rate = await get_current_usd_cdf_rate(session)
+    rate = await get_active_usd_cdf_rate(session)
     if rate is None:
         return DerivedCdfQuote(
             price_id=price.price_id,

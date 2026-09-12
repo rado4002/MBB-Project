@@ -23,13 +23,13 @@ class Settings(BaseSettings):
     tz: str = "Africa/Kinshasa"
 
     # ── WhatsApp Mode ─────────────────────────────────────────────────────────
-    whatsapp_mode: str = "baileys"          # baileys | official
-    whatsapp_send_enabled: bool = False     # safety gate for real outbound delivery
-    crm_send_enabled: bool = False          # safety gate for CRM external writes
-    payment_send_enabled: bool = False      # safety gate for payment provider calls
-    relance_enabled: bool = False           # safety gate for relance scheduling/sends
-    scheduled_tasks_enabled: bool = False   # safety gate for Celery beat schedules
-    m1_maps_fanout_enabled: bool = True     # safety gate for M1 MAPS task submission
+    whatsapp_mode: str = "baileys"  # baileys | official
+    whatsapp_send_enabled: bool = False  # safety gate for real outbound delivery
+    crm_send_enabled: bool = False  # safety gate for CRM external writes
+    payment_send_enabled: bool = False  # safety gate for payment provider calls
+    relance_enabled: bool = False  # safety gate for relance scheduling/sends
+    scheduled_tasks_enabled: bool = False  # safety gate for Celery beat schedules
+    m1_maps_fanout_enabled: bool = True  # safety gate for M1 MAPS task submission
 
     # ── Adapters ──────────────────────────────────────────────────────────────
     ai_adapter: str = "disabled"
@@ -97,6 +97,12 @@ class Settings(BaseSettings):
     )
     deepseek_model: str = "deepseek-flash"
     deepseek_timeout_s: int = Field(default=60, ge=1, le=120)
+
+    exchange_rate_api_key: str = Field(
+        default=_read_secret("exchange_rate_api_key", ""),
+        repr=False,
+    )
+    exchange_rate_api_timeout_s: int = Field(default=10, ge=1, le=30)
 
     # ── CRM — Airtable ────────────────────────────────────────────────────────
     airtable_api_key: str = _read_secret("airtable_api_key", "")

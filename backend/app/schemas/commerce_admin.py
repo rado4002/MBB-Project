@@ -153,9 +153,7 @@ class SellableItemUpdate(StrictCommerceModel):
 
     @field_validator("attributes", mode="before")
     @classmethod
-    def _attributes(
-        cls, value: object
-    ) -> dict[str, str | int | bool] | None:
+    def _attributes(cls, value: object) -> dict[str, str | int | bool] | None:
         return None if value is None else validate_sellable_attributes(value)
 
     @model_validator(mode="after")
@@ -218,9 +216,7 @@ class ProductMediaUpdate(StrictCommerceModel):
         default=None, min_length=1, max_length=MAX_MEDIA_ASSET_URL_LENGTH
     )
     alt_text: str | None = Field(default=None, max_length=MAX_MEDIA_ALT_TEXT_LENGTH)
-    display_order: int | None = Field(
-        default=None, ge=0, le=MAX_MEDIA_DISPLAY_ORDER
-    )
+    display_order: int | None = Field(default=None, ge=0, le=MAX_MEDIA_DISPLAY_ORDER)
     active: bool | None = None
 
     @field_validator("asset_url")
@@ -319,12 +315,35 @@ class ExchangeRateResponse(StrictCommerceModel):
     base_currency: Literal["USD"]
     quote_currency: Literal["CDF"]
     rate: Decimal
+    authority_mode: Literal["MANUAL", "AUTOMATIC"]
+    source: Literal["MBB_ADMIN", "EXCHANGE_RATE_API"]
+    fetched_at: datetime | None
+    published_at: datetime | None
+    validated_at: datetime | None
+    validation_status: Literal["ADMIN_APPROVED", "VALIDATED"]
     effective_at: datetime
     ended_at: datetime | None
 
 
 class ExchangeRateHistoryResponse(StrictCommerceModel):
     items: list[ExchangeRateResponse]
+
+
+class ExchangeRateModeSet(StrictCommerceModel):
+    mode: Literal["MANUAL", "AUTOMATIC"]
+
+
+class ExchangeRateAuthorityResponse(StrictCommerceModel):
+    model_config = ConfigDict(
+        extra="forbid", from_attributes=True, protected_namespaces=()
+    )
+
+    base_currency: Literal["USD"]
+    quote_currency: Literal["CDF"]
+    mode: Literal["MANUAL", "AUTOMATIC"]
+    revision: int
+    updated_at: datetime
+    updated_by_account_id: UUID | None
 
 
 class InventoryStatusSet(StrictCommerceModel):

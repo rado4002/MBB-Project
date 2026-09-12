@@ -89,7 +89,11 @@ def test_confirmation_message_uses_only_offer_values_and_declares_no_order():
     assert "Aucune commande ni aucun paiement n'est encore créé" in text
 
 
-def test_prepare_capability_has_no_model_price_field():
+@pytest.mark.parametrize(
+    "forbidden_field",
+    ["unit_price_cdf", "unit_price_usd", "exchange_rate", "usd_to_cdf_rate"],
+)
+def test_prepare_capability_has_no_model_price_or_rate_field(forbidden_field):
     definition = AI_CAPABILITY_REGISTRY.resolve("prepare_order_draft")
     assert definition is not None and definition.terminal_on_success is True
     assert set(definition.input_model.model_fields) == {
@@ -101,7 +105,7 @@ def test_prepare_capability_has_no_model_price_field():
             {
                 "selected_sellable_item_id": str(uuid.uuid4()),
                 "quantity": 1,
-                "unit_price_cdf": "1.00",
+                forbidden_field: "1.00",
             },
             strict=True,
         )
