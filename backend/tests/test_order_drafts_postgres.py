@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -144,7 +145,6 @@ async def _seed(factory) -> SeededJourney:
         content_type="text",
         language="french",
         whatsapp_message_id=f"ai6b-{uuid.uuid4()}",
-        created_at=now,
     )
     lead = Lead(
         lead_id=uuid.uuid4(),
@@ -241,6 +241,74 @@ async def _assert_state_counts(factory, *, orders: int = 0) -> None:
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(Order)) == orders
         assert await session.scalar(select(func.count()).select_from(Payment)) == 0
+
+
+def _block_m1_external_effects(
+    monkeypatch: pytest.MonkeyPatch,
+    factory,
+    *,
+    whatsapp_send_enabled: bool,
+) -> list[str]:
+    import app.adapters as adapters
+    import app.ai.turn as ai_turn
+    import app.database as database
+    from app.adapters.fx.exchange_rate_api import ExchangeRateAPIAdapter
+    from app.tasks import m1
+
+    external_calls: list[str] = []
+
+    def blocked(name: str):
+        def record(*_args, **_kwargs):
+            external_calls.append(name)
+            pytest.fail(f"unexpected external action: {name}")
+
+        return record
+
+    async def blocked_fx(*_args, **_kwargs):
+        external_calls.append("exchange_rate_provider")
+        pytest.fail("unexpected external action: exchange_rate_provider")
+
+    monkeypatch.setattr(database, "async_session_factory", factory)
+    monkeypatch.setattr(ai_turn, "get_ai_turn_service", blocked("provider_inference"))
+    monkeypatch.setattr(adapters, "get_crm_adapter", blocked("crm"))
+    monkeypatch.setattr(adapters, "get_inventory_adapter", blocked("inventory_adapter"))
+    monkeypatch.setattr(adapters, "get_payment_adapter", blocked("payment_provider"))
+    monkeypatch.setattr(adapters, "get_messaging_adapter", blocked("whatsapp"))
+    monkeypatch.setattr(ExchangeRateAPIAdapter, "fetch_usd_cdf", blocked_fx)
+    monkeypatch.setattr(m1.celery_app, "send_task", blocked("celery_external_effect"))
+    monkeypatch.setattr(
+        m1,
+        "settings",
+        SimpleNamespace(
+            whatsapp_send_enabled=whatsapp_send_enabled,
+            m1_maps_fanout_enabled=False,
+        ),
+    )
+    return external_calls
+
+
+async def _process_m1_confirmation(
+    *,
+    content: str,
+    sequence: int,
+) -> dict:
+    from app.tasks import m1
+
+    class TaskStub:
+        request = SimpleNamespace(retries=0)
+
+        def retry(self, **_kwargs):
+            raise AssertionError("M1 unexpectedly requested a Celery retry")
+
+    return await m1._process(
+        task=TaskStub(),
+        message_id=str(uuid.uuid4()),
+        customer_phone="+243810006001",
+        content=content,
+        content_type="text",
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        whatsapp_message_id=f"ai6d-confirmation-{sequence}-{uuid.uuid4()}",
+    )
 
 
 @pytest.mark.asyncio
@@ -372,6 +440,123 @@ async def test_customer_confirmation_creates_one_authoritative_pending_order_wit
         ]
         assert inventory is not None and inventory.status == "available"
     await _assert_state_counts(factory, orders=1)
+
+
+@pytest.mark.asyncio
+async def test_m1_exact_confirmation_creates_and_replays_one_pending_order(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    seeded = await _seed(factory)
+    prepared = await _prepare(factory, seeded)
+    async with factory() as session:
+        draft = await session.scalar(
+            select(OrderDraft).where(OrderDraft.draft_id == prepared.draft_id)
+        )
+        inventory = await session.get(InventoryRecord, seeded.inventory_id)
+        assert draft is not None and inventory is not None
+        confirmation = f"OUI {draft.confirmation_code}"
+        inventory_before = (inventory.status, inventory.updated_at)
+
+    external_calls = _block_m1_external_effects(
+        monkeypatch,
+        factory,
+        whatsapp_send_enabled=True,
+    )
+
+    first = await _process_m1_confirmation(content=confirmation, sequence=1)
+    replay = await _process_m1_confirmation(content=confirmation, sequence=2)
+
+    assert first["status"] == "order_draft_confirmed"
+    assert first["send_status"] == "skipped"
+    assert replay["status"] == "order_draft_already_confirmed"
+    assert replay["send_status"] == "skipped"
+    assert replay["order_id"] == first["order_id"]
+    assert external_calls == []
+
+    async with factory() as session:
+        stored = await session.scalar(
+            select(OrderDraft).where(OrderDraft.draft_id == prepared.draft_id)
+        )
+        orders = list((await session.scalars(select(Order))).all())
+        inventory = await session.get(InventoryRecord, seeded.inventory_id)
+        assert stored is not None and stored.status == "confirmed"
+        assert stored.order_id == uuid.UUID(first["order_id"])
+        assert len(orders) == 1
+        assert orders[0].order_id == stored.order_id
+        assert orders[0].status == "pending"
+        assert orders[0].hub_crm_synced is False
+        assert orders[0].hub_crm_order_id is None
+        assert inventory is not None
+        assert (inventory.status, inventory.updated_at) == inventory_before
+    await _assert_state_counts(factory, orders=1)
+
+
+@pytest.mark.asyncio
+async def test_m1_changed_terms_require_reconfirmation_without_order(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    seeded = await _seed(factory)
+    prepared = await _prepare(factory, seeded)
+    async with factory() as session:
+        draft = await session.scalar(
+            select(OrderDraft).where(OrderDraft.draft_id == prepared.draft_id)
+        )
+        old_price = await session.get(SellableItemPrice, seeded.price_id)
+        inventory = await session.get(InventoryRecord, seeded.inventory_id)
+        assert draft is not None and old_price is not None and inventory is not None
+        confirmation = f"OUI {draft.confirmation_code}"
+        inventory_before = (inventory.status, inventory.updated_at)
+        changed_at = datetime.now(timezone.utc)
+        old_price.ended_at = changed_at
+        session.add(
+            SellableItemPrice(
+                price_id=uuid.uuid4(),
+                sellable_item_id=seeded.sellable_item_id,
+                amount=Decimal("60.00"),
+                currency="USD",
+                effective_at=changed_at + timedelta(microseconds=1),
+                ended_at=None,
+            )
+        )
+        await session.commit()
+
+    external_calls = _block_m1_external_effects(
+        monkeypatch,
+        factory,
+        whatsapp_send_enabled=False,
+    )
+
+    result = await _process_m1_confirmation(content=confirmation, sequence=1)
+
+    assert result["status"] == "order_draft_refreshed"
+    assert result["draft_version"] == 2
+    assert result["send_status"] == "skipped"
+    assert "order_id" not in result
+    assert external_calls == []
+    async with factory() as session:
+        versions = list(
+            (
+                await session.scalars(
+                    select(OrderDraft)
+                    .where(OrderDraft.draft_id == prepared.draft_id)
+                    .order_by(OrderDraft.draft_version)
+                )
+            ).all()
+        )
+        inventory = await session.get(InventoryRecord, seeded.inventory_id)
+        assert [item.status for item in versions] == [
+            "invalidated",
+            "awaiting_confirmation",
+        ]
+        assert versions[1].unit_price_usd == Decimal("60.00")
+        assert versions[1].confirmation_code not in confirmation
+        assert inventory is not None
+        assert (inventory.status, inventory.updated_at) == inventory_before
+    await _assert_state_counts(factory)
 
 
 @pytest.mark.asyncio
