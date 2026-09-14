@@ -3,6 +3,26 @@ import { createConversationApiClient } from './conversations'
 
 afterEach(() => vi.unstubAllGlobals())
 
+describe('escalation creation client', () => {
+  it.each([201, 200])('accepts HTTP %s using the browser mutation contract', async (status) => {
+    const result = { escalation_id: 'ticket', status: 'open' }
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify(result), { status }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const body = { reason: 'Customer needs help', type: 'complex_issue' as const, priority: 'high' as const }
+    await expect(createConversationApiClient().createEscalation('conversation/id', body, 'uuid-key', 'csrf'))
+      .resolves.toEqual(result)
+    const [path, init] = fetchMock.mock.calls[0]
+    expect(path).toBe('/api/v1/operator/conversations/conversation%2Fid/escalations')
+    expect(init).toMatchObject({ method: 'POST', credentials: 'same-origin', cache: 'no-store', body: JSON.stringify(body) })
+    const headers = new Headers(init?.headers)
+    expect(headers.get('X-CSRF-Token')).toBe('csrf')
+    expect(headers.get('Idempotency-Key')).toBe('uuid-key')
+    expect(headers.get('Content-Type')).toBe('application/json')
+  })
+})
+
 describe('E1 conversation queue client', () => {
   it('serializes only supported filters on a relative same-origin no-store request', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(

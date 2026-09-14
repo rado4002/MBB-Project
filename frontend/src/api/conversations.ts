@@ -1,6 +1,8 @@
 import { requestJson } from './client'
 import type {
   ConversationFilters,
+  OperatorEscalationRequest,
+  OperatorEscalationResponse,
   OperatorConversationDetail,
   OperatorConversationQueueResponse,
   OperatorMessageHistoryResponse,
@@ -20,6 +22,13 @@ export interface ConversationQueueRequest {
 }
 
 export interface ConversationApiClient {
+  createEscalation(
+    conversationId: string,
+    body: OperatorEscalationRequest,
+    idempotencyKey: string,
+    csrfToken: string,
+    signal?: AbortSignal,
+  ): Promise<OperatorEscalationResponse>
   listConversations(request: ConversationQueueRequest): Promise<OperatorConversationQueueResponse>
   getConversation(conversationId: string, signal?: AbortSignal): Promise<OperatorConversationDetail>
   getMessages(
@@ -62,6 +71,12 @@ export function createConversationApiClient(
     `/api/v1/operator/conversations/${encodeURIComponent(conversationId)}`
 
   return {
+    createEscalation: (conversationId, body, idempotencyKey, csrfToken, signal) =>
+      requestJson<OperatorEscalationResponse>(
+        `${conversationPath(conversationId)}/escalations`,
+        { method: 'POST', body, csrfToken, idempotencyKey, signal },
+        onSessionExpired,
+      ),
     listConversations: ({ filters, cursor, signal }) => {
       const query = new URLSearchParams()
       if (filters.status) query.set('status', filters.status)

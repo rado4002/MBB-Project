@@ -24,6 +24,7 @@ import { ApiError, errorMessage } from '../../api/errors'
 import { useAuth } from '../../auth/AuthProvider'
 import { InlineAlert } from '../../components/InlineAlert'
 import { OwnershipDialog } from './OwnershipDialog'
+import { EscalationForm } from './EscalationForm'
 import {
   useConversationDetail,
   useMessageHistory,
@@ -1111,6 +1112,14 @@ export function ConversationWorkspace({
             </button>
           </div>
         )}
+        <EscalationForm
+          key={conversationId}
+          client={client}
+          conversationId={conversationId}
+          available={Boolean(detail.detail && !detail.loading && !detail.error)}
+          hasOpenEscalation={Boolean(detail.detail?.open_escalation.exists)}
+          onRefresh={refreshOwnership}
+        />
       </header>
       <div className="workspace-columns">
         <MessageTimeline

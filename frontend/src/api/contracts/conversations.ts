@@ -13,6 +13,23 @@ export const escalationStates = ['open', 'none'] as const
 export type ConversationStatus = (typeof conversationStatuses)[number]
 export type ConversationLanguage = (typeof conversationLanguages)[number]
 export type EscalationState = (typeof escalationStates)[number]
+export const escalationTypes = ['voice_note', 'complex_issue', 'high_value_lead', 'payment_issue'] as const
+export const escalationPriorities = ['low', 'medium', 'high'] as const
+
+export interface OperatorEscalationRequest {
+  reason: string
+  type: (typeof escalationTypes)[number]
+  priority: (typeof escalationPriorities)[number]
+}
+
+export interface OperatorEscalationResponse extends OperatorEscalationRequest {
+  escalation_id: string
+  conversation_id: string
+  status: 'open'
+  source: 'operator_browser'
+  created_at: string
+  created_by: { account_id: string; display_name: string }
+}
 export type MessageContentType = 'text' | 'voice_note' | 'image'
 export type MessageDirection = 'inbound' | 'outbound'
 export type MessageDeliveryState = 'accepted' | 'sent' | 'failed' | 'uncertain'

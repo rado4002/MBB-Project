@@ -206,6 +206,10 @@ h2 { font-size: 1.125rem; }
 .conversation-workspace { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); overflow: hidden; }
 .workspace-header { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: var(--space-2); padding: var(--space-2) var(--space-3); background: var(--color-surface); border-bottom: 1px solid var(--color-border); }
 .workspace-header > .button { align-self: start; }
+.escalation-form { grid-column: 1 / -1; min-width: 0; }
+.escalation-form form { max-height: 40vh; overflow-y: auto; padding: var(--space-2); }
+.escalation-form fieldset { min-width: 0; display: grid; gap: var(--space-2); }
+.escalation-form textarea { width: 100%; resize: vertical; }
 .workspace-toolbar__actions { min-width: 0; max-width: 100%; display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2); }
 .back-label--short { display: none; }
 .conversation-header__content { min-width: 0; display: grid; gap: var(--space-1); }
