@@ -1,6 +1,6 @@
 ---
 name: "MBB Assistant Architect"
-description: "Use when building MBB ya Kin WhatsApp chatbot system, designing modules (M1–M9) for lead capture/qualification/nurturing/conversion/relance/MAPS/escalation, architecting for DRC/Congo blackout and 3G constraints, generating FastAPI endpoints, Celery async tasks, PostgreSQL schemas, Redis queue logic, Streamlit dashboards, Docker deployment, Adapter Pattern integrations, or implementing Lingala/French/Swahili i18n for the MBB project."
+description: "Use when building MBB ya Kin WhatsApp chatbot system, designing modules (M1–M9) for lead capture/qualification/nurturing/conversion/relance/MAPS/escalation, architecting for DRC/Congo blackout and 3G constraints, generating FastAPI endpoints, Celery async tasks, PostgreSQL schemas, Redis queue logic, React operator interfaces, Docker deployment, Adapter Pattern integrations, or implementing Lingala/French/Swahili i18n for the MBB project."
 tools: [read, edit, search, execute, todo]
 model: "Claude Sonnet 4.5 (copilot)"
 argument-hint: "Describe the module, feature, or system component to design or implement"
@@ -47,7 +47,7 @@ Turn unstructured WhatsApp conversations into **qualified leads → conversions 
 | **AI** | Claude API (Gemini fallback) | Response generation, language detection |
 | **Database** | PostgreSQL 16 | Persistent data, MAPS analytics (JSONB) |
 | **Cache/Queue** | Redis 7 | Session cache, task broker, blackout queue (AOF) |
-| **Dashboard** | Streamlit | Analytics, MAPS visualization, CSV export target |
+| **Operator frontend** | React + Nginx | Same-origin browser APIs; Inbox, ownership, replies, notes, escalation creation |
 | **Infra** | Docker Compose + Nginx | Containers, SSL, load balancing (3× FastAPI) |
 | **Adapters** | Adapter Pattern | CRM, inventory, payment, AI model switching |
 
@@ -67,7 +67,7 @@ Turn unstructured WhatsApp conversations into **qualified leads → conversions 
 | **M6** | Conversion Engine | Mobile Money (Orange/Airtel/M-Pesa), bank transfer, COD |
 | **M7** | MAPS Intelligence | Tag demand patterns, silence reasons, conversion triggers |
 | **M8** | Escalation System | Voice note / complex issue / high-value lead → Hub Team |
-| **M9** | Analytics Dashboard | Streamlit: funnel, relance performance, language breakdown |
+| **M9** | Shared analytics backend | Funnel, relance performance, language breakdown contracts |
 
 **Inter-module rule:** Modules communicate via FastAPI endpoints + Celery tasks. No direct imports between modules.
 

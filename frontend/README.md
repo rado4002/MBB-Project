@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This application is the browser-session-based interface foundation for the first MBB read-only Inbox. It is separate from the Streamlit dashboard and communicates only with the same-origin browser-authentication API.
+This application is the supported operator frontend: Inbox, conversation history, ownership, replies, internal notes, and escalation creation through same-origin browser APIs.
 
 ## Supported HTTPS serving path (BCA-2 Slice 3)
 
@@ -14,8 +14,7 @@ Use `--build` when starting Compose after frontend changes.
 The production override serves React at `https://api.mbb.cd/` and proxies
 `/api/*` to FastAPI on the same origin. Direct application navigation and refresh
 use `index.html`; API paths, `/assets/`, and file-like misses cannot use that
-fallback. Health routes and the metrics denial remain explicit. The existing
-Streamlit service and its separate HTTPS virtual host remain present.
+fallback. Health routes and the metrics denial remain explicit.
 
 Browser auth retains its default-off gate. An authorized environment must supply
 `BROWSER_AUTH_ENABLED=true` and independent strong `BROWSER_SESSION_HMAC_SECRET`,
@@ -32,11 +31,11 @@ reply does not prove external delivery. Historical F5 scope below is not the
 current workflow inventory. See `docs/bca2-slice3-validation.md` for this slice's
 runtime evidence and limits.
 
-## Current F5 scope
+## Historical F5 scope
 
 F5 retains the F2 browser authentication foundation, F3 queue, and F4 read-only conversation workspace. It refines that existing workflow into a controlled three-region desktop layout, a two-region tablet layout with accessible contextual presentation, and a progressive mobile Inbox → Conversation → Details flow. It also preserves queue position and filters, makes history scrolling predictable, and adds focused loading, error, keyboard, and reduced-motion behavior.
 
-## Explicit exclusions
+## Historical F5 exclusions
 
 F5 includes no new API contracts, business writes, replies, assignment, ownership, escalation details or actions, search, user-selected sorting, delivery status, media viewing, AI inference, direct service or database access, or runtime HTTPS proof. Real isolated HTTPS browser validation remains F6.
 

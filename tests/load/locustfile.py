@@ -183,7 +183,7 @@ class WhatsAppUser(HttpUser):
     @tag("analytics")
     @task(1)
     def read_analytics_summary(self):
-        """Dashboard analytics read — simulates Streamlit polling."""
+        """Shared analytics API read."""
         with self.client.get(
             "/api/v1/analytics/summary",
             catch_response=True,

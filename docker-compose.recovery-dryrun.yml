@@ -96,38 +96,6 @@ services:
       retries: 3
       start_period: 40s
 
-  dashboard:
-    profiles:
-      - routing
-    build:
-      context: ./dashboard
-      dockerfile: Dockerfile
-    environment:
-      APP_ENV: ${APP_ENV:-production}
-      DEBUG: ${DEBUG:-false}
-      WHATSAPP_MODE: ${WHATSAPP_MODE:-official}
-      AI_ADAPTER: ${AI_ADAPTER:-disabled}
-      WHATSAPP_SEND_ENABLED: ${WHATSAPP_SEND_ENABLED:-false}
-      CRM_SEND_ENABLED: ${CRM_SEND_ENABLED:-false}
-      PAYMENT_SEND_ENABLED: ${PAYMENT_SEND_ENABLED:-false}
-      RELANCE_ENABLED: ${RELANCE_ENABLED:-false}
-      SCHEDULED_TASKS_ENABLED: ${SCHEDULED_TASKS_ENABLED:-false}
-      STREAMLIT_BROWSER_GATHER_USAGE_STATS: ${STREAMLIT_BROWSER_GATHER_USAGE_STATS:-false}
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: "5432"
-      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
-      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      api:
-        condition: service_healthy
-    networks:
-      - recovery_dryrun_internal
-    expose:
-      - "8501"
-
   celery_worker:
     profiles:
       - worker
@@ -201,8 +169,6 @@ services:
     depends_on:
       api:
         condition: service_healthy
-      dashboard:
-        condition: service_started
     networks:
       - recovery_dryrun_internal
     ports:

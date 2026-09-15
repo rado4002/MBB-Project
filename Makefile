@@ -45,7 +45,7 @@ setup:
 up:
 	$(DC_DEV) up -d
 	@echo "Dev environment up. API: http://localhost/api/docs"
-	@echo "Dashboard: http://localhost/dashboard/"
+	@echo "Operator UI (HTTPS production origin): https://api.mbb.cd/"
 	@echo "Grafana:   http://localhost:3001/"
 
 down:

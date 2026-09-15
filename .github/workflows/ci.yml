@@ -209,8 +209,8 @@ jobs:
       - name: Build baileys image
         run: docker build -t mbb-baileys:ci ./baileys
 
-      - name: Build dashboard image
-        run: docker build -t mbb-dashboard:ci ./dashboard
+      - name: Build React/Nginx image
+        run: docker build -f nginx/Dockerfile -t mbb-nginx:ci .
 
       - name: Verify Docker Compose config
         run: |

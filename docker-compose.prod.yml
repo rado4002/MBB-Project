@@ -89,18 +89,6 @@ services:
           cpus: "0.5"
           memory: 256M
 
-  dashboard:
-    environment:
-      <<: *production-safety
-      WHATSAPP_MODE: official
-      APP_ENV: production
-      DEBUG: "false"
-    deploy:
-      resources:
-        limits:
-          cpus: "0.5"
-          memory: 512M
-
   nginx:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro

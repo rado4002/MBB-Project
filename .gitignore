@@ -105,11 +105,6 @@ package-lock.json
 frontend/*.tsbuildinfo
 yarn.lock
 
-# ========== STREAMLIT DASHBOARD ==========
-.streamlit/
-streamlit_cache/
-.streamlit/secrets.toml
-
 # ========== JUPYTER NOTEBOOKS ==========
 .ipynb_checkpoints
 *.ipynb_checkpoints

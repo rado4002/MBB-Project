@@ -128,29 +128,6 @@ services:
       - postgres_user
       - postgres_password
 
-  # ── Dashboard Layer ──────────────────────────────────────────────────────────
-
-  dashboard:
-    build:
-      context: ./dashboard
-      dockerfile: Dockerfile
-    env_file: .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      api:
-        condition: service_healthy
-    networks:
-      - mbb_internal
-    restart: unless-stopped
-    expose:
-      - "8501"
-    secrets:
-      - postgres_db
-      - postgres_user
-      - postgres_password
-      - dashboard_api_token
-
   # ── Reverse Proxy ────────────────────────────────────────────────────────────
 
   nginx:
@@ -168,13 +145,9 @@ services:
     depends_on:
       api:
         condition: service_healthy
-      dashboard:
-        condition: service_healthy
     networks:
       - mbb_internal
     restart: unless-stopped
-    secrets:
-      - dashboard_basic_auth
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/nginx-health"]
       interval: 30s
@@ -275,10 +248,6 @@ secrets:
     file: ./secrets/whatsapp_verify_token.txt
   whatsapp_api_secret:
     file: ./secrets/whatsapp_api_secret.txt
-  dashboard_api_token:
-    file: ./secrets/dashboard_api_token.txt
-  dashboard_basic_auth:
-    file: ./secrets/dashboard_basic_auth.txt
   orange_money_key:
     file: ./secrets/orange_money_key.txt
   airtel_money_key:

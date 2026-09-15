@@ -19,9 +19,9 @@ Step 23A is complete. The protected stabilization baseline is the annotated tag 
 
 - **Baileys is the validated local WhatsApp transport.** Controlled live inbound, session restoration, international phone handling, persistence, and exactly-one outbound fallback delivery passed for the protected local scope.
 - Baileys uses an unofficial WhatsApp transport. The local result is not permanent production approval and does not establish public-service suitability.
-- **PostgreSQL, Redis, FastAPI, the Celery worker, the Streamlit dashboard, and Nginx** passed isolated local production-like startup. Authentication, routing, healthchecks, restart recovery, and database persistence passed.
+- **Historical stabilization evidence:** PostgreSQL, Redis, FastAPI, the Celery worker, the then-present Streamlit dashboard, and Nginx passed isolated local production-like startup. Authentication, routing, healthchecks, restart recovery, and database persistence passed.
 - The worker consumes `default`, `relance`, `maps`, `escalation`, and `conversion`. PostgreSQL is not published to the host by the production configuration.
-- Dashboard access requires Nginx Basic Auth and an explicitly provisioned dashboard API token. The dashboard does not hold the JWT signing secret and does not auto-mint an administrator JWT.
+- Historical dashboard authentication used Nginx Basic Auth and a provisioned API token. The retired application did not hold the JWT signing secret or auto-mint administrator JWTs; the React operator UI uses browser sessions.
 - The application is provider-neutral and currently disconnected from external AI APIs. `AI_ADAPTER=disabled` selects the local fallback path; Claude, OpenAI, Gemini, and other external AI providers are not connected.
 - Monitoring, backup, Celery Beat, and Baileys are outside the default production scope. External AI, WhatsApp sending, CRM writes, payments, relance, scheduled tasks, and MAPS fanout remain disabled by default.
 
@@ -73,7 +73,7 @@ Known non-blocking constraint: `scripts/init_db.sql` currently assumes the datab
 | **Database** | PostgreSQL | Leads, orders, sessions |
 | **Cache/Queues** | Redis | Sessions, message queues |
 | **Adapters** | Python ABC | Pluggable integrations |
-| **Analytics** | Streamlit | Implemented funnel, relance, and language views |
+| **Operator frontend** | React + Nginx | Inbox, ownership, replies, notes, escalation creation |
 | **Container** | Docker & Docker Compose | Deployment |
 
 ---
@@ -164,8 +164,7 @@ First run takes 3–5 minutes (pulling images + building). Subsequent starts tak
 | **celery_worker** | — | 4 async workers, 5 task queues |
 | **celery_beat** | — | RedBeat periodic scheduler; keep stopped/exited unless explicitly authorized |
 | **baileys** | `localhost:3000` | Validated local WhatsApp bridge; unofficial transport, not production-approved |
-| **dashboard** | Internal `:8501` | Streamlit analytics (behind nginx) |
-| **nginx** | `localhost:80` | Reverse proxy (routes to api + dashboard) |
+| **nginx** | `localhost:80` | API reverse proxy; the HTTPS configuration also serves React |
 | **prometheus** | `localhost:9090` | Metrics collection |
 | **grafana** | `localhost:3001` | Metrics dashboards |
 | **loki** | Internal `:3100` | Log aggregation |
@@ -262,7 +261,7 @@ make down-prod     # Stop production
 | **Baileys Health** | http://localhost:3000/health | None |
 | **API Docs** (Swagger) | http://localhost/api/docs | None |
 | **API Health** | http://localhost/health | None |
-| **Streamlit Dashboard** | http://localhost/dashboard/ | Nginx Basic Auth plus explicitly provisioned API token |
+| **Operator UI** | https://api.mbb.cd/ | Secure browser session through same-origin API |
 | **Grafana** | http://localhost:3001 | admin / (see `secrets/grafana_admin_password.txt`) |
 | **Prometheus** | http://localhost:9090 | None |
 | **PostgreSQL** | `localhost:5433` | user/pass from `secrets/` |
@@ -315,7 +314,7 @@ python tests/test_resilience.py
 ```
 
 > **Note**: `test_blackout_simulation.py` and `test_resilience.py` require Docker services running (PostgreSQL on `:5433`, Redis on `:6379`). `test_project_setup.py` and `test_schema_api_validation.py` work offline.
-- **Dashboard**: http://localhost/dashboard/
+- **Operator UI**: https://api.mbb.cd/
 - **Grafana**: http://localhost:3001/ (dev mode)
 - **Health Check**: http://localhost/health
 
@@ -364,11 +363,7 @@ mbb-ya-kin/
 │           ├── escalation.py      # (Sprint 1.D)
 │           └── conversion.py      # (Sprint 1.C)
 │
-├── dashboard/                      # 📊 Streamlit Dashboard (M9)
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── app/
-│       └── main.py                # 3 roles: admin, hub, lab
+├── frontend/                      # React operator frontend (built into Nginx)
 │
 ├── baileys/                        # 📱 WhatsApp Bridge (Dev Mode)
 │   ├── Dockerfile
@@ -380,7 +375,7 @@ mbb-ya-kin/
 │   ├── nginx.conf                 # Base config (gzip, rate limits, upstreams)
 │   └── conf.d/
 │       ├── mbb.conf               # HTTP config (dev)
-│       └── mbb.ssl.conf           # HTTPS + HTTP Basic Auth (prod)
+│       └── mbb.ssl.conf           # HTTPS React + API (prod)
 │
 ├── redis/
 │   └── redis.conf                 # AOF persistence (blackout recovery)
@@ -532,15 +527,10 @@ Captures & analyzes:
 - Silence reasons ("yaka te", "arrête")
 - Conversion triggers
 
-### 8. **Analytics Dashboard**
-Implemented Streamlit views:
-- Funnel (Leads → Qualified → Converted)
-- Relance performance
-- Language breakdown
-- CSV downloads
-
-The response-time page is a placeholder pending metrics integration. Google
-Sheets export is not implemented.
+### 8. **Analytics backend**
+Shared analytics contracts and data remain in `backend/app/modules/m9_dashboard/`.
+The retired analytics UI is not a React capability claim. The supported operator
+workflow is documented in [frontend/README.md](frontend/README.md).
 
 ---
 
@@ -585,8 +575,8 @@ Outbound response persisted
     ↓ (Baileys adapter send-back with idempotency boundary)
 Exactly one fallback response delivered
     ↓
-Streamlit Dashboard (Conversation Mirror page)
-    ↓ (Auto-refresh shows new conversations)
+React Inbox (same-origin browser API)
+    ↓ (Open conversation)
 User sees conversation in UI
 ```
 
@@ -665,8 +655,8 @@ docker logs bot-celery_worker-1 | grep "m1_process_inbound_task"
 # 6. Verify message was saved to database
 docker exec bot-postgres-1 psql -U mbb -d mbb -c "SELECT * FROM mbb.messages ORDER BY created_at DESC LIMIT 5;"
 
-# 7. Check Streamlit dashboard shows the conversation
-open http://localhost/dashboard/
+# 7. Open the operator Inbox in the authorized HTTPS environment
+open https://api.mbb.cd/inbox
 
 # Expected output:
 # - QR dashboard shows "✅ WhatsApp Connected!" with your JID
@@ -788,7 +778,7 @@ docker exec bot tail -f /app/logs/latency_report.json
 | `apt-get` fails during build | Flaky network — retry the build, or use `--no-cache` flag |
 | API health returns unhealthy | Check postgres & redis are healthy first: `docker compose ... ps` |
 | Celery tasks fail with ImportError | Expected — module services (M2–M9) are not built yet (Phase 1 work) |
-| Dashboard not loading | Access via nginx: `http://localhost/dashboard/` (trailing slash required) |
+| Operator UI not loading | Build Nginx with the frontend assets; use the configured HTTPS origin and browser auth settings in `frontend/README.md` |
 | Docker pull fails (EOF) | Network instability — retry: `docker pull <image>` then rebuild |
 
 ---

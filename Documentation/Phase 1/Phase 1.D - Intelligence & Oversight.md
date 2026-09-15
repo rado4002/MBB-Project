@@ -1,3 +1,5 @@
+> Historical design/planning record. Its Streamlit architecture and run instructions are superseded by BCA-2 Slice 4. Do not use them to configure the current runtime. See [current frontend architecture](/frontend/README.md). Original content is retained below as historical context.
+
 # Phase 1.D — Intelligence & Oversight
 
 **MBB ya Kin — Sub-Phase Specification**

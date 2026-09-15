@@ -39,14 +39,6 @@ services:
       WHATSAPP_MODE: baileys
       WHATSAPP_SEND_ENABLED: "false"
 
-  dashboard:
-    volumes:
-      - ./dashboard:/app
-    environment:
-      WHATSAPP_MODE: baileys
-    ports:
-      - "8501:8501"
-
   # ── Baileys Bridge (dev-only WhatsApp connection) ────────────────────────────
 
   baileys:

@@ -250,8 +250,8 @@ from app.middleware import MaintenanceModeMiddleware, RequestTracingMiddleware  
 app.add_middleware(MaintenanceModeMiddleware)
 app.add_middleware(RequestTracingMiddleware)
 
-# CORS — internal VPS only (Streamlit dashboard on same host)
-_cors_origins = ["http://localhost:8501", "http://dashboard:8501"]
+# CORS — only the explicitly configured browser origin.
+_cors_origins = []
 if settings.browser_allowed_origin:
     _cors_origins.append(settings.browser_allowed_origin)
 

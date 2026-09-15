@@ -18,7 +18,6 @@ settings = get_settings()
 # ── JWT ───────────────────────────────────────────────────────────────────────
 _ALGORITHM = settings.jwt_algorithm
 _ISSUER_INTERNAL = "celery-mbb"
-_ISSUER_DASHBOARD = "dashboard-mbb"
 
 
 def create_access_token(subject: str, role: str, issuer: str = _ISSUER_INTERNAL) -> str:

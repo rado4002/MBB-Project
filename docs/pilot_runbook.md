@@ -25,10 +25,10 @@ Complete all items before sending the first pilot message.
 
 ### 1.1 Infrastructure
 - [ ] VPS provisioned: 4 vCPU, 16 GB RAM, 100 GB SSD (Ubuntu 22.04 LTS)
-- [ ] Domain DNS configured: `api.mbb.cd → VPS IP`, `dashboard.mbb.cd → VPS IP`
+- [ ] Domain DNS configured: `api.mbb.cd → VPS IP`
 - [ ] SSL certificate obtained (Let's Encrypt via Certbot)
 - [ ] Docker Engine + Docker Compose v2 installed
-- [ ] Firewall: ports 80, 443 open; 8000/8501/3000 closed externally
+- [ ] Firewall: ports 80, 443 open; 8000/3000 closed externally
 
 ### 1.2 Secrets
 - [ ] All 12 secret files written to `/run/secrets/` on VPS:
@@ -53,7 +53,7 @@ Complete all items before sending the first pilot message.
 - [ ] WhatsApp webhook registered in Meta Dashboard → `https://api.mbb.cd/api/v1/messages/webhook`
 - [ ] Webhook verification test passed (Meta sends GET, API returns challenge)
 - [ ] Test message sent end-to-end: WhatsApp → Baileys/Official → FastAPI → Celery → DB
-- [ ] Dashboard accessible: `https://dashboard.mbb.cd` (admin login works)
+- [ ] React operator UI accessible: `https://api.mbb.cd/` (browser session login works)
 
 ### 1.5 Monitoring
 - [ ] Grafana accessible: `https://grafana.mbb.cd`
