@@ -58,7 +58,7 @@ from app.schemas.common import (
 )
 from app.schemas.messages import InboundMessageRequest, QueuedMessageResponse
 from app.schemas.leads import LeadCreate, LeadScoreUpdate
-from app.schemas.orders import OrderCreate, OrderLineItem
+from app.schemas.orders import OrderResponse, OrderLineItem
 from app.schemas.payments import PaymentCallback
 from app.schemas.relances import RelanceCreate
 from app.schemas.maps import MapsTagCreate
@@ -384,13 +384,13 @@ for f in CORE_LEAD_FIELDS:
         fail(n, "LeadCreate", f"missing field: {f}")
 ok(n, "LeadCreate ↔ Lead", f"core fields aligned")
 
-# OrderCreate should map to Order model
-order_schema_fields = set(OrderCreate.model_fields.keys())
+# OrderResponse should map to Order model
+order_schema_fields = set(OrderResponse.model_fields.keys())
 CORE_ORDER_FIELDS = {"lead_id", "items", "delivery_zone"}
 for f in CORE_ORDER_FIELDS:
     if f not in order_schema_fields:
-        fail(n, "OrderCreate", f"missing field: {f}")
-ok(n, "OrderCreate ↔ Order", f"core fields aligned")
+        fail(n, "OrderResponse", f"missing field: {f}")
+ok(n, "OrderResponse ↔ Order", f"core fields aligned")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -459,7 +459,6 @@ LLD_CORE_ENDPOINTS = [
     ("PUT",  "/api/v1/relances/{relance_id}/delivered"),   # impl uses past-tense
     ("PUT",  "/api/v1/relances/{relance_id}/response"),
     # EP-11 / EP-12 / EP-13
-    ("POST", "/api/v1/orders"),
     ("GET",  "/api/v1/orders/{order_id}"),
     ("PUT",  "/api/v1/orders/{order_id}/status"),
     # EP-14 — HMAC webhook; order ref is in body, not path

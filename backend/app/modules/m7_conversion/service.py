@@ -2,7 +2,6 @@
 app/modules/m7_conversion/service.py — Core M7 Conversion Engine.
 
 Entry points:
-  create_order()        — Create a new order from conversation context
   initiate_payment()    — Trigger Mobile Money payment (called by Celery task)
   process_callback()    — Handle payment callback (called by Celery task)
   update_order_status() — Advance order through state machine
@@ -17,7 +16,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from decimal import Decimal
 from typing import Any
 
 import structlog
@@ -27,7 +25,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import AsyncSessionLocal
 from app.models.order import Order
 from app.models.payment import Payment
-from app.schemas.common import PaymentMethod
 
 log = structlog.get_logger(__name__)
 
@@ -43,99 +40,6 @@ _VALID_TRANSITIONS: dict[str, set[str]] = {
     "delivered": set(),        # Terminal state
     "cancelled": set(),        # Terminal state
 }
-
-# Payment methods that require a Mobile Money adapter call
-_MOBILE_MONEY_METHODS = {
-    PaymentMethod.orange_money,
-    PaymentMethod.airtel_money,
-    PaymentMethod.mpesa,
-}
-
-
-# ── Order creation ────────────────────────────────────────────────────────────
-
-async def create_order(
-    session: AsyncSession,
-    *,
-    lead_id: uuid.UUID,
-    customer_phone: str,
-    items: list[dict[str, Any]],
-    delivery_zone: str,
-    payment_method: PaymentMethod,
-    delivery_method: str = "moto_taxi",
-    idempotency_key: str | None = None,
-) -> Order:
-    """
-    Create a new order from conversation context.
-
-    Idempotent: if idempotency_key is provided and order exists, returns existing.
-
-    Args:
-        session:          Async DB session
-        lead_id:          UUID of the qualifying lead
-        customer_phone:   Customer phone number (PK in customers table)
-        items:            List of {product_id, quantity, unit_price_cdf}
-        delivery_zone:    Delivery zone / commune
-        payment_method:   How the customer wants to pay
-        delivery_method:  "moto_taxi" | "spot_pickup"
-        idempotency_key:  Optional client key for deduplication
-
-    Returns:
-        Newly created (or existing) Order instance
-    """
-    total_amount = Decimal(
-        sum(i["unit_price_cdf"] * i["quantity"] for i in items)
-    )
-
-    # Determine payment_type for DB check constraint
-    if payment_method in _MOBILE_MONEY_METHODS:
-        payment_type = "mobile_money"
-    elif payment_method == PaymentMethod.bank_transfer:
-        payment_type = "bank_transfer"
-    else:
-        payment_type = "cod"
-
-    order = Order(
-        order_id=uuid.uuid4(),
-        lead_id=lead_id,
-        customer_id=customer_phone,
-        items=items,
-        total_amount=total_amount,
-        currency="CDF",
-        payment_type=payment_type,
-        delivery_zone=delivery_zone,
-        delivery_method=delivery_method,
-        status="pending",
-        hub_crm_synced=False,
-        club_points_credited=0,
-    )
-    session.add(order)
-
-    # Create a pending Payment record
-    payment = Payment(
-        payment_id=uuid.uuid4(),
-        order_id=order.order_id,
-        method=payment_method.value,
-        amount=total_amount,
-        currency="CDF",
-        status="pending",
-    )
-    session.add(payment)
-
-    await session.commit()
-    await session.refresh(order)
-
-    log.info(
-        "m7.order.created",
-        order_id=str(order.order_id),
-        customer=customer_phone,
-        total=float(total_amount),
-        method=payment_method.value,
-    )
-    return order
-
-
-# ── State machine ─────────────────────────────────────────────────────────────
 
 class InvalidOrderTransition(ValueError):
     """Raised when a state transition is not permitted by the state machine."""

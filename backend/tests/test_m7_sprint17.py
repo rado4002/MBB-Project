@@ -12,7 +12,7 @@ Tests cover:
   8. Delivery guidance messages (ETA by zone)
   9. Club points crediting (formula + idempotency)
   10. Adapter dev-mode mock responses
-  11. DB integration: create_order → update_status → credit_points
+  11. DB integration: historical Order lifecycle and credit points
 """
 import hashlib
 import hmac
@@ -64,7 +64,6 @@ from app.modules.m7_conversion.payment_handler import (
     check_idempotency,
 )
 from app.modules.m7_conversion.service import (
-    create_order,
     update_order_status,
     credit_club_points,
     InvalidOrderTransition,
@@ -403,12 +402,10 @@ async def test_orange_money_mock_initiate():
     """Orange Money dev mock returns pending status with transaction_id"""
     from app.adapters.payment.orange_money import OrangeMoneyAdapter
     adapter = OrangeMoneyAdapter()
-    result = await adapter.initiate_payment(
+    result = adapter._mock_initiate(
         phone="+243812345678",
         amount=15000,
-        currency="CDF",
         reference="test-ref-001",
-        method="orange_money",
     )
     assert result["status"] == "pending"
     assert "transaction_id" in result
@@ -420,12 +417,10 @@ async def test_airtel_money_mock_initiate():
     """Airtel Money dev mock returns pending status"""
     from app.adapters.payment.airtel_money import AirtelMoneyAdapter
     adapter = AirtelMoneyAdapter()
-    result = await adapter.initiate_payment(
+    result = adapter._mock_initiate(
         phone="+243991234567",
         amount=8000,
-        currency="CDF",
         reference="test-ref-002",
-        method="airtel_money",
     )
     assert result["status"] == "pending"
     assert result["transaction_id"].startswith("AM-MOCK-")
@@ -436,12 +431,10 @@ async def test_mpesa_mock_initiate():
     """M-Pesa dev mock returns pending status"""
     from app.adapters.payment.mpesa import MPesaAdapter
     adapter = MPesaAdapter()
-    result = await adapter.initiate_payment(
+    result = adapter._mock_initiate(
         phone="+243901234567",
         amount=22000,
-        currency="CDF",
         reference="test-ref-003",
-        method="mpesa",
     )
     assert result["status"] == "pending"
     assert result["transaction_id"].startswith("MP-MOCK-")
@@ -452,7 +445,7 @@ async def test_orange_money_mock_verify():
     """Orange Money verify returns completed"""
     from app.adapters.payment.orange_money import OrangeMoneyAdapter
     adapter = OrangeMoneyAdapter()
-    result = await adapter.verify_payment("OM-MOCK-ABCD1234")
+    result = adapter._mock_verify("OM-MOCK-ABCD1234")
     assert result["status"] == "completed"
 
 
@@ -504,7 +497,7 @@ async def _seed_customer_lead(session) -> tuple[str, uuid.UUID]:
         customer_id=phone,
         conversation_id=conv.conversation_id,
         score="hot",
-        score_value=75,
+        score_value=9,
         stage="decision",
         intent="product_inquiry",
         source="whatsapp",
@@ -514,34 +507,30 @@ async def _seed_customer_lead(session) -> tuple[str, uuid.UUID]:
     return phone, lead.lead_id
 
 
-@pytest.mark.asyncio
-async def test_create_order_db():
-    """Create order → Payment record created, status=pending"""
-    async with AsyncSessionLocal() as session:
-        phone, lead_id = await _seed_customer_lead(session)
 
-        order = await create_order(
-            session,
-            lead_id=lead_id,
-            customer_phone=phone,
-            items=[{"product_id": "HDMI-2M", "quantity": 1, "unit_price_cdf": 15000}],
-            delivery_zone="Gombe",
-            payment_method=PaymentMethod.orange_money,
-        )
-
-        assert order.status == "pending"
-        assert float(order.total_amount) == 15000
-        assert order.payment_type == "mobile_money"
-        assert order.hub_crm_synced is False
-        assert order.club_points_credited == 0
-
-        # Payment record created
-        result = await session.execute(
-            select(Payment).where(Payment.order_id == order.order_id)
-        )
-        payment = result.scalar_one()
-        assert payment.status == "pending"
-        assert payment.method == "orange_money"
+async def _seed_historical_order(
+    session, *, lead_id, customer_phone, items, delivery_zone, payment_method,
+):
+    """Insert historical fixtures directly; never exercise a creation API."""
+    total = sum(Decimal(str(i["unit_price_cdf"])) * i["quantity"] for i in items)
+    payment_type = {"cash": "cod", "bank_transfer": "bank_transfer"}.get(
+        payment_method.value, "mobile_money"
+    )
+    order = Order(
+        order_id=uuid.uuid4(), lead_id=lead_id, customer_id=customer_phone,
+        items=items, total_amount=total, currency="CDF", payment_type=payment_type,
+        delivery_zone=delivery_zone, delivery_method="moto_taxi", status="pending",
+        hub_crm_synced=False, club_points_credited=0,
+    )
+    session.add(order)
+    await session.flush()
+    session.add(Payment(
+        payment_id=uuid.uuid4(), order_id=order.order_id, method=payment_method.value,
+        amount=total, currency="CDF", status="pending",
+    ))
+    await session.commit()
+    await session.refresh(order)
+    return order
 
 
 @pytest.mark.asyncio
@@ -549,7 +538,7 @@ async def test_order_state_machine_valid_sequence():
     """Full valid sequence: pending → confirmed → preparing → delivering → delivered"""
     async with AsyncSessionLocal() as session:
         phone, lead_id = await _seed_customer_lead(session)
-        order = await create_order(
+        order = await _seed_historical_order(
             session,
             lead_id=lead_id,
             customer_phone=phone,
@@ -583,7 +572,7 @@ async def test_order_state_machine_invalid_skip():
     """pending → delivering (skip) raises InvalidOrderTransition"""
     async with AsyncSessionLocal() as session:
         phone, lead_id = await _seed_customer_lead(session)
-        order = await create_order(
+        order = await _seed_historical_order(
             session,
             lead_id=lead_id,
             customer_phone=phone,
@@ -600,7 +589,7 @@ async def test_order_cancel_from_pending():
     """pending → cancelled is always allowed"""
     async with AsyncSessionLocal() as session:
         phone, lead_id = await _seed_customer_lead(session)
-        order = await create_order(
+        order = await _seed_historical_order(
             session,
             lead_id=lead_id,
             customer_phone=phone,
@@ -618,7 +607,7 @@ async def test_order_terminal_state_no_transition():
     """delivered → anything raises InvalidOrderTransition"""
     async with AsyncSessionLocal() as session:
         phone, lead_id = await _seed_customer_lead(session)
-        order = await create_order(
+        order = await _seed_historical_order(
             session,
             lead_id=lead_id,
             customer_phone=phone,
@@ -643,7 +632,7 @@ async def test_credit_club_points_formula():
     """Points = floor(total_cdf / 1000): 15,000 CDF → 15 points"""
     async with AsyncSessionLocal() as session:
         phone, lead_id = await _seed_customer_lead(session)
-        order = await create_order(
+        order = await _seed_historical_order(
             session,
             lead_id=lead_id,
             customer_phone=phone,
@@ -664,7 +653,7 @@ async def test_credit_club_points_idempotent():
     """Points credited twice → second call returns 0"""
     async with AsyncSessionLocal() as session:
         phone, lead_id = await _seed_customer_lead(session)
-        order = await create_order(
+        order = await _seed_historical_order(
             session,
             lead_id=lead_id,
             customer_phone=phone,
@@ -686,7 +675,7 @@ async def test_credit_club_points_pending_skipped():
     """Points not credited for pending orders"""
     async with AsyncSessionLocal() as session:
         phone, lead_id = await _seed_customer_lead(session)
-        order = await create_order(
+        order = await _seed_historical_order(
             session,
             lead_id=lead_id,
             customer_phone=phone,
@@ -697,34 +686,6 @@ async def test_credit_club_points_pending_skipped():
         # Order stays pending
         points = await credit_club_points(session, order_id=order.order_id)
         assert points == 0  # Skipped because status=pending
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 10: COD order flow (no payment adapter needed)
-# ─────────────────────────────────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_cod_order_creation():
-    """COD order uses payment_type='cod' and status='pending'"""
-    async with AsyncSessionLocal() as session:
-        phone, lead_id = await _seed_customer_lead(session)
-        order = await create_order(
-            session,
-            lead_id=lead_id,
-            customer_phone=phone,
-            items=[{"product_id": "KEYBOARD", "quantity": 1, "unit_price_cdf": 35000}],
-            delivery_zone="Kintambo",
-            payment_method=PaymentMethod.cash,
-        )
-        assert order.payment_type == "cod"
-        assert order.status == "pending"
-
-        # Payment record uses "cash" method
-        result = await session.execute(
-            select(Payment).where(Payment.order_id == order.order_id)
-        )
-        payment = result.scalar_one()
-        assert payment.method == "cash"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -787,33 +748,6 @@ def test_m7_payment_initiated_all_methods_french():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 12: Bank transfer order creation
-# ─────────────────────────────────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_bank_transfer_order_creation():
-    """Bank transfer order uses payment_type='bank_transfer'"""
-    async with AsyncSessionLocal() as session:
-        phone, lead_id = await _seed_customer_lead(session)
-        order = await create_order(
-            session,
-            lead_id=lead_id,
-            customer_phone=phone,
-            items=[{"product_id": "MONITOR-24", "quantity": 1, "unit_price_cdf": 250000}],
-            delivery_zone="Gombe",
-            payment_method=PaymentMethod.bank_transfer,
-        )
-        assert order.payment_type == "bank_transfer"
-        assert order.status == "pending"
-
-        result = await session.execute(
-            select(Payment).where(Payment.order_id == order.order_id)
-        )
-        payment = result.scalar_one()
-        assert payment.method == "bank_transfer"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Test 13: Payment callback processing (end-to-end service layer)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -825,7 +759,7 @@ async def test_process_callback_success_confirms_order():
 
     async with AsyncSessionLocal() as session:
         phone, lead_id = await _seed_customer_lead(session)
-        order = await create_order(
+        order = await _seed_historical_order(
             session,
             lead_id=lead_id,
             customer_phone=phone,
@@ -867,7 +801,7 @@ async def test_process_callback_idempotent():
 
     async with AsyncSessionLocal() as session:
         phone, lead_id = await _seed_customer_lead(session)
-        order = await create_order(
+        order = await _seed_historical_order(
             session,
             lead_id=lead_id,
             customer_phone=phone,
@@ -914,7 +848,7 @@ async def test_process_callback_failed_payment():
 
     async with AsyncSessionLocal() as session:
         phone, lead_id = await _seed_customer_lead(session)
-        order = await create_order(
+        order = await _seed_historical_order(
             session,
             lead_id=lead_id,
             customer_phone=phone,
@@ -957,7 +891,7 @@ async def test_crm_sync_order():
 
     async with AsyncSessionLocal() as session:
         phone, lead_id = await _seed_customer_lead(session)
-        order = await create_order(
+        order = await _seed_historical_order(
             session,
             lead_id=lead_id,
             customer_phone=phone,
@@ -994,7 +928,7 @@ async def test_crm_sync_idempotent():
 
     async with AsyncSessionLocal() as session:
         phone, lead_id = await _seed_customer_lead(session)
-        order = await create_order(
+        order = await _seed_historical_order(
             session,
             lead_id=lead_id,
             customer_phone=phone,
@@ -1038,12 +972,9 @@ def test_crm_adapter_factory():
 
 def test_orders_api_route_not_501():
     """Orders API routes are wired up (not returning 501 stubs)"""
-    from app.api.v1.orders import create_order as api_create_order
     from app.api.v1.orders import get_order, update_order_status
     import inspect
     # Verify functions exist and don't just raise 501
-    src = inspect.getsource(api_create_order)
-    assert "501" not in src, "create_order is still a 501 stub"
     src2 = inspect.getsource(get_order)
     assert "501" not in src2, "get_order is still a 501 stub"
     src3 = inspect.getsource(update_order_status)

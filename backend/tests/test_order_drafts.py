@@ -124,3 +124,27 @@ def test_order_draft_domain_uses_no_payment_inventory_or_external_call():
     ):
         assert forbidden not in source
     assert "Order(" in source
+
+
+def test_only_confirmed_draft_domain_constructs_orders():
+    import ast
+    from pathlib import Path
+    import app.modules.m7_conversion.service as service
+    import app.schemas.orders as schemas
+    from app.main import app
+
+    assert not hasattr(service, "create_order")
+    assert not hasattr(schemas, "OrderCreate")
+    contract = app.openapi()
+    assert "/api/v1/orders" not in contract["paths"]
+    assert "OrderCreate" not in contract["components"]["schemas"]
+    assert "get" in contract["paths"]["/api/v1/orders/{order_id}"]
+    assert "put" in contract["paths"]["/api/v1/orders/{order_id}/status"]
+    constructors = []
+    root = Path(__file__).resolve().parents[1] / "app"
+    for path in root.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id == "Order":
+                    constructors.append(path.relative_to(root).as_posix())
+    assert constructors == ["modules/m7_conversion/order_drafts.py"]

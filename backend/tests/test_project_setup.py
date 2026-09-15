@@ -40,7 +40,7 @@ try:
     from app.schemas.conversations import ConversationContextUpdate
     from app.schemas.leads import LeadCreate
     from app.schemas.relances import RelanceCreate
-    from app.schemas.orders import OrderCreate
+    from app.schemas.orders import OrderResponse
     from app.schemas.payments import PaymentCallback
     from app.schemas.maps import MapsTagCreate
     from app.schemas.customers import OptOutRequest
@@ -229,7 +229,7 @@ try:
         "/api/v1/messages/send",
         "/api/v1/conversations/{conversation_id}",
         "/api/v1/leads", "/api/v1/relances",
-        "/api/v1/orders", "/api/v1/payments/callback",
+        "/api/v1/orders/{order_id}", "/api/v1/payments/callback",
         "/api/v1/maps/tags", "/api/v1/customers/{phone_number:path}/opt-out",
         "/api/v1/admin/system-health",
     ]

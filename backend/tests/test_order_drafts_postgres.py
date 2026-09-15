@@ -222,7 +222,8 @@ async def _reply(
                 content_type="text",
                 language="french",
                 whatsapp_message_id=f"ai6b-{inbound_id}",
-                created_at=now,
+                # Match M1's database-assigned receipt time. Mixing the host
+                # clock with PostgreSQL NOW() can reorder adjacent messages.
             )
         )
         await session.flush()
@@ -314,9 +315,34 @@ async def _process_m1_confirmation(
 @pytest.mark.asyncio
 async def test_real_ai_turn_terminal_draft_uses_authoritative_offer(
     engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     factory = async_sessionmaker(engine, expire_on_commit=False)
     seeded = await _seed(factory)
+
+    from app.modules.product_offer.service import get_product_offer
+
+    external_calls = _block_m1_external_effects(
+        monkeypatch, factory, whatsapp_send_enabled=False,
+    )
+    async with factory() as session:
+        lead = await session.get(Lead, seeded.lead_id)
+        assert lead is not None and lead.qualified_at is not None
+        assert lead.stage == "decision" and lead.score == "hot"
+        offer = await get_product_offer(session, seeded.sellable_item_id)
+        inventory = await session.get(InventoryRecord, seeded.inventory_id)
+        assert offer is not None and inventory is not None
+        assert offer.product_name == "MBB Test Air Fryer"
+        assert offer.sellable_item_id == seeded.sellable_item_id
+        assert offer.price_id == seeded.price_id
+        assert offer.current_usd_price == Decimal("55.00")
+        assert offer.inventory_status == "available" and offer.is_sellable_now
+        assert offer.offer_status == "sellable_now"
+        quote = offer.derived_cdf_quote
+        assert quote is not None
+        assert quote.usd_to_cdf_rate == Decimal("2800")
+        assert quote.cdf_amount == Decimal("154000.00")
+        inventory_before = (inventory.status, inventory.updated_at)
 
     class DraftAdapter:
         def __init__(self) -> None:
@@ -372,7 +398,76 @@ async def test_real_ai_turn_terminal_draft_uses_authoritative_offer(
         assert draft is not None
         assert draft.price_id == seeded.price_id
         assert draft.total_cdf == Decimal("308000.00")
+        assert draft.product_id == offer.product_id
+        assert draft.sellable_item_id == offer.sellable_item_id
+        assert draft.unit_price_usd == offer.current_usd_price
+        assert draft.exchange_rate_id == quote.exchange_rate_id
+        assert draft.unit_price_cdf == quote.cdf_amount
+        assert draft.inventory_status == offer.inventory_status
+        assert draft.inventory_updated_at == offer.inventory_updated_at
+        assert draft.quantity == 2 and draft.status == "awaiting_confirmation"
+        confirmation = f"OUI {draft.confirmation_code}"
     await _assert_state_counts(factory)
+
+    # An unqualified yes is not the exact application-owned confirmation.
+    ambiguous, _ = await _reply(factory, seeded, content="OUI")
+    assert ambiguous is None
+    await _assert_state_counts(factory)
+    first = await _process_m1_confirmation(content=confirmation, sequence=1)
+    replay = await _process_m1_confirmation(content=confirmation, sequence=2)
+    assert first["status"] == "order_draft_confirmed"
+    assert replay["status"] == "order_draft_already_confirmed"
+    assert replay["order_id"] == first["order_id"]
+    assert first["send_status"] == replay["send_status"] == "skipped"
+    await _assert_state_counts(factory, orders=1)
+
+    async with factory() as session:
+        stored = await session.get(Order, uuid.UUID(first["order_id"]))
+        confirmed = await session.scalar(select(OrderDraft))
+        inventory = await session.get(InventoryRecord, seeded.inventory_id)
+        assert stored is not None and confirmed is not None and inventory is not None
+        assert confirmed.status == "confirmed" and confirmed.order_id == stored.order_id
+        assert stored.status == "pending" and stored.total_amount == draft.total_cdf
+        assert stored.confirmed_at is None and stored.delivered_at is None
+        assert stored.hub_crm_synced is False and stored.hub_crm_order_id is None
+        assert (inventory.status, inventory.updated_at) == inventory_before
+        item = stored.items[0]
+        assert item["product_id"] == str(offer.product_id)
+        assert item["sellable_item_id"] == str(offer.sellable_item_id)
+        assert item["product_name"] == offer.product_name
+        assert item["quantity"] == 2
+        assert item["price_id"] == str(offer.price_id)
+        assert Decimal(item["unit_price_usd"]) == offer.current_usd_price
+        assert item["exchange_rate_id"] == str(quote.exchange_rate_id)
+        assert Decimal(item["usd_to_cdf_rate"]) == quote.usd_to_cdf_rate
+        assert Decimal(item["unit_price_cdf"]) == quote.cdf_amount
+
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from app.api.deps import get_current_role, get_db
+    from app.api.v1.orders import router
+
+    api = FastAPI()
+    api.include_router(router, prefix="/api/v1")
+
+    async def db():
+        async with factory() as session:
+            yield session
+
+    api.dependency_overrides[get_db] = db
+    api.dependency_overrides[get_current_role] = lambda: "admin"
+    async with AsyncClient(transport=ASGITransport(app=api), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/orders/{first['order_id']}")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "pending" and body["payment_method"] is None
+    assert Decimal(body["total_cdf"]) == Decimal("308000.00")
+    assert body["items"] == [{
+        "product_id": str(offer.product_id), "quantity": 2,
+        "unit_price_cdf": "154000.00",
+    }]
+    assert "payment_status" not in body and "delivery_method" not in body
+    assert external_calls == []
 
 
 @pytest.mark.asyncio
@@ -424,6 +519,13 @@ async def test_customer_confirmation_creates_one_authoritative_pending_order_wit
         assert order.delivery_method == "moto_taxi"
         assert order.hub_crm_synced is False
         assert order.hub_crm_order_id is None
+        from app.api.v1.orders import get_order
+
+        response = await get_order(order.order_id, session)
+        assert response.status.value == "pending"
+        assert response.payment_method is None
+        assert response.total_cdf == Decimal("308000.00")
+        assert order.confirmed_at is None and order.delivered_at is None
         assert order.items == [
             {
                 "product_id": str(stored.product_id),
@@ -440,6 +542,63 @@ async def test_customer_confirmation_creates_one_authoritative_pending_order_wit
         ]
         assert inventory is not None and inventory.status == "available"
     await _assert_state_counts(factory, orders=1)
+
+
+@pytest.mark.asyncio
+async def test_retired_creation_and_historical_read_status_api(engine: AsyncEngine):
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from app.api.deps import get_current_role
+    from app.api.v1.orders import router
+    from app.database import get_db
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    seeded = await _seed(factory)
+    api = FastAPI()
+    api.include_router(router, prefix="/api/v1")
+
+    async def db():
+        async with factory() as session:
+            yield session
+
+    api.dependency_overrides[get_db] = db
+    api.dependency_overrides[get_current_role] = lambda: "admin"
+    async with AsyncClient(transport=ASGITransport(app=api), base_url="http://test") as client:
+        for price in ("0.01", "154000.00"):
+            response = await client.post("/api/v1/orders", json={
+                "lead_id": str(seeded.lead_id),
+                "items": [{"product_id": "caller-product", "quantity": 1, "unit_price_cdf": price}],
+                "delivery_zone": "Gombe", "payment_method": "orange_money",
+            }, headers={"X-Idempotency-Key": "obsolete-key"})
+            assert response.status_code == 404
+        await _assert_state_counts(factory)
+
+        for method in (None, "orange_money", "airtel_money", "mpesa", "cash", "bank_transfer"):
+            order_id = uuid.uuid4()
+            async with factory() as session:
+                session.add(Order(
+                    order_id=order_id, lead_id=seeded.lead_id, customer_id="+243810006001",
+                    items=[{"product_id": "historical-sku", "quantity": 1, "unit_price_cdf": 1000}],
+                    total_amount=Decimal("1000.00"), currency="CDF", status="pending",
+                    payment_type={"cash": "cod", "bank_transfer": "bank_transfer"}.get(method, "mobile_money"),
+                    delivery_zone="Gombe", delivery_method="moto_taxi",
+                ))
+                await session.flush()
+                if method is not None:
+                    session.add(Payment(order_id=order_id, method=method, amount=Decimal("1000.00"), status="pending"))
+                await session.commit()
+            url = f"/api/v1/orders/{order_id}"
+            response = await client.get(url)
+            assert response.status_code == 200
+            body = response.json()
+            assert body["payment_method"] == method
+            assert body["status"] == "pending"
+            assert body["items"][0]["product_id"] == "historical-sku"
+            assert "delivery_method" not in body and "payment_status" not in body
+            assert (await client.put(url + "/status", json={"status": "delivered"})).status_code == 409
+            assert (await client.put(url + "/status", json={"status": "cancelled"})).status_code == 200
+            assert (await client.get(url)).json()["status"] == "cancelled"
+        assert (await client.get(f"/api/v1/orders/{uuid.uuid4()}")).status_code == 404
 
 
 @pytest.mark.asyncio

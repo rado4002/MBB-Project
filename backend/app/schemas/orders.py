@@ -1,4 +1,4 @@
-"""Schemas for EP-11, EP-12, EP-13 (M7 Conversion / Orders)."""
+"""Schemas for EP-12, EP-13 (M7 Conversion / Orders)."""
 import uuid
 from datetime import datetime
 from decimal import Decimal
@@ -14,22 +14,16 @@ class OrderLineItem(BaseModel):
     unit_price_cdf: Decimal = Field(..., gt=0, max_digits=12, decimal_places=2)
 
 
-class OrderCreate(BaseModel):
-    lead_id: uuid.UUID
-    items: list[OrderLineItem] = Field(..., min_length=1)
-    delivery_zone: str = Field(..., max_length=100)
-    payment_method: PaymentMethod
-    customer_note: str | None = Field(None, max_length=500)
-
-
 class OrderResponse(BaseModel):
     order_id: uuid.UUID
     lead_id: uuid.UUID
     status: OrderStatus
     items: list[OrderLineItem]
     total_cdf: Decimal
-    delivery_zone: str
-    payment_method: PaymentMethod
+    delivery_zone: str = Field(description="Recorded location; not a delivery commitment.")
+    payment_method: PaymentMethod | None = Field(
+        description="Method from the stored Payment, or null if none exists; not proof of payment success."
+    )
     created_at: datetime
     updated_at: datetime
 
