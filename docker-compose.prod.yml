@@ -33,6 +33,7 @@ services:
       APP_ENV: production
       DEBUG: "false"
       LOG_LEVEL: INFO
+      BROWSER_ALLOWED_ORIGIN: https://api.mbb.cd
     deploy:
       replicas: 3
       restart_policy:

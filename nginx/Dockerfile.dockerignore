@@ -1,0 +1,13 @@
+**
+!frontend/
+!frontend/**
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+frontend/.env*
+!nginx/
+!nginx/Dockerfile
+!nginx/nginx.conf
+!nginx/react.conf
+!nginx/conf.d/
+!nginx/conf.d/mbb.conf

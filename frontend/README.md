@@ -4,6 +4,34 @@
 
 This application is the browser-session-based interface foundation for the first MBB read-only Inbox. It is separate from the Streamlit dashboard and communicates only with the same-origin browser-authentication API.
 
+## Supported HTTPS serving path (BCA-2 Slice 3)
+
+The existing Nginx service builds this lockfile with `npm ci` in a Node build
+stage, builds `dist`, and copies it into the Nginx runtime image. Node is not a
+runtime service. Build with `docker compose build nginx` from the repository root.
+Use `--build` when starting Compose after frontend changes.
+
+The production override serves React at `https://api.mbb.cd/` and proxies
+`/api/*` to FastAPI on the same origin. Direct application navigation and refresh
+use `index.html`; API paths, `/assets/`, and file-like misses cannot use that
+fallback. Health routes and the metrics denial remain explicit. The existing
+Streamlit service and its separate HTTPS virtual host remain present.
+
+Browser auth retains its default-off gate. An authorized environment must supply
+`BROWSER_AUTH_ENABLED=true` and independent strong `BROWSER_SESSION_HMAC_SECRET`,
+`BROWSER_CSRF_HMAC_SECRET`, and `BROWSER_IDEMPOTENCY_HMAC_SECRET` values through the
+existing API environment contract. Production Compose pins `BROWSER_ALLOWED_ORIGIN`
+to `https://api.mbb.cd`; any controlled local HTTPS override must set it to the
+exact local origin, including its port. Do not add a cross-origin frontend API URL
+or relax cookie, Origin, or CSRF validation. The HTTP development site can serve
+the bundle but does not satisfy the browser-auth HTTPS contract.
+
+Manual reply acceptance retains the existing Baileys-mode requirement. This
+serving change does not enable any provider or delivery gate, and an accepted
+reply does not prove external delivery. Historical F5 scope below is not the
+current workflow inventory. See `docs/bca2-slice3-validation.md` for this slice's
+runtime evidence and limits.
+
 ## Current F5 scope
 
 F5 retains the F2 browser authentication foundation, F3 queue, and F4 read-only conversation workspace. It refines that existing workflow into a controlled three-region desktop layout, a two-region tablet layout with accessible contextual presentation, and a progressive mobile Inbox → Conversation → Details flow. It also preserves queue position and filters, makes history scrolling predictable, and adds focused loading, error, keyboard, and reduced-motion behavior.

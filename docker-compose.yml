@@ -154,7 +154,9 @@ services:
   # ── Reverse Proxy ────────────────────────────────────────────────────────────
 
   nginx:
-    image: nginx:1.25-alpine
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
     ports:
       - "80:80"
       - "443:443"
