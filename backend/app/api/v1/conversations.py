@@ -4,7 +4,6 @@ EP-03: PUT  /api/v1/conversations/{conversation_id}/context
 EP-17: GET  /api/v1/conversations   (list, paginated)
 EP-18: PUT  /api/v1/conversations/{conversation_id}/status
 EP-19: POST /api/v1/conversations/{conversation_id}/escalate
-A-13:  PUT  /api/v1/conversations/{conversation_id}/handoff
 """
 import uuid
 
@@ -14,11 +13,10 @@ from sqlalchemy import bindparam, func, select, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import selectinload
 
-from app.api.deps import DBSession, IdempotencyKey, get_current_role, require_role
+from app.api.deps import DBSession, IdempotencyKey, get_current_role
 from app.models.conversation import Conversation
 from app.models.message import Message
-from app.modules.m8_maps.escalation import create_ticket, handoff_conversation
-from app.schemas.admin import HandoffToggle, HandoffToggleResponse
+from app.modules.m8_maps.escalation import create_ticket
 from app.schemas.conversations import (
     ConversationContextResponse,
     ConversationContextUpdate,
@@ -27,7 +25,7 @@ from app.schemas.conversations import (
     LeadInConversation,
     MessageItem,
 )
-from app.schemas.common import PaginationMeta
+from app.schemas.common import ConversationStatus, PaginationMeta
 from app.schemas.escalations import EscalationCreate, EscalationResponse
 
 log = structlog.get_logger()
@@ -201,14 +199,18 @@ async def list_conversations(
 async def update_conversation_status(
     conversation_id: uuid.UUID,
     db: DBSession,
-    new_status: str | None = None,
+    new_status: ConversationStatus | None = None,
 ):
-    """Update conversation status lifecycle (EP-18)."""
+    """Update lifecycle metadata only; never take over, pause or resume AI.
+
+    Historical 'escalated' is a lifecycle label, not ticket or ownership state.
+    Human Takeover and Return to AI use the versioned operator endpoints.
+    """
     conv = await db.get(Conversation, conversation_id)
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
     if new_status:
-        conv.status = new_status
+        conv.status = new_status.value
         await db.flush()
     return {"conversation_id": str(conv.conversation_id), "status": conv.status}
 
@@ -248,27 +250,4 @@ async def escalate_conversation(
         assigned_to=None,
         created_at=now,
         updated_at=now,
-    )
-
-
-@router.put(
-    "/{conversation_id}/handoff",
-    response_model=HandoffToggleResponse,
-    dependencies=[Depends(require_role("admin", "orchestrator"))],
-)
-async def toggle_handoff(
-    conversation_id: uuid.UUID,
-    body: HandoffToggle,
-    db: DBSession,
-    idempotency_key: IdempotencyKey,
-):
-    """Switch conversation between bot-controlled and human-controlled (A-13). Idempotent via key tracking."""
-    try:
-        result = await handoff_conversation(db, conversation_id, body.mode)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    return HandoffToggleResponse(
-        conversation_id=conversation_id,
-        mode=result["mode"],
-        updated_at=result["updated_at"],
     )

@@ -46,7 +46,6 @@ try:
     from app.schemas.customers import OptOutRequest
     from app.schemas.escalations import EscalationCreate
     from app.schemas.analytics import FunnelMetrics
-    from app.schemas.admin import HandoffToggle
     print("    12 schema modules OK")
 except Exception as e:
     errors.append(f"Schemas: {e}")

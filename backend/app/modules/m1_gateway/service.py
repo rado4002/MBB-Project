@@ -3,7 +3,7 @@ M1 Gateway — Service layer.
 
 Handles the synchronous DB-touching parts of inbound message processing:
   1. Customer upsert (create or touch last_interaction)
-  2. Conversation upsert (create or continue active conversation)
+  2. Conversation upsert (continue latest conversation, or create the first)
   3. Opt-out guard (reject silently if customer opted out)
   4. Language detection (keyword fast-path, sticky within conversation)
   5. Inbound message persistence
@@ -145,14 +145,20 @@ async def process_inbound(
         
         log.info("m1.opt_out_registered", phone=customer_phone, relances_cancelled=total_cancelled)
 
-    # ── 3. Load or create active conversation ─────────────────────────────────
+    # ── 3. Continue the latest conversation regardless of lifecycle ───────────
+    # The customer upsert holds the customer row lock until commit, serializing
+    # concurrent inbound selection/creation. Status must never route around a
+    # paused AI or Human owner by creating another AI-eligible conversation.
     conv_result = await session.execute(
         select(Conversation)
         .where(
             Conversation.customer_id == customer_phone,
-            Conversation.status.in_(["active", "qualifying", "nurturing"]),
         )
-        .order_by(Conversation.last_message_time.desc())
+        .order_by(
+            Conversation.last_message_time.desc(),
+            Conversation.created_at.desc(),
+            Conversation.conversation_id.desc(),
+        )
         .limit(1)
     )
     conversation: Conversation | None = conv_result.scalar_one_or_none()

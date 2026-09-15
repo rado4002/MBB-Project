@@ -65,7 +65,6 @@ from app.schemas.maps import MapsTagCreate
 from app.schemas.customers import OptOutRequest
 from app.schemas.escalations import EscalationCreate
 from app.schemas.analytics import FunnelMetrics
-from app.schemas.admin import HandoffToggle
 
 # ═══════════════════════════════════════════════════════════════════════════════
 

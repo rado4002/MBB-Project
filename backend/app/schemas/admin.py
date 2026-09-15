@@ -49,19 +49,6 @@ class AuditLogListResponse(BaseModel):
     offset: int
 
 
-class HandoffToggle(BaseModel):
-    """Switch a conversation between bot-controlled and hub-team-controlled."""
-    conversation_id: uuid.UUID
-    mode: str = Field(..., pattern="^(bot|human)$")
-    reason: str | None = Field(None, max_length=300)
-
-
-class HandoffToggleResponse(BaseModel):
-    conversation_id: uuid.UUID
-    mode: str
-    updated_at: datetime
-
-
 class SystemHealthResponse(BaseModel):
     status: str  # "healthy" | "degraded" | "down"
     components: dict[str, str]

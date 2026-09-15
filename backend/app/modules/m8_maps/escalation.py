@@ -6,7 +6,7 @@ Triggers:
   - Complex complaint (AI classification) → HIGH
   - High-value lead (score_value ≥ 80) → MEDIUM
   - 3+ unresolved questions → MEDIUM
-  - Customer requests human ("parler à quelqu'un") → HIGH immediate handoff
+  - Customer requests human ("parler à quelqu'un") → HIGH attention ticket
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import structlog
-from sqlalchemy import select, func, update
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.conversation import Conversation
@@ -116,8 +116,9 @@ async def create_ticket(
     lead_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """
-    Create an escalation ticket with last 10 messages as context.
-    Sets conversation status to 'escalated'.
+    Create an attention ticket with last 10 messages as context.
+    Lifecycle and execution authority are unchanged. Pausing AI or assigning
+    a Human requires the explicit M4 authority transition.
     """
     # Get last 10 messages for transcript snapshot
     result = await session.execute(
@@ -159,13 +160,6 @@ async def create_ticket(
     )
     session.add(ticket)
 
-    # Set conversation status to escalated
-    await session.execute(
-        update(Conversation)
-        .where(Conversation.conversation_id == conversation_id)
-        .values(status="escalated", updated_at=datetime.now(timezone.utc))
-    )
-
     await session.flush()
     log.info(
         "escalation.ticket.created",
@@ -189,9 +183,14 @@ async def resolve_ticket(
     resolved_by: str,
 ) -> dict[str, Any]:
     """
-    Resolve an escalation ticket. Returns conversation to bot control.
+    Resolve attention only. Never resume AI or change conversation lifecycle.
     """
-    ticket = await session.get(EscalationTicket, ticket_id)
+    ticket = await session.scalar(
+        select(EscalationTicket)
+        .where(EscalationTicket.ticket_id == ticket_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if not ticket:
         raise ValueError(f"Ticket {ticket_id} not found")
     if ticket.status in ("resolved", "closed"):
@@ -202,13 +201,6 @@ async def resolve_ticket(
     ticket.resolution_notes = resolution_notes
     ticket.assigned_to = resolved_by
     ticket.resolved_at = now
-
-    # Return conversation to active (bot control)
-    await session.execute(
-        update(Conversation)
-        .where(Conversation.conversation_id == ticket.conversation_id)
-        .values(status="active", updated_at=now)
-    )
 
     await session.flush()
     log.info(
@@ -228,10 +220,17 @@ async def assign_ticket(
     ticket_id: uuid.UUID,
     assigned_to: str,
 ) -> dict[str, Any]:
-    """Assign a ticket to a Hub team member."""
-    ticket = await session.get(EscalationTicket, ticket_id)
+    """Assign ticket responsibility only, without conversation ownership."""
+    ticket = await session.scalar(
+        select(EscalationTicket)
+        .where(EscalationTicket.ticket_id == ticket_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if not ticket:
         raise ValueError(f"Ticket {ticket_id} not found")
+    if ticket.status in ("resolved", "closed"):
+        raise ValueError(f"Ticket {ticket_id} already {ticket.status}")
 
     now = datetime.now(timezone.utc)
     ticket.assigned_to = assigned_to
@@ -283,34 +282,6 @@ async def list_tickets(
         ],
         total,
     )
-
-
-async def handoff_conversation(
-    session: AsyncSession,
-    conversation_id: uuid.UUID,
-    mode: str,
-) -> dict[str, Any]:
-    """
-    Toggle conversation between bot and human control.
-    mode: 'human' → set escalated; 'bot' → set active
-    """
-    conv = await session.get(Conversation, conversation_id)
-    if not conv:
-        raise ValueError(f"Conversation {conversation_id} not found")
-
-    now = datetime.now(timezone.utc)
-    new_status = "escalated" if mode == "human" else "active"
-    conv.status = new_status
-    conv.updated_at = now
-
-    await session.flush()
-    log.info("escalation.handoff", conversation_id=str(conversation_id), mode=mode)
-    return {
-        "conversation_id": str(conversation_id),
-        "mode": mode,
-        "status": new_status,
-        "updated_at": now.isoformat(),
-    }
 
 
 async def check_stale_escalations(

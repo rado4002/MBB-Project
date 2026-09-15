@@ -7,8 +7,8 @@ Triggers when M2/M3 detect:
   - High-value lead (score = hot AND order value > threshold)
   - Explicit human-agent request ("parler à quelqu'un", "nabingi moto")
 
-Escalated conversations are flagged in the DB and a notification is
-pushed to the Hub Team via the CRM adapter.
+Attention tickets are persisted in PostgreSQL. Ticket creation does not change
+conversation lifecycle or execution ownership and does not send notifications.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ def escalate_conversation(
     lead_id: str | None = None,
 ) -> dict:
     """
-    Mark *conversation_id* as escalated and notify the Hub Team.
+    Create an attention ticket for *conversation_id* without changing authority.
 
     Args:
         conversation_id: UUID of the Conversation row.

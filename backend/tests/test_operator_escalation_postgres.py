@@ -531,7 +531,7 @@ async def test_stale_matching_reservation_can_be_safely_reclaimed(
 
 
 @pytest.mark.asyncio
-async def test_legacy_create_ticket_interface_and_behavior_are_preserved(
+async def test_legacy_voice_ticket_preserves_lifecycle_and_authority(
     engine: AsyncEngine,
 ) -> None:
     _account, conversations = await _seed(engine)
@@ -568,4 +568,8 @@ async def test_legacy_create_ticket_interface_and_behavior_are_preserved(
         assert ticket.created_by_account_id is None
         assert len(ticket.transcript_snapshot) == 1
         assert persisted_conversation is not None
-        assert persisted_conversation.status == "escalated"
+        assert persisted_conversation.status == "qualifying"
+        assert persisted_conversation.owner_type == "ai"
+        assert persisted_conversation.human_owner_account_id is None
+        assert persisted_conversation.ai_execution_state == "eligible"
+        assert persisted_conversation.ownership_version == 1

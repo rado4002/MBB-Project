@@ -30,6 +30,8 @@ class LeadIntent(str, Enum):
 
 
 class ConversationStatus(str, Enum):
+    """Lifecycle labels only; never execution ownership or live ticket state."""
+
     active = "active"
     qualifying = "qualifying"
     nurturing = "nurturing"
