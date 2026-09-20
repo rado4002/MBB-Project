@@ -14,6 +14,7 @@ import anthropic
 import structlog
 
 from app.adapters.base import BaseAIAdapter
+from app.ai import ops
 from app.ai.provider_contract import (
     ProviderFinishReason,
     ProviderTurnRequest,
@@ -104,12 +105,16 @@ class ClaudeAdapter(BaseAIAdapter):
         for attempt, delay in enumerate((*_RETRY_DELAYS, None), start=1):
             try:
                 t0 = time.monotonic()
-                message = await self._client.messages.create(
-                    model=settings.claude_model,
-                    max_tokens=max_tokens,
-                    system=system,
-                    messages=[{"role": "user", "content": prompt}],
-                )
+                with ops.observe(
+                    "provider_attempt", provider="claude", attempt_index=attempt,
+                ) as observation:
+                    message = await self._client.messages.create(
+                        model=settings.claude_model,
+                        max_tokens=max_tokens,
+                        system=system,
+                        messages=[{"role": "user", "content": prompt}],
+                    )
+                    observation.usage(message)
                 elapsed_ms = int((time.monotonic() - t0) * 1000)
                 self._record_success()
                 text = message.content[0].text if message.content else ""

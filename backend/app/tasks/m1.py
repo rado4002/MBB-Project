@@ -17,6 +17,7 @@ import structlog
 from celery import Task
 from sqlalchemy.exc import IntegrityError
 
+from app.ai import ops
 from app.ai.audit import (
     AITurnAuditRecord,
     AITurnOutcome,
@@ -149,128 +150,154 @@ async def _persist_outbound(
     commercial_state_update: CommercialStateUpdate | None = None,
 ) -> uuid.UUID | None:
     """Commit continuity state, one response, and its AI audit atomically."""
-    from app.database import async_session_factory
-    from app.ai.commercial_state import (
-        commercial_state_changed_fields,
-        read_commercial_state,
-        update_commercial_state_from_locked_snapshot,
-    )
-    from app.models.message import Message
-    from app.modules.m1_gateway.service import persist_outbound
-    from sqlalchemy import select
+    with ops.observe(
+        "persistence", active=audit_record is not None, boundary="ordinary",
+        turn_id=audit_record.turn_id if audit_record is not None else None,
+        conversation_id=conversation_id, source_message_id=source_message_id,
+        turn_outcome=audit_record.outcome.value if audit_record is not None else None,
+    ) as observation:
+        from app.database import async_session_factory
+        from app.ai.commercial_state import (
+            commercial_state_changed_fields,
+            read_commercial_state,
+            update_commercial_state_from_locked_snapshot,
+        )
+        from app.models.message import Message
+        from app.modules.m1_gateway.service import persist_outbound
+        from sqlalchemy import select
 
-    async with async_session_factory() as session:
-        try:
-            if not await _ai_may_reply(
-                session,
-                conversation_id,
-                lock=True,
-                expected_ownership_version=expected_ownership_version,
-            ):
-                await session.rollback()
-                log.info(
-                    "m1.persist_outbound.skipped",
-                    conversation_id=str(conversation_id),
-                    reason="ai_authority_changed",
-                )
-                return None
-            state_before = None
-            state_after = None
-            if (
-                audit_record is not None
-                and expected_commercial_state_revision is not None
-            ):
-                if source_message_id is None:
-                    raise ValueError("AI audit requires an authoritative source message")
-                if (
-                    audit_record.commercial_state_revision_before is not None
-                    and audit_record.commercial_state_revision_before
-                    != expected_commercial_state_revision
+        async with async_session_factory() as session:
+            try:
+                if not await _ai_may_reply(
+                    session,
+                    conversation_id,
+                    lock=True,
+                    expected_ownership_version=expected_ownership_version,
                 ):
-                    raise ValueError("AI audit commercial-state snapshot is inconsistent")
-                latest_inbound_id = await session.scalar(
-                    select(Message.message_id)
-                    .where(
-                        Message.conversation_id == conversation_id,
-                        Message.direction == "inbound",
+                    await session.rollback()
+                    log.info(
+                        "m1.persist_outbound.skipped",
+                        conversation_id=str(conversation_id),
+                        reason="ai_authority_changed",
                     )
-                    .order_by(
-                        Message.created_at.desc(),
-                        Message.timestamp.desc(),
-                        Message.message_id.desc(),
+                    observation.set(
+                        "stale", reason="ai_authority_changed",
+                        transaction_outcome="rolled_back",
                     )
-                    .limit(1)
+                    return None
+                state_before = None
+                state_after = None
+                if (
+                    audit_record is not None
+                    and expected_commercial_state_revision is not None
+                ):
+                    if source_message_id is None:
+                        raise ValueError("AI audit requires an authoritative source message")
+                    if (
+                        audit_record.commercial_state_revision_before is not None
+                        and audit_record.commercial_state_revision_before
+                        != expected_commercial_state_revision
+                    ):
+                        raise ValueError("AI audit commercial-state snapshot is inconsistent")
+                    latest_inbound_id = await session.scalar(
+                        select(Message.message_id)
+                        .where(
+                            Message.conversation_id == conversation_id,
+                            Message.direction == "inbound",
+                        )
+                        .order_by(
+                            Message.created_at.desc(),
+                            Message.timestamp.desc(),
+                            Message.message_id.desc(),
+                        )
+                        .limit(1)
+                    )
+                    if latest_inbound_id != source_message_id:
+                        await session.rollback()
+                        log.info(
+                            "m1.persist_outbound.skipped",
+                            conversation_id=str(conversation_id),
+                            reason="newer_customer_evidence",
+                        )
+                        observation.set(
+                            "stale", reason="newer_customer_evidence",
+                            transaction_outcome="rolled_back",
+                        )
+                        return None
+                    state_before = await read_commercial_state(session, conversation_id)
+                    current_revision = state_before.revision if state_before else 0
+                    if current_revision != expected_commercial_state_revision:
+                        await session.rollback()
+                        log.info(
+                            "m1.persist_outbound.skipped",
+                            conversation_id=str(conversation_id),
+                            reason="commercial_state_changed",
+                        )
+                        observation.set(
+                            "stale", reason="commercial_state_changed",
+                            transaction_outcome="rolled_back",
+                        )
+                        return None
+                    state_after = state_before
+                    if commercial_state_update is not None:
+                        state_after = await update_commercial_state_from_locked_snapshot(
+                            session,
+                            conversation_id=conversation_id,
+                            current=state_before,
+                            expected_revision=expected_commercial_state_revision,
+                            state_update=commercial_state_update,
+                        )
+                outbound_id = await persist_outbound(
+                    session=session,
+                    conversation_id=conversation_id,
+                    content=content,
+                    language=language,
+                    processing_time_ms=processing_time_ms,
                 )
-                if latest_inbound_id != source_message_id:
-                    await session.rollback()
-                    log.info(
-                        "m1.persist_outbound.skipped",
-                        conversation_id=str(conversation_id),
-                        reason="newer_customer_evidence",
+                if audit_record is not None:
+                    audit_values = audit_record.model_dump()
+                    audit_values.update(
+                        source_message_id=source_message_id,
+                        outbound_message_id=outbound_id,
                     )
-                    return None
-                state_before = await read_commercial_state(session, conversation_id)
-                current_revision = state_before.revision if state_before else 0
-                if current_revision != expected_commercial_state_revision:
-                    await session.rollback()
-                    log.info(
-                        "m1.persist_outbound.skipped",
-                        conversation_id=str(conversation_id),
-                        reason="commercial_state_changed",
-                    )
-                    return None
-                state_after = state_before
-                if commercial_state_update is not None:
-                    state_after = await update_commercial_state_from_locked_snapshot(
+                    if expected_commercial_state_revision is not None:
+                        state_revision_after = state_after.revision if state_after else 0
+                        changed_fields = tuple(
+                            CommercialStateField(field_name)
+                            for field_name in commercial_state_changed_fields(
+                                state_before,
+                                state_after,
+                            )
+                        )
+                        audit_values.update(
+                            commercial_state_revision_before=(
+                                expected_commercial_state_revision
+                            ),
+                            commercial_state_revision_after=state_revision_after,
+                            commercial_state_changed_fields=changed_fields,
+                        )
+                    await append_ai_turn_audit(
                         session,
-                        conversation_id=conversation_id,
-                        current=state_before,
-                        expected_revision=expected_commercial_state_revision,
-                        state_update=commercial_state_update,
+                        AITurnAuditRecord.model_validate(audit_values, strict=True),
                     )
-            outbound_id = await persist_outbound(
-                session=session,
-                conversation_id=conversation_id,
-                content=content,
-                language=language,
-                processing_time_ms=processing_time_ms,
-            )
-            if audit_record is not None:
-                audit_values = audit_record.model_dump()
-                audit_values.update(
-                    source_message_id=source_message_id,
+                await session.commit()
+                observation.set(
+                    "committed", transaction_outcome="committed",
                     outbound_message_id=outbound_id,
                 )
-                if expected_commercial_state_revision is not None:
-                    state_revision_after = state_after.revision if state_after else 0
-                    changed_fields = tuple(
-                        CommercialStateField(field_name)
-                        for field_name in commercial_state_changed_fields(
-                            state_before,
-                            state_after,
-                        )
-                    )
-                    audit_values.update(
-                        commercial_state_revision_before=(
-                            expected_commercial_state_revision
-                        ),
-                        commercial_state_revision_after=state_revision_after,
-                        commercial_state_changed_fields=changed_fields,
-                    )
-                await append_ai_turn_audit(
-                    session,
-                    AITurnAuditRecord.model_validate(audit_values, strict=True),
+                return outbound_id
+            except Exception as exc:
+                await session.rollback()
+                observation.set(
+                    "rolled_back", reason="persistence_failed",
+                    transaction_outcome="rolled_back",
                 )
-            await session.commit()
-            return outbound_id
-        except Exception as exc:
-            await session.rollback()
-            log.error(
-                "m1.persist_outbound.failed_closed",
-                conversation_id=str(conversation_id),
-                error_type=type(exc).__name__,
-            )
-            return None
+                log.error(
+                    "m1.persist_outbound.failed_closed",
+                    conversation_id=str(conversation_id),
+                    error_type=type(exc).__name__,
+                )
+                return None
 
 
 def _persistence_failure_result(conversation_id: str) -> dict:
@@ -595,6 +622,11 @@ async def _process(
             log.error("m1.ai_action.failed_closed", conv_id=conv_id)
             return _persistence_failure_result(conv_id)
         except AITurnExecutionError as exc:
+            ops.note(
+                "fallback", "selected", reason=exc.audit_record.safe_code,
+                turn_id=ai_turn.turn_id, conversation_id=ai_turn.conversation_id,
+                source_message_id=ai_turn.source_message_id,
+            )
             log.warning("m1.ai_fallback.used", conv_id=conv_id, error=str(exc))
             ai_response = t("error_fallback", language)
             audit_values = exc.audit_record.model_dump()
@@ -778,59 +810,68 @@ async def _send_safe(
     expected_ownership_version: int | None = None,
 ) -> dict[str, str]:
     """Send once through the adapter and report only confirmed outcomes."""
-    from app.adapters import get_messaging_adapter
-    from app.database import async_session_factory
+    with ops.observe(
+        "send", boundary="ordinary", conversation_id=conversation_id,
+        outbound_message_id=idempotency_key,
+    ) as observation:
+        from app.adapters import get_messaging_adapter
+        from app.database import async_session_factory
 
-    if not settings.whatsapp_send_enabled:
-        log.info("m1.send_message.skipped", reason="whatsapp_send_disabled")
-        return {"status": "skipped"}
+        if not settings.whatsapp_send_enabled:
+            log.info("m1.send_message.skipped", reason="whatsapp_send_disabled")
+            observation.set("skipped", reason="whatsapp_send_disabled")
+            return {"status": "skipped"}
 
-    try:
-        if conversation_id is None:
-            adapter = get_messaging_adapter()
-            provider_message_id = await adapter.send_message(
-                phone,
-                text,
-                idempotency_key=idempotency_key,
-            )
-        else:
-            async with async_session_factory() as session:
-                if expected_ownership_version is None or not await _ai_may_reply(
-                    session,
-                    conversation_id,
-                    lock=True,
-                    expected_ownership_version=expected_ownership_version,
-                ):
-                    await session.rollback()
-                    log.info(
-                        "m1.send_message.skipped",
-                        reason="ai_authority_changed",
-                    )
-                    return {"status": "skipped"}
+        try:
+            if conversation_id is None:
                 adapter = get_messaging_adapter()
                 provider_message_id = await adapter.send_message(
                     phone,
                     text,
                     idempotency_key=idempotency_key,
                 )
-                await session.commit()
-        if not isinstance(provider_message_id, str) or not provider_message_id.strip():
+            else:
+                async with async_session_factory() as session:
+                    if expected_ownership_version is None or not await _ai_may_reply(
+                        session,
+                        conversation_id,
+                        lock=True,
+                        expected_ownership_version=expected_ownership_version,
+                    ):
+                        await session.rollback()
+                        log.info(
+                            "m1.send_message.skipped",
+                            reason="ai_authority_changed",
+                        )
+                        observation.set("skipped", reason="ai_authority_changed")
+                        return {"status": "skipped"}
+                    adapter = get_messaging_adapter()
+                    provider_message_id = await adapter.send_message(
+                        phone,
+                        text,
+                        idempotency_key=idempotency_key,
+                    )
+                    await session.commit()
+            if not isinstance(provider_message_id, str) or not provider_message_id.strip():
+                log.error(
+                    "m1.send_message.unknown_or_failed",
+                    error_type="UnconfirmedProviderMessageId",
+                )
+                observation.set("uncertain", reason="unconfirmed_provider_id")
+                return {"status": "unknown_or_failed"}
+            log.info("m1.send_message.sent")
+            observation.set("confirmed")
+            return {
+                "status": "sent",
+                "provider_message_id": provider_message_id.strip(),
+            }
+        except Exception as exc:
             log.error(
                 "m1.send_message.unknown_or_failed",
-                error_type="UnconfirmedProviderMessageId",
+                error_type=type(exc).__name__,
             )
+            observation.set("uncertain")
             return {"status": "unknown_or_failed"}
-        log.info("m1.send_message.sent")
-        return {
-            "status": "sent",
-            "provider_message_id": provider_message_id.strip(),
-        }
-    except Exception as exc:
-        log.error(
-            "m1.send_message.unknown_or_failed",
-            error_type=type(exc).__name__,
-        )
-        return {"status": "unknown_or_failed"}
 
 
 async def _send_persisted_handoff_ack_safe(
@@ -841,58 +882,66 @@ async def _send_persisted_handoff_ack_safe(
     conversation_id: uuid.UUID,
 ) -> dict[str, str]:
     """Send a committed terminal acknowledgment through the existing ledger key."""
-    from sqlalchemy import select
+    with ops.observe(
+        "send", boundary="handoff", conversation_id=conversation_id,
+        outbound_message_id=outbound_message_id,
+    ) as observation:
+        from sqlalchemy import select
 
-    from app.adapters import get_messaging_adapter
-    from app.database import async_session_factory
-    from app.models.ai_turn_audit import AITurnAudit
-    from app.models.message import Message
+        from app.adapters import get_messaging_adapter
+        from app.database import async_session_factory
+        from app.models.ai_turn_audit import AITurnAudit
+        from app.models.message import Message
 
-    if not settings.whatsapp_send_enabled:
-        log.info("m1.send_message.skipped", reason="whatsapp_send_disabled")
-        return {"status": "skipped"}
+        if not settings.whatsapp_send_enabled:
+            log.info("m1.send_message.skipped", reason="whatsapp_send_disabled")
+            observation.set("skipped", reason="whatsapp_send_disabled")
+            return {"status": "skipped"}
 
-    async with async_session_factory() as session:
-        persisted = (
-            await session.execute(
-                select(Message.message_id)
-                .join(
-                    AITurnAudit,
-                    AITurnAudit.outbound_message_id == Message.message_id,
+        async with async_session_factory() as session:
+            persisted = (
+                await session.execute(
+                    select(Message.message_id)
+                    .join(
+                        AITurnAudit,
+                        AITurnAudit.outbound_message_id == Message.message_id,
+                    )
+                    .where(
+                        Message.message_id == outbound_message_id,
+                        Message.conversation_id == conversation_id,
+                        Message.direction == "outbound",
+                        Message.content == text,
+                        AITurnAudit.conversation_id == conversation_id,
+                        AITurnAudit.outcome == AITurnOutcome.handoff_requested.value,
+                    )
                 )
-                .where(
-                    Message.message_id == outbound_message_id,
-                    Message.conversation_id == conversation_id,
-                    Message.direction == "outbound",
-                    Message.content == text,
-                    AITurnAudit.conversation_id == conversation_id,
-                    AITurnAudit.outcome == AITurnOutcome.handoff_requested.value,
-                )
+            ).scalar_one_or_none()
+            await session.rollback()
+        if persisted is None:
+            observation.set("uncertain", reason="unverified_persisted_ack")
+            log.error("m1.ai_handoff.unverified_persisted_ack")
+            return {"status": "unknown_or_failed"}
+
+        try:
+            provider_message_id = await get_messaging_adapter().send_message(
+                phone,
+                text,
+                idempotency_key=str(outbound_message_id),
             )
-        ).scalar_one_or_none()
-        await session.rollback()
-    if persisted is None:
-        log.error("m1.ai_handoff.unverified_persisted_ack")
-        return {"status": "unknown_or_failed"}
-
-    try:
-        provider_message_id = await get_messaging_adapter().send_message(
-            phone,
-            text,
-            idempotency_key=str(outbound_message_id),
-        )
-        if not isinstance(provider_message_id, str) or not provider_message_id.strip():
-            raise ValueError("unconfirmed provider message ID")
-        return {
-            "status": "sent",
-            "provider_message_id": provider_message_id.strip(),
-        }
-    except Exception as exc:
-        log.error(
-            "m1.send_message.unknown_or_failed",
-            error_type=type(exc).__name__,
-        )
-        return {"status": "unknown_or_failed"}
+            if not isinstance(provider_message_id, str) or not provider_message_id.strip():
+                raise ValueError("unconfirmed provider message ID")
+            observation.set("confirmed")
+            return {
+                "status": "sent",
+                "provider_message_id": provider_message_id.strip(),
+            }
+        except Exception as exc:
+            log.error(
+                "m1.send_message.unknown_or_failed",
+                error_type=type(exc).__name__,
+            )
+            observation.set("uncertain")
+            return {"status": "unknown_or_failed"}
 
 
 async def _handle_voice_note(

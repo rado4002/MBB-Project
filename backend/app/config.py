@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     # ── Application ───────────────────────────────────────────────────────────
     app_env: str = "development"
     debug: bool = True
+    ai_ops_enabled: bool = False  # best-effort local operational observations
     tz: str = "Africa/Kinshasa"
 
     # ── WhatsApp Mode ─────────────────────────────────────────────────────────

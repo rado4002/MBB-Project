@@ -12,6 +12,7 @@ import httpx
 from pydantic import ValidationError
 
 from app.adapters.base import ProviderTurnAdapter
+from app.ai import ops
 from app.ai.provider_contract import (
     MAX_PROVIDER_TOOL_CALLS,
     MAX_PROVIDER_MESSAGE_CHARS,
@@ -144,46 +145,49 @@ class DeepSeekAdapter(ProviderTurnAdapter):
 
     async def generate_turn(self, request: ProviderTurnRequest) -> ProviderTurnResult:
         payload = self.build_request_payload(request)
-        try:
-            transported = await self._transport.create_chat_completion(payload)
-            if isinstance(transported, _DeepSeekDecodedResponse):
-                response = transported.payload
-                http_status = transported.http_status
-            else:
-                response = transported
-                http_status = None
-            if not isinstance(response, Mapping):
+        with ops.observe("provider_attempt", provider="deepseek", attempt_index=1) as observation:
+            try:
+                transported = await self._transport.create_chat_completion(payload)
+                if isinstance(transported, _DeepSeekDecodedResponse):
+                    response = transported.payload
+                    http_status = transported.http_status
+                else:
+                    response = transported
+                    http_status = None
+                if not isinstance(response, Mapping):
+                    raise ProviderTurnError(
+                        ProviderErrorCategory.malformed_response,
+                        response_diagnostic=_unavailable_response_diagnostic(
+                            parser_failure_category="transport_non_object",
+                            http_status=http_status,
+                            top_level_shape=_top_level_shape(response),
+                        ),
+                    )
+                result = self.parse_response(
+                    response,
+                    request=request,
+                    http_status=http_status,
+                )
+                observation.usage(result)
+                return result
+            except ProviderTurnError:
+                raise
+            except httpx.TimeoutException:
+                raise ProviderTurnError(ProviderErrorCategory.timeout) from None
+            except httpx.HTTPStatusError as exc:
+                raise _normalize_http_error(exc) from None
+            except httpx.RequestError:
+                raise ProviderTurnError(ProviderErrorCategory.unavailable) from None
+            except (TypeError, ValueError, ValidationError, json.JSONDecodeError):
                 raise ProviderTurnError(
                     ProviderErrorCategory.malformed_response,
                     response_diagnostic=_unavailable_response_diagnostic(
-                        parser_failure_category="transport_non_object",
-                        http_status=http_status,
-                        top_level_shape=_top_level_shape(response),
+                        parser_failure_category="transport_normalization_exception",
+                        http_status=None,
                     ),
-                )
-            return self.parse_response(
-                response,
-                request=request,
-                http_status=http_status,
-            )
-        except ProviderTurnError:
-            raise
-        except httpx.TimeoutException:
-            raise ProviderTurnError(ProviderErrorCategory.timeout) from None
-        except httpx.HTTPStatusError as exc:
-            raise _normalize_http_error(exc) from None
-        except httpx.RequestError:
-            raise ProviderTurnError(ProviderErrorCategory.unavailable) from None
-        except (TypeError, ValueError, ValidationError, json.JSONDecodeError):
-            raise ProviderTurnError(
-                ProviderErrorCategory.malformed_response,
-                response_diagnostic=_unavailable_response_diagnostic(
-                    parser_failure_category="transport_normalization_exception",
-                    http_status=None,
-                ),
-            ) from None
-        except Exception:
-            raise ProviderTurnError.unknown() from None
+                ) from None
+            except Exception:
+                raise ProviderTurnError.unknown() from None
 
     def build_request_payload(self, request: ProviderTurnRequest) -> dict[str, Any]:
         """Translate a validated provider-neutral request into DeepSeek JSON."""

@@ -12,6 +12,7 @@ from typing import Mapping, Sequence
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.base import ProviderTurnAdapter
+from app.ai import ops
 from app.ai.audit import (
     AITurnAuditRecord,
     AITurnOutcome,
@@ -240,6 +241,20 @@ class AITurnService:
 
     async def generate_finalized(self, turn: AITurn) -> FinalizedAITurnResult:
         """Run one bounded turn and finalize only minimized safe provenance."""
+        with ops.observe(
+            "turn",
+            turn_id=turn.turn_id,
+            conversation_id=turn.conversation_id,
+            source_message_id=turn.source_message_id,
+        ) as observation:
+            result = await self._generate_finalized(turn)
+            observation.set(
+                result.audit_record.outcome.value,
+                outbound_message_id=result.outbound_message_id,
+            )
+            return result
+
+    async def _generate_finalized(self, turn: AITurn) -> FinalizedAITurnResult:
         policy = get_system_policy(turn.language)
         context = TrustedCapabilityContext(
             conversation_id=turn.conversation_id,
@@ -299,16 +314,17 @@ class AITurnService:
                 if provider_calls >= self._limits.provider_calls:
                     raise AITurnBudgetExceeded("provider_calls")
                 await self._require_current_authority(context)
-                result = await self._adapter.generate_turn(
-                    ProviderTurnRequest(
-                        messages=base_messages + tuple(tool_result_messages),
-                        system_instruction=policy.text,
-                        allowed_capabilities=provider_capabilities,
-                        max_output_tokens=_MAX_RESPONSE_TOKENS,
-                        reasoning_profile=turn.reasoning_profile,
-                        continuation_state=continuation_state,
-                    )
+                request = ProviderTurnRequest(
+                    messages=base_messages + tuple(tool_result_messages),
+                    system_instruction=policy.text,
+                    allowed_capabilities=provider_capabilities,
+                    max_output_tokens=_MAX_RESPONSE_TOKENS,
+                    reasoning_profile=turn.reasoning_profile,
+                    continuation_state=continuation_state,
                 )
+                with ops.observe("provider_call") as provider_observation:
+                    result = await self._adapter.generate_turn(request)
+                    provider_observation.usage(result)
                 provider_calls += 1
 
                 finalizer_calls = tuple(
@@ -334,10 +350,12 @@ class AITurnService:
                         raise ProviderTurnError(
                             ProviderErrorCategory.malformed_response
                         ) from None
-                    validate_commercial_grounding(
-                        proposal.response_text,
-                        authoritative_commercial_offers.values(),
-                    )
+                    with ops.observe("grounding") as grounding_observation:
+                        validate_commercial_grounding(
+                            proposal.response_text,
+                            authoritative_commercial_offers.values(),
+                        )
+                        grounding_observation.set("passed")
                     await self._require_current_authority(context)
                     return FinalizedAITurnResult(
                         text=proposal.response_text,
@@ -361,10 +379,12 @@ class AITurnService:
                         raise ProviderTurnError(
                             ProviderErrorCategory.malformed_response
                         )
-                    validate_commercial_grounding(
-                        result.text,
-                        authoritative_commercial_offers.values(),
-                    )
+                    with ops.observe("grounding") as grounding_observation:
+                        validate_commercial_grounding(
+                            result.text,
+                            authoritative_commercial_offers.values(),
+                        )
+                        grounding_observation.set("passed")
                     await self._require_current_authority(context)
                     return FinalizedAITurnResult(
                         text=result.text,
@@ -384,6 +404,7 @@ class AITurnService:
                 if tool_rounds >= self._limits.tool_rounds:
                     raise AITurnBudgetExceeded("tool_rounds")
                 tool_rounds += 1
+                ops.tool_round()
 
                 round_call_ids = {call.call_id for call in result.tool_calls}
                 if len(round_call_ids) != len(
@@ -400,32 +421,47 @@ class AITurnService:
                 for index, tool_call in enumerate(result.tool_calls):
                     await self._require_current_authority(context)
                     capability_executions += 1
-                    definition = self._capability_registry.resolve(
-                        tool_call.capability_name
-                    )
-                    if definition is not None and definition.terminal_on_success:
-                        (
-                            execution_result,
-                            terminal_result,
-                        ) = await self._execute_terminal_capability(
-                            tool_call=tool_call,
-                            remaining_calls=result.tool_calls[index + 1 :],
-                            turn=turn,
-                            context=context,
-                            policy_version=policy.version,
-                            exposed_capabilities=allowed_capabilities,
-                            prior_activity=capability_activity,
-                            commercial_state_revision=commercial_state_revision,
+                    with ops.observe(
+                        "capability", capability=tool_call.capability_name,
+                    ) as capability_observation:
+                        definition = self._capability_registry.resolve(
+                            tool_call.capability_name
                         )
-                        if terminal_result is not None:
-                            return terminal_result
-                    else:
-                        execution_result = await self._capability_executor.execute(
-                            requested_name=tool_call.capability_name,
-                            model_arguments=tool_call.arguments,
-                            allowed_capabilities=turn.allowed_capabilities,
-                            context=context,
-                        )
+                        if definition is not None and definition.terminal_on_success:
+                            (
+                                execution_result,
+                                terminal_result,
+                            ) = await self._execute_terminal_capability(
+                                tool_call=tool_call,
+                                remaining_calls=result.tool_calls[index + 1 :],
+                                turn=turn,
+                                context=context,
+                                policy_version=policy.version,
+                                exposed_capabilities=allowed_capabilities,
+                                prior_activity=capability_activity,
+                                commercial_state_revision=commercial_state_revision,
+                            )
+                            if terminal_result is not None:
+                                capability_observation.set("succeeded")
+                                return terminal_result
+                        else:
+                            execution_result = await self._capability_executor.execute(
+                                requested_name=tool_call.capability_name,
+                                model_arguments=tool_call.arguments,
+                                allowed_capabilities=turn.allowed_capabilities,
+                                context=context,
+                            )
+                        if isinstance(execution_result, CapabilityFailure):
+                            capability_observation.set(
+                                "failed"
+                                if execution_result.error == CapabilityErrorCategory.execution_failed
+                                else "denied",
+                                reason=(
+                                    "capability_failed"
+                                    if execution_result.error == CapabilityErrorCategory.execution_failed
+                                    else execution_result.error.value
+                                ),
+                            )
                     if isinstance(execution_result, CapabilitySuccess):
                         authoritative_commercial_offers = merge_authoritative_offers(
                             authoritative_commercial_offers,
@@ -480,119 +516,134 @@ class AITurnService:
             )
 
         for attempt in range(_MAX_DURABLE_ACTION_ATTEMPTS):
-            async with self._durable_session_factory() as session:
-                try:
-                    if self._commercial_state_loader is not None:
-                        await _require_current_transaction_snapshot(
-                            session,
-                            context=context,
-                            source_message_id=turn.source_message_id,
-                            commercial_state_revision=commercial_state_revision,
-                        )
-                    execution_result = await self._capability_executor.execute(
-                        requested_name=tool_call.capability_name,
-                        model_arguments=tool_call.arguments,
-                        allowed_capabilities=turn.allowed_capabilities,
-                        context=context,
-                        runtime=CapabilityExecutionRuntime(transaction_session=session),
-                    )
-                except CapabilityTransactionRetry:
-                    await session.rollback()
-                    if attempt + 1 < _MAX_DURABLE_ACTION_ATTEMPTS:
-                        continue
-                    return (
-                        CapabilityFailure(
-                            CapabilityErrorCategory.execution_failed,
-                            safe_code=(
-                                "order_draft_unavailable"
-                                if tool_call.capability_name == "prepare_order_draft"
-                                else "handoff_unavailable"
-                            ),
-                        ),
-                        None,
-                    )
-
-                if isinstance(execution_result, CapabilityFailure):
-                    await session.rollback()
-                    return execution_result, None
-
-                activity = (
-                    *prior_activity,
-                    _capability_audit_summary(tool_call, execution_result),
-                    *(
-                        CapabilityAuditSummary(
-                            capability_name=remaining.capability_name,
-                            decision=CapabilityAuditDecision.requested,
-                            outcome=CapabilityAuditOutcome.not_executed,
-                        )
-                        for remaining in remaining_calls
-                    ),
-                )
-                is_handoff = isinstance(
-                    execution_result.output, RequestHumanHandoffOutput
-                )
-                is_order_draft = isinstance(
-                    execution_result.output, PrepareOrderDraftOutput
-                )
-                terminal_output = execution_result.output
-                audit_record = self._audit_record(
-                    turn=turn,
-                    policy_version=policy_version,
-                    exposed_capabilities=exposed_capabilities,
-                    capability_activity=activity,
-                    outcome=(
-                        AITurnOutcome.order_draft_presented
-                        if is_order_draft
-                        else AITurnOutcome.handoff_requested
-                    ),
-                    commercial_state_revision=commercial_state_revision,
-                    commercial_state_revision_after=(
-                        terminal_output.commercial_state_revision_after
-                        if is_handoff or is_order_draft
-                        else None
-                    ),
-                    commercial_state_changed_fields=(
-                        execution_result.output.commercial_state_changed_fields
-                        if isinstance(
-                            execution_result.output,
-                            RequestHumanHandoffOutput,
-                        )
-                        else ()
-                    ),
-                    outbound_message_id=(
-                        terminal_output.outbound_message_id
-                        if is_handoff or is_order_draft
-                        else None
-                    ),
-                )
-                try:
-                    await self._audit_appender(session, audit_record)
-                    await session.commit()
-                except Exception:
-                    await _rollback_quietly(session)
-                    raise AITurnPersistenceError from None
-                return (
-                    execution_result,
-                    FinalizedAITurnResult(
-                        text=(
-                            terminal_output.acknowledgment_text
-                            if is_handoff
-                            else (
-                                terminal_output.confirmation_text
-                                if is_order_draft
-                                else None
+            with ops.observe("persistence", boundary="terminal") as persistence_observation:
+                async with self._durable_session_factory() as session:
+                    try:
+                        if self._commercial_state_loader is not None:
+                            await _require_current_transaction_snapshot(
+                                session,
+                                context=context,
+                                source_message_id=turn.source_message_id,
+                                commercial_state_revision=commercial_state_revision,
                             )
+                        execution_result = await self._capability_executor.execute(
+                            requested_name=tool_call.capability_name,
+                            model_arguments=tool_call.arguments,
+                            allowed_capabilities=turn.allowed_capabilities,
+                            context=context,
+                            runtime=CapabilityExecutionRuntime(transaction_session=session),
+                        )
+                    except CapabilityTransactionRetry:
+                        await session.rollback()
+                        persistence_observation.set(
+                            "rolled_back", reason="transaction_retry",
+                            transaction_outcome="rolled_back",
+                        )
+                        if attempt + 1 < _MAX_DURABLE_ACTION_ATTEMPTS:
+                            persistence_observation.set("retry")
+                            continue
+                        return (
+                            CapabilityFailure(
+                                CapabilityErrorCategory.execution_failed,
+                                safe_code=(
+                                    "order_draft_unavailable"
+                                    if tool_call.capability_name == "prepare_order_draft"
+                                    else "handoff_unavailable"
+                                ),
+                            ),
+                            None,
+                        )
+
+                    if isinstance(execution_result, CapabilityFailure):
+                        await session.rollback()
+                        persistence_observation.set(
+                            "rolled_back", reason="capability_failed",
+                            transaction_outcome="rolled_back",
+                        )
+                        return execution_result, None
+
+                    activity = (
+                        *prior_activity,
+                        _capability_audit_summary(tool_call, execution_result),
+                        *(
+                            CapabilityAuditSummary(
+                                capability_name=remaining.capability_name,
+                                decision=CapabilityAuditDecision.requested,
+                                outcome=CapabilityAuditOutcome.not_executed,
+                            )
+                            for remaining in remaining_calls
                         ),
-                        audit_record=audit_record,
-                        audit_persisted=True,
-                        commercial_state_snapshot_revision=commercial_state_revision,
+                    )
+                    is_handoff = isinstance(
+                        execution_result.output, RequestHumanHandoffOutput
+                    )
+                    is_order_draft = isinstance(
+                        execution_result.output, PrepareOrderDraftOutput
+                    )
+                    terminal_output = execution_result.output
+                    audit_record = self._audit_record(
+                        turn=turn,
+                        policy_version=policy_version,
+                        exposed_capabilities=exposed_capabilities,
+                        capability_activity=activity,
+                        outcome=(
+                            AITurnOutcome.order_draft_presented
+                            if is_order_draft
+                            else AITurnOutcome.handoff_requested
+                        ),
+                        commercial_state_revision=commercial_state_revision,
+                        commercial_state_revision_after=(
+                            terminal_output.commercial_state_revision_after
+                            if is_handoff or is_order_draft
+                            else None
+                        ),
+                        commercial_state_changed_fields=(
+                            execution_result.output.commercial_state_changed_fields
+                            if isinstance(
+                                execution_result.output,
+                                RequestHumanHandoffOutput,
+                            )
+                            else ()
+                        ),
                         outbound_message_id=(
                             terminal_output.outbound_message_id
                             if is_handoff or is_order_draft
                             else None
                         ),
-                    ),
-                )
+                    )
+                    try:
+                        await self._audit_appender(session, audit_record)
+                        await session.commit()
+                        persistence_observation.set(
+                            "committed", transaction_outcome="committed",
+                            turn_outcome=audit_record.outcome.value,
+                            outbound_message_id=audit_record.outbound_message_id,
+                        )
+                    except Exception:
+                        await _rollback_quietly(session, observation=persistence_observation)
+                        raise AITurnPersistenceError from None
+                    return (
+                        execution_result,
+                        FinalizedAITurnResult(
+                            text=(
+                                terminal_output.acknowledgment_text
+                                if is_handoff
+                                else (
+                                    terminal_output.confirmation_text
+                                    if is_order_draft
+                                    else None
+                                )
+                            ),
+                            audit_record=audit_record,
+                            audit_persisted=True,
+                            commercial_state_snapshot_revision=commercial_state_revision,
+                            outbound_message_id=(
+                                terminal_output.outbound_message_id
+                                if is_handoff or is_order_draft
+                                else None
+                            ),
+                        ),
+                    )
 
         raise AssertionError("durable action retry loop did not terminate")
 
@@ -730,9 +781,11 @@ async def _require_current_transaction_snapshot(
         raise StaleAITurnAuthority
 
 
-async def _rollback_quietly(session: AsyncSession) -> None:
+async def _rollback_quietly(session: AsyncSession, *, observation=None) -> None:
     try:
         await session.rollback()
+        if observation is not None:
+            observation.set(transaction_outcome="rolled_back")
     except Exception:
         return
 
