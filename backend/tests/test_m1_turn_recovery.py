@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import inspect
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
@@ -11,6 +15,25 @@ from app.modules.m1_gateway import turn_recovery
 
 
 REVISION = "b4c5d6e7f8a9"
+
+
+class _LegacySession:
+    def __init__(self, conversation, *scalar_results) -> None:
+        self.conversation = conversation
+        self.scalar_results = iter(scalar_results)
+        self.added = None
+
+    async def get(self, *_args, **_kwargs):
+        return self.conversation
+
+    async def scalar(self, _statement):
+        return next(self.scalar_results)
+
+    def add(self, value) -> None:
+        self.added = value
+
+    async def flush(self) -> None:
+        return None
 
 
 def test_migration_is_linear_additive_content_free_and_reversible() -> None:
@@ -66,3 +89,91 @@ def test_recovery_is_an_explicit_m1_lifecycle_not_a_workflow_engine() -> None:
     assert "workflow" not in source.lower()
     assert "celery_app" not in source
     assert "redis" not in source.lower()
+
+
+@pytest.mark.asyncio
+async def test_legacy_confirmed_order_preserves_no_send_disposition() -> None:
+    source = SimpleNamespace(
+        message_id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+    )
+    outbound_message_id = uuid.uuid4()
+    conversation = SimpleNamespace(
+        ownership_version=3,
+        ownership_updated_at=datetime.now(timezone.utc),
+        owner_type="ai",
+        ai_execution_state="eligible",
+    )
+    resolved_draft = SimpleNamespace(
+        resolution_outbound_message_id=outbound_message_id,
+        order_id=uuid.uuid4(),
+        resolved_at=datetime.now(timezone.utc),
+    )
+
+    session = _LegacySession(conversation, None, resolved_draft, source.message_id)
+    lifecycle = await turn_recovery._legacy_lifecycle(session, source)
+
+    assert session.added is lifecycle
+    assert lifecycle.state == "skipped"
+    assert lifecycle.disposition_code == "order_committed_no_send"
+    assert lifecycle.outcome_type == "draft_reply"
+    assert lifecycle.outbound_message_id == outbound_message_id
+    assert lifecycle.ownership_version == 3
+
+
+@pytest.mark.asyncio
+async def test_legacy_audit_cannot_cross_an_ownership_generation() -> None:
+    source = SimpleNamespace(
+        message_id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+    )
+    committed_at = datetime.now(timezone.utc)
+    outbound_message_id = uuid.uuid4()
+    audit = SimpleNamespace(
+        outcome="response_generated",
+        outbound_message_id=outbound_message_id,
+        created_at=committed_at,
+    )
+    conversation = SimpleNamespace(
+        ownership_version=4,
+        ownership_updated_at=committed_at + timedelta(seconds=1),
+        owner_type="ai",
+        ai_execution_state="eligible",
+    )
+
+    session = _LegacySession(conversation, audit, None, source.message_id)
+    lifecycle = await turn_recovery._legacy_lifecycle(session, source)
+
+    assert lifecycle.state == "skipped"
+    assert lifecycle.disposition_code == "ownership_changed_before_send"
+    assert lifecycle.outcome_type == "response"
+    assert lifecycle.outbound_message_id == outbound_message_id
+
+
+@pytest.mark.asyncio
+async def test_legacy_draft_reply_cannot_cross_an_ownership_generation() -> None:
+    source = SimpleNamespace(
+        message_id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+    )
+    resolved_at = datetime.now(timezone.utc)
+    outbound_message_id = uuid.uuid4()
+    resolved_draft = SimpleNamespace(
+        resolution_outbound_message_id=outbound_message_id,
+        order_id=None,
+        resolved_at=resolved_at,
+    )
+    conversation = SimpleNamespace(
+        ownership_version=4,
+        ownership_updated_at=resolved_at + timedelta(seconds=1),
+        owner_type="ai",
+        ai_execution_state="eligible",
+    )
+
+    session = _LegacySession(conversation, None, resolved_draft, source.message_id)
+    lifecycle = await turn_recovery._legacy_lifecycle(session, source)
+
+    assert lifecycle.state == "skipped"
+    assert lifecycle.disposition_code == "ownership_changed_before_send"
+    assert lifecycle.outcome_type == "draft_reply"
+    assert lifecycle.outbound_message_id == outbound_message_id

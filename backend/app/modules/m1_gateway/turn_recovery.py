@@ -92,6 +92,7 @@ async def _legacy_lifecycle(
     )
     outcome_type = None
     outbound_message_id = None
+    ownership_version = conversation.ownership_version
     if resolved_draft is not None:
         outcome_type = "draft_reply"
         outbound_message_id = resolved_draft.resolution_outbound_message_id
@@ -105,6 +106,22 @@ async def _legacy_lifecycle(
 
     state = "outcome_committed" if outbound_message_id is not None else "pending"
     disposition = None
+    if resolved_draft is not None and resolved_draft.order_id is not None:
+        state = "skipped"
+        disposition = "order_committed_no_send"
+    elif (
+        resolved_draft is not None
+        and conversation.ownership_updated_at > resolved_draft.resolved_at
+    ):
+        state = "skipped"
+        disposition = "ownership_changed_before_send"
+    elif (
+        audit is not None
+        and outcome_type != "handoff"
+        and conversation.ownership_updated_at > audit.created_at
+    ):
+        state = "skipped"
+        disposition = "ownership_changed_before_send"
     latest_inbound_id = await session.scalar(
         select(Message.message_id)
         .where(
@@ -131,7 +148,7 @@ async def _legacy_lifecycle(
     lifecycle = InboundTurnLifecycle(
         source_message_id=source.message_id,
         conversation_id=source.conversation_id,
-        ownership_version=conversation.ownership_version,
+        ownership_version=ownership_version,
         state=state,
         outcome_type=outcome_type,
         outbound_message_id=outbound_message_id,
