@@ -7,6 +7,7 @@ import pytest
 from app.ai.capabilities import (
     CapabilityDefinition,
     CapabilityRegistry,
+    SafeCapabilityError,
     StrictCapabilityModel,
 )
 from app.ai.evaluation import EvaluationOutcomeClass
@@ -14,6 +15,7 @@ from app.ai.journey_harness import (
     ProductionJourneyHarness,
     ProductionJourneyObservationSource,
     ScriptedProvider,
+    fixture_registry,
 )
 from app.ai.evaluation_corpus import get_mbb_evaluation_corpus
 from app.ai.production_journey_corpus import (
@@ -134,6 +136,44 @@ async def test_nonterminal_capability_continuation_stays_in_production_loop():
     assert execution.finalized is not None
     assert execution.finalized.text == "Après l'outil"
     assert len(provider.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_fixture_failure_is_observed_through_the_production_executor():
+    provider = ScriptedProvider(
+        [
+            ProviderTurnResult(
+                tool_calls=(
+                    ProviderToolCall(
+                        call_id="search_1",
+                        capability_name="search_products",
+                        arguments={"query": "air fryer"},
+                    ),
+                ),
+                finish_reason=ProviderFinishReason.tool_call,
+            ),
+            _text("Je ne peux pas vérifier le catalogue maintenant."),
+        ]
+    )
+    service = AITurnService(
+        provider,
+        capability_registry=fixture_registry(
+            {"search_products": SafeCapabilityError("catalogue_unavailable")}
+        ),
+        authority_checker=lambda _context: _allowed(),
+    )
+    harness = ProductionJourneyHarness(provider, service=service)
+
+    execution = await harness.execute(
+        type("Case", (), {"case_id": "capability_failure"})(),
+        _turn(allowed_capabilities=("search_products",)),
+    )
+
+    assert execution.finalized is not None
+    assert execution.finalized.audit_record.capability_activity[0].safe_code == (
+        "catalogue_unavailable"
+    )
+    assert provider.requests[1].messages[-1].role == "tool_result"
 
 
 @pytest.mark.asyncio

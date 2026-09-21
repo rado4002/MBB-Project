@@ -27,12 +27,12 @@ from app.ai.evaluation import (
     RecordedProviderCall,
 )
 from app.ai.provider_contract import (
-    ProviderIdentity,
     ProviderToolError,
     ProviderToolResult,
     ProviderTurnError,
     ProviderTurnRequest,
     ProviderTurnResult,
+    ProviderReasoningProfile,
 )
 from app.ai.turn import (
     AITurn,
@@ -91,6 +91,8 @@ def fixture_registry(
         fixture = fixtures[name]
 
         async def handler(_context: Any, _arguments: Any, *, value=fixture) -> object:
+            if isinstance(value, SafeCapabilityError):
+                raise value
             if isinstance(value, Exception):
                 raise SafeCapabilityError(str(value))
             return value
@@ -102,6 +104,8 @@ def fixture_registry(
             *,
             value=fixture,
         ) -> object:
+            if isinstance(value, SafeCapabilityError):
+                raise value
             if isinstance(value, Exception):
                 raise SafeCapabilityError(str(value))
             return value
@@ -134,6 +138,7 @@ class JourneyExecution:
     finalized: FinalizedAITurnResult | None
     execution_error: AITurnExecutionError | None
     provider_calls: tuple[ProviderTurnResult, ...]
+    provider_requests: tuple[ProviderTurnRequest, ...] = ()
 
 
 class ProductionJourneyHarness:
@@ -141,7 +146,7 @@ class ProductionJourneyHarness:
 
     def __init__(
         self,
-        provider: ScriptedProvider,
+        provider: ProviderTurnAdapter,
         *,
         service: AITurnService | None = None,
         service_factory: Callable[[ProviderTurnAdapter], AITurnService] | None = None,
@@ -149,19 +154,23 @@ class ProductionJourneyHarness:
         if service is not None and service_factory is not None:
             raise ValueError("provide service or service_factory, not both")
         self.provider = provider
-        self.service = service or (
-            service_factory(provider)
-            if service_factory is not None
-            else AITurnService(
-                provider,
-                provider_identity=ProviderIdentity(
-                    provider=provider.provider_name,
-                    model=provider.model,
-                ),
-            )
-        )
+        if not isinstance(getattr(provider, "requests", None), list) or not isinstance(
+            getattr(provider, "results", None), list
+        ):
+            raise ValueError("journey provider must record requests and results")
+        if service is not None:
+            self.service = service
+        elif service_factory is not None:
+            self.service = service_factory(provider)
+        else:
+            identity = provider.provider_identity
+            if identity is None:
+                raise ValueError("journey provider identity is unavailable")
+            self.service = AITurnService(provider, provider_identity=identity)
 
     async def execute(self, case: EvaluationCase, turn: AITurn) -> JourneyExecution:
+        request_start = len(self.provider.requests)
+        result_start = len(self.provider.results)
         try:
             finalized = await self.service.generate_finalized(turn)
         except AITurnExecutionError as exc:
@@ -169,19 +178,23 @@ class ProductionJourneyHarness:
                 case_id=case.case_id,
                 finalized=None,
                 execution_error=exc,
-                provider_calls=tuple(self.provider.results),
+                provider_calls=tuple(self.provider.results[result_start:]),
+                provider_requests=tuple(self.provider.requests[request_start:]),
             )
         return JourneyExecution(
             case_id=case.case_id,
             finalized=finalized,
             execution_error=None,
-            provider_calls=tuple(self.provider.results),
+            provider_calls=tuple(self.provider.results[result_start:]),
+            provider_requests=tuple(self.provider.requests[request_start:]),
         )
 
     async def observe(self, case: EvaluationCase, turn: AITurn) -> EvaluationObservation:
         execution = await self.execute(case, turn)
         calls = tuple(RecordedProviderCall(result=result) for result in execution.provider_calls)
         if not calls:
+            if execution.execution_error is not None:
+                raise execution.execution_error.original_error
             raise ValueError("production journey produced no provider observation")
         audit = (
             execution.finalized.audit_record
@@ -190,7 +203,7 @@ class ProductionJourneyHarness:
         )
         activities = list(audit.capability_activity)
         serialized_results: dict[str, dict[str, Any]] = {}
-        for request in self.provider.requests:
+        for request in execution.provider_requests:
             for message in request.messages:
                 if message.role != "tool_result" or message.content is None:
                     continue
@@ -254,16 +267,35 @@ class ProductionJourneyObservationSource:
 
     def __init__(
         self,
-        provider: ScriptedProvider,
+        provider: ProviderTurnAdapter,
         *,
-        service_factory: Callable[[ProviderTurnAdapter], AITurnService],
+        service_factory: Callable[[ProviderTurnAdapter], AITurnService] | None = None,
+        case_service_factory: Callable[
+            [ProviderTurnAdapter, EvaluationCase], AITurnService
+        ]
+        | None = None,
+        reasoning_profile: ProviderReasoningProfile = ProviderReasoningProfile.default,
     ) -> None:
-        self._harness = ProductionJourneyHarness(
-            provider,
-            service_factory=service_factory,
+        if (service_factory is None) == (case_service_factory is None):
+            raise ValueError("provide exactly one journey service factory")
+        self._provider = provider
+        self._service_factory = service_factory
+        self._case_service_factory = case_service_factory
+        self._reasoning_profile = reasoning_profile
+        self._harness = (
+            ProductionJourneyHarness(provider, service_factory=service_factory)
+            if service_factory is not None
+            else None
         )
 
     async def observe(self, case: EvaluationCase):
+        harness = self._harness
+        if harness is None:
+            assert self._case_service_factory is not None
+            harness = ProductionJourneyHarness(
+                self._provider,
+                service=self._case_service_factory(self._provider, case),
+            )
         turn = AITurn(
             user_content=case.customer_input,
             language={
@@ -284,5 +316,6 @@ class ProductionJourneyObservationSource:
                 for item in case.conversation_context
             ),
             allowed_capabilities=tuple(case.exposed_capabilities),
+            reasoning_profile=self._reasoning_profile,
         )
-        return await self._harness.observe(case, turn)
+        return await harness.observe(case, turn)

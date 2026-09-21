@@ -16,32 +16,33 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.adapters import get_provider_turn_adapter  # noqa: E402
 from app.adapters.base import ProviderTurnAdapter  # noqa: E402
 from app.ai.evaluation import (  # noqa: E402
+    EvaluationCase,
     EvaluationReplay,
-    EvaluationRunMetadata,
     EvaluationRunner,
     ScriptedEvaluationSource,
 )
 from app.ai.evaluation_corpus import (  # noqa: E402
-    MBB_EVALUATION_CORPUS_VERSION,
     get_mbb_evaluation_corpus,
 )
 from app.ai.live_evaluation import (  # noqa: E402
-    FIRST_LIVE_CANARY_CASE_IDS,
+    LIVE_JOURNEY_CASE_IDS,
     LiveEvaluationBudgetExceeded,
-    LiveEvaluationBudgetState,
     LiveEvaluationConfigurationError,
     LiveEvaluationFailureReport,
-    LiveEvaluationMatrixReport,
     LiveEvaluationProviderFailure,
-    LiveEvaluationProviderFailureReport,
     LiveEvaluationRunBudget,
-    LiveEvaluationSource,
+    LiveJourneyController,
+)
+from app.ai.capabilities import SafeCapabilityError  # noqa: E402
+from app.ai.journey_harness import (  # noqa: E402
+    ProductionJourneyObservationSource,
+    fixture_registry,
 )
 from app.ai.policy import AI_SYSTEM_POLICY_VERSION  # noqa: E402
 from app.ai.provider_contract import (  # noqa: E402
-    ProviderIdentity,
     ProviderReasoningProfile,
 )
+from app.ai.turn import AITurnLimits, AITurnService  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
 
 AdapterFactory = Callable[[], ProviderTurnAdapter]
@@ -127,42 +128,62 @@ async def _run_live(
     )
     factory = adapter_factory or get_provider_turn_adapter
     adapter = factory()
-    identity = adapter.provider_identity
-    if not isinstance(identity, ProviderIdentity) or identity.model is None:
-        raise LiveEvaluationConfigurationError("provider_identity_unavailable")
-
     run_budget = budget or LiveEvaluationRunBudget()
-    budget_state = LiveEvaluationBudgetState(run_budget)
-    reports = []
     corpus = get_mbb_evaluation_corpus()
-    for profile in profiles:
-        metadata = EvaluationRunMetadata(
-            corpus_version=MBB_EVALUATION_CORPUS_VERSION,
-            provider=identity.provider,
-            model=identity.model,
-            reasoning_profile=profile,
-            policy_version=AI_SYSTEM_POLICY_VERSION,
-        )
-        runner = EvaluationRunner(
-            LiveEvaluationSource(
-                adapter,
-                reasoning_profile=profile,
-                budget_state=budget_state,
+    controller = LiveJourneyController(
+        adapter,
+        source_factory=lambda provider, profile: ProductionJourneyObservationSource(
+            provider,
+            case_service_factory=lambda bounded, case: _case_service(
+                bounded,
+                case,
+                run_budget,
             ),
-            metadata,
-        )
-        reports.append(
-            await runner.run(corpus, case_ids=FIRST_LIVE_CANARY_CASE_IDS)
-        )
-
-    matrix = LiveEvaluationMatrixReport(
-        corpus_version=MBB_EVALUATION_CORPUS_VERSION,
-        case_ids=FIRST_LIVE_CANARY_CASE_IDS,
-        reasoning_profiles=profiles,
+            reasoning_profile=profile,
+        ),
+        policy_version=AI_SYSTEM_POLICY_VERSION,
         budget=run_budget,
-        reports=tuple(reports),
+        explicitly_authorized=True,
+    )
+    matrix = await controller.run(
+        corpus,
+        case_ids=LIVE_JOURNEY_CASE_IDS,
+        reasoning_profiles=profiles,
     )
     return _serialize_report(matrix, pretty=args.pretty)
+
+
+def _case_service(
+    adapter: ProviderTurnAdapter,
+    case: EvaluationCase,
+    budget: LiveEvaluationRunBudget,
+) -> AITurnService:
+    fixtures = {item.capability_name: item for item in case.capability_fixtures}
+    values: dict[str, object | Exception] = {}
+    for name in case.exposed_capabilities:
+        fixture = fixtures.get(name)
+        if fixture is None:
+            values[name] = SafeCapabilityError("evaluation_fixture_unavailable")
+        elif fixture.status == "success":
+            values[name] = fixture.output
+        else:
+            values[name] = SafeCapabilityError(
+                fixture.safe_code or fixture.error_category or "fixture_failed"
+            )
+    return AITurnService(
+        adapter,
+        capability_registry=fixture_registry(values),
+        authority_checker=_evaluation_authority,
+        limits=AITurnLimits(
+            provider_calls=budget.max_provider_calls_per_case,
+            tool_rounds=budget.max_tool_rounds_per_case,
+            capability_executions=budget.max_capability_executions_per_case,
+        ),
+    )
+
+
+async def _evaluation_authority(_context: object) -> bool:
+    return True
 
 
 def _serialize_report(report: BaseModel, *, pretty: bool) -> str:
@@ -235,7 +256,7 @@ def main() -> int:
         return 1
     except LiveEvaluationProviderFailure as exc:
         failure_output = _serialize_report(
-            LiveEvaluationProviderFailureReport(failure=exc.evidence),
+            LiveEvaluationFailureReport(failure=exc.evidence),
             pretty=args.pretty,
         )
         if args.output is None:
