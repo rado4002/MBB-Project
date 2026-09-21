@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field, replace
-from typing import Mapping, Sequence
+from typing import Mapping, Sequence, TypeVar
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -79,6 +81,7 @@ DurableSessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
 AuditAppender = Callable[[AsyncSession, AITurnAuditRecord], Awaitable[object]]
 CommercialStateLoader = Callable[[uuid.UUID], Awaitable[CommercialState | None]]
 TurnLifecycleRecorder = Callable[..., Awaitable[bool]]
+_T = TypeVar("_T")
 
 
 class StaleAITurnAuthority(RuntimeError):
@@ -94,6 +97,13 @@ class AITurnBudgetExceeded(RuntimeError):
     def __init__(self, budget: str) -> None:
         self.budget = budget
         super().__init__(f"ai_turn_budget_exceeded:{budget}")
+
+
+class AITurnDeadlineExceeded(RuntimeError):
+    """The configured whole-turn execution budget expired."""
+
+    def __init__(self) -> None:
+        super().__init__("ai_turn_deadline_exceeded")
 
 
 class AITurnPersistenceError(RuntimeError):
@@ -136,6 +146,40 @@ class AITurnLimits:
         )
         if any(value <= 0 or value > ceiling for _, value, ceiling in ceilings):
             raise ValueError("AI turn limits must be positive and within hard ceilings")
+
+
+@dataclass(frozen=True)
+class _TurnDeadline:
+    expires_at: float | None
+
+    @classmethod
+    def start(cls, seconds: float | None) -> _TurnDeadline:
+        if seconds is None or seconds == 0:
+            return cls(expires_at=None)
+        if seconds < 0:
+            raise ValueError("AI turn deadline must be non-negative")
+        return cls(expires_at=time.monotonic() + seconds)
+
+    def require_remaining(self) -> float | None:
+        if self.expires_at is None:
+            return None
+        remaining = self.expires_at - time.monotonic()
+        if remaining <= 0:
+            raise AITurnDeadlineExceeded
+        return remaining
+
+    async def run(self, operation: Callable[[], Awaitable[_T]]) -> _T:
+        remaining = self.require_remaining()
+        if remaining is None:
+            return await operation()
+        timeout = asyncio.timeout(remaining)
+        try:
+            async with timeout:
+                return await operation()
+        except TimeoutError:
+            if timeout.expired():
+                raise AITurnDeadlineExceeded from None
+            raise
 
 
 @dataclass(frozen=True)
@@ -215,6 +259,7 @@ class AITurnService:
         provider_identity: ProviderIdentity | None = None,
         commercial_state_loader: CommercialStateLoader | None = None,
         turn_lifecycle_recorder: TurnLifecycleRecorder | None = None,
+        deadline_seconds: float | None = None,
     ) -> None:
         self._adapter = adapter
         self._capability_registry = capability_registry
@@ -225,6 +270,7 @@ class AITurnService:
         self._audit_appender = audit_appender or append_ai_turn_audit
         self._commercial_state_loader = commercial_state_loader
         self._turn_lifecycle_recorder = turn_lifecycle_recorder
+        self._deadline_seconds = deadline_seconds
         configured_identity = provider_identity
         if configured_identity is None:
             candidate = getattr(adapter, "provider_identity", None)
@@ -258,6 +304,7 @@ class AITurnService:
             return result
 
     async def _generate_finalized(self, turn: AITurn) -> FinalizedAITurnResult:
+        deadline = _TurnDeadline.start(self._deadline_seconds)
         policy = get_system_policy(turn.language)
         context = TrustedCapabilityContext(
             conversation_id=turn.conversation_id,
@@ -297,8 +344,8 @@ class AITurnService:
 
         try:
             if self._commercial_state_loader is not None:
-                commercial_state = await self._commercial_state_loader(
-                    turn.conversation_id
+                commercial_state = await deadline.run(
+                    lambda: self._commercial_state_loader(turn.conversation_id)
                 )
                 commercial_state_revision = (
                     commercial_state.revision if commercial_state is not None else 0
@@ -316,7 +363,7 @@ class AITurnService:
             while True:
                 if provider_calls >= self._limits.provider_calls:
                     raise AITurnBudgetExceeded("provider_calls")
-                await self._require_current_authority(context)
+                await self._require_current_authority(context, deadline=deadline)
                 request = ProviderTurnRequest(
                     messages=base_messages + tuple(tool_result_messages),
                     system_instruction=policy.text,
@@ -326,7 +373,9 @@ class AITurnService:
                     continuation_state=continuation_state,
                 )
                 with ops.observe("provider_call") as provider_observation:
-                    result = await self._adapter.generate_turn(request)
+                    result = await deadline.run(
+                        lambda: self._adapter.generate_turn(request)
+                    )
                     provider_observation.usage(result)
                 provider_calls += 1
 
@@ -359,7 +408,7 @@ class AITurnService:
                             authoritative_commercial_offers.values(),
                         )
                         grounding_observation.set("passed")
-                    await self._require_current_authority(context)
+                    await self._require_current_authority(context, deadline=deadline)
                     return FinalizedAITurnResult(
                         text=proposal.response_text,
                         audit_record=self._audit_record(
@@ -388,7 +437,7 @@ class AITurnService:
                             authoritative_commercial_offers.values(),
                         )
                         grounding_observation.set("passed")
-                    await self._require_current_authority(context)
+                    await self._require_current_authority(context, deadline=deadline)
                     return FinalizedAITurnResult(
                         text=result.text,
                         audit_record=self._audit_record(
@@ -422,7 +471,7 @@ class AITurnService:
                 ):
                     raise AITurnBudgetExceeded("capability_executions")
                 for index, tool_call in enumerate(result.tool_calls):
-                    await self._require_current_authority(context)
+                    await self._require_current_authority(context, deadline=deadline)
                     capability_executions += 1
                     with ops.observe(
                         "capability", capability=tool_call.capability_name,
@@ -443,16 +492,19 @@ class AITurnService:
                                 exposed_capabilities=allowed_capabilities,
                                 prior_activity=capability_activity,
                                 commercial_state_revision=commercial_state_revision,
+                                deadline=deadline,
                             )
                             if terminal_result is not None:
                                 capability_observation.set("succeeded")
                                 return terminal_result
                         else:
-                            execution_result = await self._capability_executor.execute(
-                                requested_name=tool_call.capability_name,
-                                model_arguments=tool_call.arguments,
-                                allowed_capabilities=turn.allowed_capabilities,
-                                context=context,
+                            execution_result = await deadline.run(
+                                lambda: self._capability_executor.execute(
+                                    requested_name=tool_call.capability_name,
+                                    model_arguments=tool_call.arguments,
+                                    allowed_capabilities=turn.allowed_capabilities,
+                                    context=context,
+                                )
                             )
                         if isinstance(execution_result, CapabilityFailure):
                             capability_observation.set(
@@ -508,6 +560,7 @@ class AITurnService:
         exposed_capabilities: Sequence[ProviderCapability],
         prior_activity: Sequence[CapabilityAuditSummary],
         commercial_state_revision: int,
+        deadline: _TurnDeadline,
     ) -> tuple[CapabilityExecutionResult, FinalizedAITurnResult | None]:
         if self._durable_session_factory is None:
             return (
@@ -519,23 +572,36 @@ class AITurnService:
             )
 
         for attempt in range(_MAX_DURABLE_ACTION_ATTEMPTS):
+            deadline.require_remaining()
             with ops.observe("persistence", boundary="terminal") as persistence_observation:
                 async with self._durable_session_factory() as session:
                     try:
                         if self._commercial_state_loader is not None:
-                            await _require_current_transaction_snapshot(
-                                session,
-                                context=context,
-                                source_message_id=turn.source_message_id,
-                                commercial_state_revision=commercial_state_revision,
+                            await deadline.run(
+                                lambda: _require_current_transaction_snapshot(
+                                    session,
+                                    context=context,
+                                    source_message_id=turn.source_message_id,
+                                    commercial_state_revision=commercial_state_revision,
+                                )
                             )
-                        execution_result = await self._capability_executor.execute(
-                            requested_name=tool_call.capability_name,
-                            model_arguments=tool_call.arguments,
-                            allowed_capabilities=turn.allowed_capabilities,
-                            context=context,
-                            runtime=CapabilityExecutionRuntime(transaction_session=session),
+                        execution_result = await deadline.run(
+                            lambda: self._capability_executor.execute(
+                                requested_name=tool_call.capability_name,
+                                model_arguments=tool_call.arguments,
+                                allowed_capabilities=turn.allowed_capabilities,
+                                context=context,
+                                runtime=CapabilityExecutionRuntime(
+                                    transaction_session=session
+                                ),
+                            )
                         )
+                    except AITurnDeadlineExceeded:
+                        await _rollback_quietly(
+                            session, observation=persistence_observation
+                        )
+                        persistence_observation.set("rolled_back", reason="timeout")
+                        raise
                     except CapabilityTransactionRetry:
                         await session.rollback()
                         persistence_observation.set(
@@ -615,22 +681,37 @@ class AITurnService:
                         ),
                     )
                     try:
-                        await self._audit_appender(session, audit_record)
+                        await deadline.run(
+                            lambda: self._audit_appender(session, audit_record)
+                        )
                         if self._turn_lifecycle_recorder is not None:
-                            await self._turn_lifecycle_recorder(
-                                session,
-                                source_message_id=turn.source_message_id,
-                                outbound_message_id=terminal_output.outbound_message_id,
-                                outcome_type=(
-                                    "handoff" if is_handoff else "order_draft"
-                                ),
+                            await deadline.run(
+                                lambda: self._turn_lifecycle_recorder(
+                                    session,
+                                    source_message_id=turn.source_message_id,
+                                    outbound_message_id=(
+                                        terminal_output.outbound_message_id
+                                    ),
+                                    outcome_type=(
+                                        "handoff" if is_handoff else "order_draft"
+                                    ),
+                                )
                             )
+                        deadline.require_remaining()
+                        # Do not cancel an in-flight commit: its result may be
+                        # durable even if the wall-clock budget expires here.
                         await session.commit()
                         persistence_observation.set(
                             "committed", transaction_outcome="committed",
                             turn_outcome=audit_record.outcome.value,
                             outbound_message_id=audit_record.outbound_message_id,
                         )
+                    except AITurnDeadlineExceeded:
+                        await _rollback_quietly(
+                            session, observation=persistence_observation
+                        )
+                        persistence_observation.set("rolled_back", reason="timeout")
+                        raise
                     except Exception:
                         await _rollback_quietly(session, observation=persistence_observation)
                         raise AITurnPersistenceError from None
@@ -703,11 +784,16 @@ class AITurnService:
     async def _require_current_authority(
         self,
         context: TrustedCapabilityContext,
+        *,
+        deadline: _TurnDeadline,
     ) -> None:
         if self._authority_checker is None:
+            deadline.require_remaining()
             return
         try:
-            is_current = await self._authority_checker(context)
+            is_current = await deadline.run(lambda: self._authority_checker(context))
+        except AITurnDeadlineExceeded:
+            raise
         except Exception:
             raise StaleAITurnAuthority from None
         if not is_current:
@@ -717,6 +803,7 @@ class AITurnService:
 def get_ai_turn_service() -> AITurnService:
     """Build the service using the repository's existing adapter factory."""
     from app.adapters import get_provider_turn_adapter
+    from app.config import get_settings
     from app.database import async_session_factory
     from app.modules.m1_gateway.turn_recovery import mark_outcome_committed
 
@@ -726,20 +813,32 @@ def get_ai_turn_service() -> AITurnService:
         durable_session_factory=async_session_factory,
         commercial_state_loader=_postgres_commercial_state_loader,
         turn_lifecycle_recorder=mark_outcome_committed,
+        deadline_seconds=get_settings().ai_turn_deadline_s,
     )
 
 
 async def _ai_authority_is_current(context: TrustedCapabilityContext) -> bool:
-    """Re-check the existing authoritative ownership/version gate."""
+    """Reject obsolete work before provider or capability capacity is spent."""
     from app.database import async_session_factory
+    from app.modules.m1_gateway.turn_recovery import source_is_latest
     from app.modules.m4_conversation.ownership import ai_may_reply
 
     async with async_session_factory() as session:
-        return await ai_may_reply(
+        if not await ai_may_reply(
             session,
             context.conversation_id,
             expected_ownership_version=context.expected_ownership_version,
-        )
+        ):
+            return False
+        if context.source_message_id is not None and not await source_is_latest(
+            session,
+            conversation_id=context.conversation_id,
+            source_message_id=context.source_message_id,
+        ):
+            return False
+        current_state = await read_commercial_state(session, context.conversation_id)
+        current_revision = current_state.revision if current_state is not None else 0
+        return current_revision == context.commercial_state_revision
 
 
 async def _postgres_commercial_state_loader(
@@ -844,6 +943,8 @@ def _turn_failure_safe_code(error: Exception) -> str:
         return "stale_ai_authority"
     if isinstance(error, AITurnBudgetExceeded):
         return "budget_exceeded"
+    if isinstance(error, AITurnDeadlineExceeded):
+        return "timeout"
     return "provider_failure"
 
 

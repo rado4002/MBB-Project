@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import json
 import uuid
@@ -37,6 +38,7 @@ from app.ai.provider_contract import (
 from app.ai.turn import (
     AITurn,
     AITurnBudgetExceeded,
+    AITurnDeadlineExceeded,
     AITurnExecutionError,
     AITurnLimits,
     AITurnPersistenceError,
@@ -807,6 +809,157 @@ async def test_authority_lost_after_inference_prevents_capability_execution():
     with pytest.raises(StaleAITurnAuthority):
         await service.generate(_turn(allowed_capabilities=("echo_value",)))
     assert executions == 0
+
+
+@pytest.mark.asyncio
+async def test_stale_before_first_provider_call_spends_no_provider_capacity():
+    adapter = _RecordingAdapter()
+
+    async def stale(_context):
+        return False
+
+    service = AITurnService(adapter, authority_checker=stale)
+
+    with pytest.raises(AITurnExecutionError) as captured:
+        await service.generate_finalized(_turn(source_message_id=uuid.uuid4()))
+
+    assert isinstance(captured.value.original_error, StaleAITurnAuthority)
+    assert captured.value.audit_record.safe_code == "stale_ai_authority"
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_stale_between_provider_rounds_prevents_continuation_call():
+    checks = iter((True, True, False))
+    executions = 0
+
+    async def checker(_context):
+        return next(checks)
+
+    async def handler(context, arguments):
+        nonlocal executions
+        executions += 1
+        return {
+            "value": arguments.value,
+            "trusted_conversation_id": context.conversation_id,
+        }
+
+    adapter = _SequenceAdapter(_tool_result(_tool_call()))
+    service = AITurnService(
+        adapter,
+        capability_registry=_echo_registry(handler),
+        authority_checker=checker,
+    )
+
+    with pytest.raises(AITurnExecutionError) as captured:
+        await service.generate_finalized(
+            _turn(allowed_capabilities=("echo_value",))
+        )
+
+    assert captured.value.audit_record.safe_code == "stale_ai_authority"
+    assert executions == 1
+    assert len(adapter.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_whole_turn_deadline_stops_a_provider_call_without_durable_effect():
+    started = asyncio.Event()
+
+    class SlowAdapter:
+        calls = 0
+
+        async def generate_turn(self, _request):
+            self.calls += 1
+            started.set()
+            await asyncio.Event().wait()
+
+    adapter = SlowAdapter()
+    service = AITurnService(adapter, deadline_seconds=0.02)
+
+    with pytest.raises(AITurnExecutionError) as captured:
+        await service.generate_finalized(_turn())
+
+    assert started.is_set()
+    assert adapter.calls == 1
+    assert isinstance(captured.value.original_error, AITurnDeadlineExceeded)
+    assert captured.value.audit_record.safe_code == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_terminal_timeout_rolls_back_before_durable_outcome():
+    session = _TransactionSession()
+    persisted = []
+
+    async def handler(runtime_session, context, arguments):
+        runtime_session.mutated = True
+        await asyncio.Event().wait()
+        return {
+            "value": arguments.value,
+            "trusted_conversation_id": context.conversation_id,
+        }
+
+    async def append_audit(_runtime_session, record):
+        persisted.append(record)
+
+    service = AITurnService(
+        _SequenceAdapter(_tool_result(_tool_call(name="terminal_action"))),
+        capability_registry=_terminal_registry(handler),
+        authority_checker=_authority_allowed,
+        durable_session_factory=lambda: _TransactionContext(session),
+        audit_appender=append_audit,
+        deadline_seconds=0.02,
+    )
+
+    with pytest.raises(AITurnExecutionError) as captured:
+        await service.generate_finalized(
+            _turn(allowed_capabilities=("terminal_action",))
+        )
+
+    assert isinstance(captured.value.original_error, AITurnDeadlineExceeded)
+    assert captured.value.audit_record.safe_code == "timeout"
+    assert session.mutated is False
+    assert session.events == ["rollback"]
+    assert persisted == []
+
+
+@pytest.mark.asyncio
+async def test_durable_terminal_commit_wins_if_deadline_expires_during_commit():
+    class SlowCommitSession(_TransactionSession):
+        async def commit(self):
+            await asyncio.sleep(0.06)
+            await super().commit()
+
+    session = SlowCommitSession()
+    persisted = []
+
+    async def handler(runtime_session, context, arguments):
+        runtime_session.mutated = True
+        return {
+            "value": arguments.value,
+            "trusted_conversation_id": context.conversation_id,
+        }
+
+    async def append_audit(_runtime_session, record):
+        persisted.append(record)
+
+    adapter = _SequenceAdapter(_tool_result(_tool_call(name="terminal_action")))
+    service = AITurnService(
+        adapter,
+        capability_registry=_terminal_registry(handler),
+        authority_checker=_authority_allowed,
+        durable_session_factory=lambda: _TransactionContext(session),
+        audit_appender=append_audit,
+        deadline_seconds=0.04,
+    )
+
+    finalized = await service.generate_finalized(
+        _turn(allowed_capabilities=("terminal_action",))
+    )
+
+    assert finalized.audit_persisted is True
+    assert len(persisted) == 1
+    assert session.events == ["commit"]
+    assert len(adapter.calls) == 1
 
 
 @pytest.mark.asyncio

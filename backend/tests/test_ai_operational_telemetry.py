@@ -99,6 +99,43 @@ async def test_complete_interrupted_and_setup_turns(records, failure):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "expected_outcome", "expected_reason"),
+    (
+        ("stale", "stale", "stale_ai_authority"),
+        ("deadline", "failed", "timeout"),
+    ),
+)
+async def test_stale_and_whole_turn_timeout_are_telemetry_only(
+    records, mode, expected_outcome, expected_reason
+):
+    async def authority(_context):
+        return mode != "stale"
+
+    class SlowAdapter:
+        calls = 0
+
+        async def generate_turn(self, _request):
+            self.calls += 1
+            await asyncio.Event().wait()
+
+    adapter = SlowAdapter()
+    service = AITurnService(
+        adapter,
+        authority_checker=authority,
+        deadline_seconds=0.02 if mode == "deadline" else None,
+    )
+
+    with pytest.raises(AITurnExecutionError):
+        await service.generate_finalized(turns._turn())
+
+    (observation,) = finished(records, "turn")
+    assert observation["outcome"] == expected_outcome
+    assert observation["reason"] == expected_reason
+    assert observation["provider_calls"] == (1 if mode == "deadline" else 0)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [None, "timeout", "cancel", "malformed"])
 @pytest.mark.parametrize("usage", [None, {"prompt_tokens": 0, "completion_tokens": 3}])
 @pytest.mark.parametrize("faulty_emitter", [False, True])

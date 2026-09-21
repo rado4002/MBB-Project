@@ -12,12 +12,24 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from app.ai import ops
+from app.ai.capabilities import (
+    CapabilityDefinition,
+    CapabilityRegistry,
+    StrictCapabilityModel,
+)
+from app.ai.commercial_state import CommercialStateUpdate, update_commercial_state
 from app.ai.provider_contract import (
     ProviderFinishReason,
     ProviderToolCall,
     ProviderTurnResult,
 )
-from app.ai.turn import AITurn, AITurnService
+from app.ai.turn import (
+    AITurn,
+    AITurnExecutionError,
+    AITurnService,
+    _ai_authority_is_current,
+    _postgres_commercial_state_loader,
+)
 from app.models.ai_turn_audit import AITurnAudit
 from app.models.conversation import Conversation
 from app.models.customer import Customer
@@ -29,7 +41,6 @@ from app.modules.m1_gateway.turn_recovery import (
     add_pending_turn,
     claim_turn,
     mark_outcome_committed,
-    source_is_latest,
 )
 from app.modules.m4_conversation.ownership import ai_may_reply
 from app.tasks import m1
@@ -81,6 +92,24 @@ class _HandoffAdapter:
             ),
             finish_reason=ProviderFinishReason.tool_call,
         )
+
+
+class _EchoInput(StrictCapabilityModel):
+    value: str
+
+
+class _EchoOutput(StrictCapabilityModel):
+    value: str
+
+
+class _CountingAdapter:
+    def __init__(self, *results):
+        self.results = list(results)
+        self.calls = 0
+
+    async def generate_turn(self, _request):
+        self.calls += 1
+        return self.results.pop(0)
 
 
 @pytest_asyncio.fixture(loop_scope="function")
@@ -351,6 +380,209 @@ async def test_newer_inbound_and_ownership_change_fail_closed_before_inference(
         **_payload(_customer2, inbound2),
     )
     assert changed["status"] == "human_controlled"
+
+
+@pytest.mark.asyncio
+async def test_service_boundary_rejects_newer_inbound_before_provider(factory):
+    _customer, conversation, inbound = await _seed(factory)
+    newer = Message(
+        message_id=uuid.uuid4(),
+        conversation_id=conversation.conversation_id,
+        timestamp=inbound.timestamp + timedelta(seconds=1),
+        direction="inbound",
+        content="Preuve client plus récente.",
+        content_type="text",
+        language="french",
+        whatsapp_message_id=f"boundary-newer-{uuid.uuid4()}",
+        created_at=inbound.created_at + timedelta(seconds=1),
+    )
+    async with factory() as session:
+        session.add(newer)
+        await session.commit()
+
+    adapter = _CountingAdapter()
+    service = AITurnService(
+        adapter,
+        authority_checker=_ai_authority_is_current,
+        commercial_state_loader=_postgres_commercial_state_loader,
+    )
+    with pytest.raises(AITurnExecutionError) as captured:
+        await service.generate_finalized(
+            AITurn(
+                user_content=inbound.content,
+                language="french",
+                expected_ownership_version=1,
+                conversation_id=conversation.conversation_id,
+                source_message_id=inbound.message_id,
+            )
+        )
+
+    assert captured.value.audit_record.safe_code == "stale_ai_authority"
+    assert adapter.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_service_boundary_rejects_ownership_change_before_provider(factory):
+    _customer, conversation, inbound = await _seed(factory)
+    async with factory() as session:
+        await session.execute(
+            update(Conversation)
+            .where(Conversation.conversation_id == conversation.conversation_id)
+            .values(ownership_version=2)
+        )
+        await session.commit()
+
+    adapter = _CountingAdapter()
+    service = AITurnService(
+        adapter,
+        authority_checker=_ai_authority_is_current,
+        commercial_state_loader=_postgres_commercial_state_loader,
+    )
+    with pytest.raises(AITurnExecutionError) as captured:
+        await service.generate_finalized(
+            AITurn(
+                user_content=inbound.content,
+                language="french",
+                expected_ownership_version=1,
+                conversation_id=conversation.conversation_id,
+                source_message_id=inbound.message_id,
+            )
+        )
+
+    assert captured.value.audit_record.safe_code == "stale_ai_authority"
+    assert adapter.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_commercial_revision_change_stops_next_provider_round(factory):
+    _customer, conversation, inbound = await _seed(factory)
+
+    async def change_commercial_state(_context, arguments):
+        async with factory() as session:
+            await update_commercial_state(
+                session,
+                conversation_id=conversation.conversation_id,
+                expected_revision=0,
+                state_update=CommercialStateUpdate(current_goal="nouvel objectif"),
+            )
+            await session.commit()
+        return {"value": arguments.value}
+
+    registry = CapabilityRegistry(
+        (
+            CapabilityDefinition(
+                name="test_revision_change",
+                description="Change test commercial state between provider rounds.",
+                input_model=_EchoInput,
+                output_model=_EchoOutput,
+                handler=change_commercial_state,
+            ),
+        )
+    )
+    adapter = _CountingAdapter(
+        ProviderTurnResult(
+            tool_calls=(
+                ProviderToolCall(
+                    call_id="revision-change",
+                    capability_name="test_revision_change",
+                    arguments={"value": "changed"},
+                ),
+            ),
+            finish_reason=ProviderFinishReason.tool_call,
+        ),
+        ProviderTurnResult(
+            text="must not run",
+            finish_reason=ProviderFinishReason.completed,
+        ),
+    )
+    service = AITurnService(
+        adapter,
+        capability_registry=registry,
+        authority_checker=_ai_authority_is_current,
+        commercial_state_loader=_postgres_commercial_state_loader,
+    )
+
+    with pytest.raises(AITurnExecutionError) as captured:
+        await service.generate_finalized(
+            AITurn(
+                user_content=inbound.content,
+                language="french",
+                expected_ownership_version=1,
+                conversation_id=conversation.conversation_id,
+                source_message_id=inbound.message_id,
+                allowed_capabilities=("test_revision_change",),
+            )
+        )
+
+    assert captured.value.audit_record.safe_code == "stale_ai_authority"
+    assert adapter.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_timeout_fallback_is_durable_and_redelivery_does_not_regenerate(
+    factory, monkeypatch
+):
+    import app.ai.turn as turn_module
+    from app.modules.m1_gateway import session_cache
+
+    customer, conversation, inbound = await _seed(factory)
+
+    class SlowAdapter:
+        calls = 0
+
+        async def generate_turn(self, _request):
+            self.calls += 1
+            await asyncio.Event().wait()
+
+    adapter = SlowAdapter()
+    service = AITurnService(
+        adapter,
+        authority_checker=_ai_authority_is_current,
+        commercial_state_loader=_postgres_commercial_state_loader,
+        deadline_seconds=0.5,
+    )
+    monkeypatch.setattr(turn_module, "get_ai_turn_service", lambda: service)
+
+    async def no_session(_conversation_id):
+        return None
+
+    async def save_nothing(_conversation_id, _state):
+        return None
+
+    async def no_send(*_args, **_kwargs):
+        return {"status": "skipped"}
+
+    monkeypatch.setattr(session_cache, "get_session", no_session)
+    monkeypatch.setattr(session_cache, "save_session", save_nothing)
+    monkeypatch.setattr(m1, "_send_safe", no_send)
+    monkeypatch.setattr(
+        m1,
+        "settings",
+        SimpleNamespace(whatsapp_send_enabled=False, m1_maps_fanout_enabled=False),
+    )
+
+    first = await m1._process(task=_Task("timeout-first"), **_payload(customer, inbound))
+    second = await m1._process(
+        task=_Task("timeout-redelivery"), **_payload(customer, inbound)
+    )
+
+    assert first["status"] == "processed"
+    assert second["status"] == "recovered"
+    assert first["outbound_message_id"] == second["outbound_message_id"]
+    assert adapter.calls == 1
+    async with factory() as session:
+        lifecycle = await session.get(InboundTurnLifecycle, inbound.message_id)
+        audit = await session.scalar(
+            select(AITurnAudit).where(
+                AITurnAudit.source_message_id == inbound.message_id
+            )
+        )
+        assert lifecycle is not None
+        assert lifecycle.state == "outcome_committed"
+        assert lifecycle.outcome_type == "fallback"
+        assert audit is not None
+        assert audit.outcome == "fallback_used"
+        assert audit.safe_code == "timeout"
 
 
 async def _seed_second(factory):

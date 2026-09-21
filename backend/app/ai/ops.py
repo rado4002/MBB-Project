@@ -335,6 +335,7 @@ def _failure(error):
         "CommercialGroundingError": "commercial_grounding_failed",
         "AITurnPersistenceError": "persistence_failed",
         "AITurnBudgetExceeded": "budget_exceeded",
+        "AITurnDeadlineExceeded": "timeout",
         "TimeoutException": "timeout",
         "ReadTimeout": "timeout",
         "APITimeoutError": "timeout",

@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # ── Adapters ──────────────────────────────────────────────────────────────
     ai_adapter: str = "disabled"
     ai_turn_provider: str = "disabled"
+    # Disabled until AI-A6.1 production measurements justify a threshold.
+    # When enabled, this bounds one logical provider/capability turn; durable
+    # commit reconciliation is still allowed to finish past the deadline.
+    ai_turn_deadline_s: float = Field(default=0, ge=0, allow_inf_nan=False)
     crm_adapter: str = "airtable"
     inventory_adapter: str = "static"
     payment_adapter: str = "mobile_money"
