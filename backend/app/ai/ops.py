@@ -17,6 +17,7 @@ import time
 import uuid
 from contextvars import ContextVar
 from datetime import datetime, timezone
+from functools import wraps
 from logging.handlers import QueueListener
 
 import structlog
@@ -25,6 +26,9 @@ from app.config import get_settings
 
 EVENTS = frozenset(
     {
+        "acceptance",
+        "publication",
+        "worker",
         "turn",
         "provider_call",
         "provider_attempt",
@@ -37,6 +41,11 @@ EVENTS = frozenset(
 )
 OUTCOMES = frozenset(
     {
+        "accepted",
+        "duplicate",
+        "rate_limited",
+        "unconfirmed",
+        "not_applicable",
         "started",
         "succeeded",
         "failed",
@@ -103,7 +112,31 @@ USAGE_FIELDS = (
     "cache_miss_tokens",
     "reasoning_tokens",
 )
-IDS = ("turn_id", "conversation_id", "source_message_id", "outbound_message_id")
+IDS = ("task_id", "turn_id", "source_message_id", "outbound_message_id")
+WORKER_STATUSES = frozenset(
+    {
+        "processed",
+        "duplicate_ignored",
+        "persistence_failed",
+        "waiting_for_human",
+        "human_controlled",
+        "opt_out",
+        "escalated_voice_note",
+        "stale_order_draft_authority",
+        "awaiting_order_draft_confirmation",
+        *(
+            "order_draft_" + state
+            for state in (
+                "confirmed",
+                "already_confirmed",
+                "cancelled",
+                "already_cancelled",
+                "invalidated",
+                "refreshed",
+            )
+        ),
+    }
+)
 COUNTS = {
     "provider_call": "provider_calls",
     "provider_attempt": "provider_attempts",
@@ -185,6 +218,20 @@ def _project(fields):
             except ValueError:
                 pass
     for key, allowed in (
+        ("route", {"broker", "blackout", "blackout_replay"}),
+        ("worker_status", WORKER_STATUSES),
+        ("worker_send_result", {"confirmed", "skipped", "uncertain"}),
+        (
+            "draft_state",
+            {
+                "confirmed",
+                "already_confirmed",
+                "cancelled",
+                "already_cancelled",
+                "invalidated",
+                "refreshed",
+            },
+        ),
         ("provider", {"deepseek", "claude", "disabled"}),
         ("capability", CAPABILITIES),
         ("transaction_outcome", {"committed", "rolled_back"}),
@@ -201,7 +248,7 @@ def _project(fields):
             "finish_reason",
             {"completed", "tool_call", "max_output", "stopped", "error", "unknown"},
         ),
-        ("boundary", {"ordinary", "terminal", "handoff"}),
+        ("boundary", {"ordinary", "terminal", "handoff", "draft_reply"}),
     ):
         if key in fields:
             value = fields[key]
@@ -216,10 +263,13 @@ def _project(fields):
         "capability_index",
         "attempt_index",
         "returned_tool_calls",
+        "task_retries",
     ):
         value = fields.get(key)
         if type(value) is int and 0 <= value <= 2**63 - 1:
             result[key] = value
+    if type(fields.get("redelivered")) is bool:
+        result["redelivered"] = fields["redelivered"]
     return result
 
 
@@ -302,6 +352,8 @@ def _failure(error):
         }.get(status, "unknown")
         if type(status) is int and 500 <= status <= 599:
             code = "unavailable"
+    if type(error).__name__ == "Retry":
+        return "retry", None
     if code == "stale_ai_authority":
         return "stale", code
     if code == "commercial_grounding_failed":
@@ -324,7 +376,6 @@ class Observation:
             context = dict(_context.get() or {})
             context.update(_project(self.fields))
             if self.event == "turn":
-                context = _project(self.fields)
                 self.tokens.append(
                     (_counts, _counts.set(dict.fromkeys(TURN_COUNTS, 0)))
                 )
@@ -356,6 +407,30 @@ class Observation:
         except BaseException:
             pass
 
+    def published(self, task):
+        try:
+            self.set("confirmed")
+            self.set(task_id=task.id)
+        except BaseException:
+            pass
+
+    def worker_result(self, result):
+        try:
+            self.set(
+                worker_status=result.get("status"),
+                outbound_message_id=result.get("outbound_message_id"),
+            )
+            if "send_status" in result and result.get("status") != "persistence_failed":
+                self.set(
+                    worker_send_result={
+                        "sent": "confirmed",
+                        "skipped": "skipped",
+                        "unknown_or_failed": "uncertain",
+                    }.get(result["send_status"], "unknown")
+                )
+        except BaseException:
+            pass
+
     def usage(self, response):
         try:
             usage = getattr(response, "usage", None)
@@ -374,6 +449,8 @@ class Observation:
             if self.started is not None:
                 if error is not None:
                     self.outcome, self.reason = _failure(error)
+                    if self.event == "publication" and self.outcome == "failed":
+                        self.outcome = "unconfirmed"
                 if self.event == "turn":
                     self.fields.update(_counts.get() or {})
                 _safe_emit(
@@ -414,3 +491,24 @@ def note(event, outcome, *, reason=None, **fields):
         _safe_emit(event, outcome, reason=reason, **context)
     except BaseException:
         pass
+
+
+def worker(function):
+    """Observe the complete M1 invocation without changing its return/exception."""
+
+    @wraps(function)
+    async def wrapped(*args, **kwargs):
+        fields = {}
+        try:
+            fields["source_message_id"] = kwargs.get("message_id")
+            request = kwargs["task"].request
+            fields.update(task_id=request.id, task_retries=request.retries)
+            fields["redelivered"] = (request.delivery_info or {}).get("redelivered")
+        except BaseException:
+            pass
+        with observe("worker", **fields) as observation:
+            result = await function(*args, **kwargs)
+            observation.worker_result(result)
+            return result
+
+    return wrapped

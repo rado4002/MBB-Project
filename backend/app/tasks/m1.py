@@ -151,7 +151,7 @@ async def _persist_outbound(
 ) -> uuid.UUID | None:
     """Commit continuity state, one response, and its AI audit atomically."""
     with ops.observe(
-        "persistence", active=audit_record is not None, boundary="ordinary",
+        "persistence", boundary="ordinary",
         turn_id=audit_record.turn_id if audit_record is not None else None,
         conversation_id=conversation_id, source_message_id=source_message_id,
         turn_outcome=audit_record.outcome.value if audit_record is not None else None,
@@ -354,6 +354,7 @@ def process_inbound_message(
     )
 
 
+@ops.worker
 async def _process(
     *,
     task: Task,
@@ -503,32 +504,48 @@ async def _process(
             handle_order_draft_reply,
         )
 
-        try:
-            draft_reply = await handle_order_draft_reply(
-                session,
-                conversation_id=inbound.conversation_id,
-                source_message_id=inbound.message_id,
-                expected_ownership_version=expected_ownership_version,
-                customer_text=content,
-            )
-            if draft_reply is not None:
-                await session.commit()
-        except StaleOrderDraftAuthority:
-            await session.rollback()
-            log.info("m1.order_draft.stale_authority", conv_id=conv_id)
-            return {
-                "status": "stale_order_draft_authority",
-                "conversation_id": conv_id,
-                "send_status": "skipped",
-            }
-        except Exception as exc:
-            await session.rollback()
-            log.error(
-                "m1.order_draft.persistence_failed",
-                conv_id=conv_id,
-                error_type=type(exc).__name__,
-            )
-            return _persistence_failure_result(conv_id)
+        with ops.observe(
+            "persistence", boundary="draft_reply", source_message_id=inbound.message_id,
+        ) as observation:
+            try:
+                draft_reply = await handle_order_draft_reply(
+                    session,
+                    conversation_id=inbound.conversation_id,
+                    source_message_id=inbound.message_id,
+                    expected_ownership_version=expected_ownership_version,
+                    customer_text=content,
+                )
+                if draft_reply is not None:
+                    await session.commit()
+                    observation.set(
+                        "committed", transaction_outcome="committed",
+                        draft_state=draft_reply.state,
+                        outbound_message_id=draft_reply.outbound_message_id,
+                    )
+                else:
+                    observation.set("not_applicable")
+            except StaleOrderDraftAuthority:
+                await session.rollback()
+                observation.set(
+                    "stale", reason="stale_ai_authority", transaction_outcome="rolled_back",
+                )
+                log.info("m1.order_draft.stale_authority", conv_id=conv_id)
+                return {
+                    "status": "stale_order_draft_authority",
+                    "conversation_id": conv_id,
+                    "send_status": "skipped",
+                }
+            except Exception as exc:
+                await session.rollback()
+                observation.set(
+                    "rolled_back", reason="persistence_failed", transaction_outcome="rolled_back",
+                )
+                log.error(
+                    "m1.order_draft.persistence_failed",
+                    conv_id=conv_id,
+                    error_type=type(exc).__name__,
+                )
+                return _persistence_failure_result(conv_id)
         if draft_reply is not None:
             if draft_reply.order_id is None:
                 send_result = await _send_safe(
@@ -1119,11 +1136,15 @@ async def _drain(task: Task) -> dict:
                 continue
 
             try:
-                celery_app.send_task(
-                    "m1.process_inbound_message",
-                    kwargs=payload,
-                    queue="default",
-                )
+                with ops.observe(
+                    "publication", source_message_id=payload["message_id"], route="blackout_replay",
+                ) as observation:
+                    published_task = celery_app.send_task(
+                        "m1.process_inbound_message",
+                        kwargs=payload,
+                        queue="default",
+                    )
+                    observation.published(published_task)
                 counts["published"] += 1
             except Exception as exc:
                 counts["failed"] += 1

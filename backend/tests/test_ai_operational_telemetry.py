@@ -335,7 +335,9 @@ def test_m1_persistence_fallback_and_send_observations(records, monkeypatch, fai
         else None,
     )
     result = gateway._run(gateway._process(gateway._Task()))
-    (persistence,) = finished(records, "persistence")
+    (persistence,) = [
+        r for r in finished(records, "persistence") if r["boundary"] == "ordinary"
+    ]
     assert persistence["outcome"] == (
         "rolled_back" if failure in {"audit", "commit"} else "committed"
     )
@@ -629,9 +631,7 @@ async def test_concurrent_turns_keep_attempt_counts_and_ids_separate(records):
         (final,) = finished(own, "turn")
         assert final["provider_calls"] == final["provider_attempts"] == 1
         assert final["logical_capabilities"] == final["tool_rounds"] == 0
-        assert all(
-            record["conversation_id"] == str(turn.conversation_id) for record in own
-        )
+        assert all("conversation_id" not in record for record in own)
         (attempt,) = finished(own, "provider_attempt")
         assert attempt["provider_call_index"] == attempt["attempt_index"] == 1
         assert attempt["input_tokens"] == 17
@@ -738,3 +738,336 @@ async def test_handoff_verification_exception_is_not_converted_to_a_result(
     (observation,) = finished(records, "send")
     assert observation["outcome"] == "failed"
     assert observation["send_result"] == "uncertain"
+
+
+@pytest.mark.parametrize("failure", [None, "commit", "fallback", "send"])
+def test_worker_correlation_includes_persistence_and_send(
+    records, monkeypatch, failure
+):
+    gateway._patch_normal_flow(
+        monkeypatch,
+        outbound_id=uuid.uuid4(),
+        outbound_commit_error=RuntimeError(SECRET) if failure == "commit" else None,
+        messaging_error=RuntimeError(SECRET) if failure == "send" else None,
+        ai=gateway._FailingAI() if failure == "fallback" else None,
+    )
+    task = gateway._Task()
+    task.request.id = str(uuid.uuid4())
+    task.request.delivery_info = {"redelivered": False, "private": SECRET}
+    result = gateway._run(gateway._process(task))
+    (final,) = finished(records, "worker")
+    assert final["worker_status"] == result["status"]
+    assert final["task_id"] == task.request.id
+    assert final["task_retries"] == 0 and final["redelivered"] is False
+    assert final["duration_ms"] >= 0
+    assert records[0]["observation"] == records[-1]["observation"] == "worker"
+    assert all(r["task_id"] == task.request.id for r in records)
+    assert all(
+        r["source_message_id"] == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        for r in records
+    )
+    if failure == "commit":
+        assert not finished(records, "send")
+    else:
+        assert final["worker_send_result"] == (
+            "uncertain" if failure == "send" else "confirmed"
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_kind", ["retry", "cancel"])
+async def test_worker_preserves_retry_and_cancellation(records, error_kind):
+    from celery.exceptions import Retry
+
+    error = Retry(SECRET) if error_kind == "retry" else asyncio.CancelledError(SECRET)
+
+    @ops.worker
+    async def invocation(**kwargs):
+        raise error
+
+    task = SimpleNamespace(
+        request=SimpleNamespace(
+            id=str(uuid.uuid4()),
+            retries=2,
+            delivery_info={"redelivered": True},
+        )
+    )
+    with pytest.raises(type(error)) as caught:
+        await invocation(task=task, message_id=str(uuid.uuid4()))
+    assert caught.value is error
+    (final,) = finished(records, "worker")
+    assert final["outcome"] == ("retry" if error_kind == "retry" else "cancelled")
+    assert final["task_retries"] == 2 and final["redelivered"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scenario", ["broker", "blackout", "lost", "duplicate", "limited"]
+)
+@pytest.mark.parametrize("fault", [None, "disabled", "queue"])
+async def test_acceptance_publication_observations(
+    records, monkeypatch, scenario, fault
+):
+    from datetime import datetime, timezone
+    from fastapi import HTTPException
+    from app.api.v1 import messages
+    from app.schemas.messages import InboundMessageRequest
+    from app.tasks.celery_app import celery_app
+
+    events, published = [], []
+    task_id, source_id = str(uuid.uuid4()), uuid.uuid4()
+    payload = InboundMessageRequest(
+        message_id=source_id,
+        customer_phone="+243810000041",
+        content=SECRET,
+        content_type="text",
+        timestamp=datetime(2000, 1, 1, tzinfo=timezone.utc),
+        whatsapp_message_id=SECRET,
+    )
+
+    async def duplicate(*args):
+        return scenario == "duplicate"
+
+    async def limited(*args):
+        return scenario == "limited"
+
+    def publish(*args, **kwargs):
+        events.append("publish")
+        published.append(kwargs)
+        if scenario in {"blackout", "lost"}:
+            raise RuntimeError(SECRET)
+        return SimpleNamespace(id=task_id)
+
+    async def blackout(value):
+        events.append("blackout")
+        assert value == published[0]["kwargs"]
+        return scenario == "blackout"
+
+    async def mark(*args):
+        events.append("mark")
+        return True
+
+    monkeypatch.setattr(messages, "has_accepted_inbound", duplicate)
+    monkeypatch.setattr(messages, "rate_limit_check", limited)
+    monkeypatch.setattr(messages, "blackout_enqueue", blackout)
+    monkeypatch.setattr(messages, "mark_inbound_accepted", mark)
+    monkeypatch.setattr(celery_app, "send_task", publish)
+    if fault == "disabled":
+        monkeypatch.setattr(
+            ops, "get_settings", lambda: SimpleNamespace(ai_ops_enabled=False)
+        )
+    elif fault == "queue":
+        monkeypatch.setattr(ops, "_enqueue", broken)
+    if scenario in {"lost", "limited"}:
+        with pytest.raises(HTTPException) as caught:
+            await messages._handle_inbound(payload=payload)
+        assert caught.value.status_code == (503 if scenario == "lost" else 429)
+    else:
+        result = await messages._handle_inbound(payload=payload)
+        assert result.status == ("duplicate" if scenario == "duplicate" else "queued")
+    assert (
+        events
+        == {
+            "broker": ["publish", "mark"],
+            "blackout": ["publish", "blackout", "mark"],
+            "lost": ["publish", "blackout"],
+            "duplicate": [],
+            "limited": [],
+        }[scenario]
+    )
+    if published:
+        assert set(published[0]["kwargs"]) == {
+            "message_id",
+            "customer_phone",
+            "content",
+            "content_type",
+            "timestamp",
+            "whatsapp_message_id",
+        }
+        assert set(published[0]) == {"kwargs", "queue"}
+    if fault:
+        assert records == []
+        return
+    (acceptance,) = finished(records, "acceptance")
+    assert (
+        acceptance["outcome"]
+        == {
+            "broker": "accepted",
+            "blackout": "accepted",
+            "lost": "unconfirmed",
+            "duplicate": "duplicate",
+            "limited": "rate_limited",
+        }[scenario]
+    )
+    assert acceptance["source_message_id"] == str(source_id)
+    if published:
+        (publication,) = finished(records, "publication")
+        assert publication["outcome"] == (
+            "confirmed" if scenario == "broker" else "unconfirmed"
+        )
+        assert publication["duration_ms"] >= 0
+        assert publication["observed_at"] <= acceptance["observed_at"]
+        assert publication["observed_at"].startswith("2000") is False
+        if scenario == "broker":
+            assert publication["task_id"] == task_id
+        else:
+            assert "task_id" not in publication
+
+
+def test_draft_commit_and_skipped_send_are_observed(records, monkeypatch):
+    gateway.test_exact_order_draft_reply_is_handled_before_provider_inference(
+        monkeypatch
+    )
+    (persistence,) = finished(records, "persistence")
+    assert persistence["boundary"] == "draft_reply"
+    assert persistence["outcome"] == persistence["transaction_outcome"] == "committed"
+    assert persistence["draft_state"] == "confirmed"
+    (worker,) = finished(records, "worker")
+    assert worker["worker_status"] == "order_draft_confirmed"
+    assert worker["worker_send_result"] == "skipped"
+    assert not finished(records, "send")  # No fabricated duration for an uncalled send.
+    assert not finished(records, "turn")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("fault", [False, True])
+async def test_blackout_publication_correlation_and_ack(
+    records, monkeypatch, failure, fault
+):
+    from unittest.mock import AsyncMock
+    import test_blackout_claim_ack as blackout
+
+    payload = blackout._payload()
+    raw = json.dumps(payload)
+    task_id = str(uuid.uuid4())
+    events = []
+
+    def publish(*args, **kwargs):
+        assert kwargs == {"kwargs": payload, "queue": "default"}
+        events.append("publish")
+        if failure:
+            raise RuntimeError(SECRET)
+        return SimpleNamespace(id=task_id)
+
+    async def ack(value):
+        assert value == raw
+        events.append("ack")
+        return True
+
+    if fault:
+        monkeypatch.setattr(ops, "emit", broken)
+    stack, helpers = blackout.CanonicalDrainTests()._patch_helpers(
+        [raw, None],
+        blackout_acknowledge=AsyncMock(side_effect=ack),
+    )
+    monkeypatch.setattr(m1.celery_app, "send_task", publish)
+    with stack:
+        result = await m1._drain(SimpleNamespace())
+    assert events == (["publish"] if failure else ["publish", "ack"])
+    assert result["published"] == (0 if failure else 1)
+    if failure:
+        helpers["blackout_acknowledge"].assert_not_awaited()
+    if fault:
+        assert records == []
+    else:
+        (final,) = finished(records, "publication")
+        assert final["route"] == "blackout_replay"
+        assert final["source_message_id"] == payload["message_id"]
+        assert final["outcome"] == ("unconfirmed" if failure else "confirmed")
+        if not failure:
+            assert final["task_id"] == task_id
+
+
+@pytest.mark.parametrize("failure", ["commit", "stale"])
+def test_draft_failure_never_reports_committed_success(records, monkeypatch, failure):
+    import app.modules.m7_conversion.order_drafts as drafts
+
+    events, messaging = gateway._patch_normal_flow(
+        monkeypatch, outbound_id=uuid.uuid4()
+    )
+
+    async def handle_reply(session, **kwargs):
+        if failure == "stale":
+            raise drafts.StaleOrderDraftAuthority
+        session.commit_error = RuntimeError(SECRET)
+        return gateway.OrderDraftReplyResult(
+            state="confirmed",
+            draft_id=uuid.uuid4(),
+            draft_version=1,
+            customer_text=SECRET,
+            outbound_message_id=uuid.uuid4(),
+            order_id=uuid.uuid4(),
+        )
+
+    monkeypatch.setattr(drafts, "handle_order_draft_reply", handle_reply)
+    result = gateway._run(gateway._process(gateway._Task()))
+    (final,) = finished(records, "persistence")
+    assert final["outcome"] == ("stale" if failure == "stale" else "rolled_back")
+    assert final["transaction_outcome"] == "rolled_back"
+    assert "draft_state" not in final
+    assert not messaging.calls and not finished(records, "send")
+    assert result["status"] == (
+        "stale_order_draft_authority" if failure == "stale" else "persistence_failed"
+    )
+
+
+def test_monotonic_duration_and_unknown_invalid_measurements(records, monkeypatch):
+    times = iter([10.0, 10.125])
+    monkeypatch.setattr(ops, "time", SimpleNamespace(monotonic=lambda: next(times)))
+    with ops.observe("publication", source_message_id=uuid.uuid4()):
+        pass
+    (final,) = finished(records, "publication")
+    assert final["duration_ms"] == 125.0
+    for invalid in (-1, float("nan"), float("inf"), True, SECRET):
+        ops.emit(
+            "worker",
+            "succeeded",
+            duration_ms=invalid,
+            task_retries=invalid,
+            worker_status=SECRET,
+            worker_send_result=SECRET,
+            route=SECRET,
+            draft_state=SECRET,
+            redelivered=SECRET,
+            conversation_id=uuid.uuid4(),
+        )
+        assert records[-1]["duration_ms"] is None
+        assert "task_retries" not in records[-1]
+        assert "redelivered" not in records[-1]
+        assert "conversation_id" not in records[-1]
+        assert records[-1]["worker_status"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_worker_context_survives_ai_turn_and_transport(records):
+    task = SimpleNamespace(
+        request=SimpleNamespace(
+            id=str(uuid.uuid4()),
+            retries=0,
+            delivery_info={"redelivered": False},
+        )
+    )
+    turn = turns._turn(source_message_id=uuid.uuid4())
+
+    class Transport:
+        async def create_chat_completion(self, payload):
+            return deepseek._response(content=SECRET, reasoning_content=SECRET)
+
+    service = AITurnService(DeepSeekAdapter(api_key=SECRET, transport=Transport()))
+
+    @ops.worker
+    async def invocation(**kwargs):
+        await service.generate_finalized(turn)
+        return {"status": "processed"}
+
+    await invocation(task=task, message_id=str(turn.source_message_id))
+    assert {"worker", "turn", "provider_call", "provider_attempt"} <= {
+        record["observation"] for record in records
+    }
+    assert all(record["task_id"] == task.request.id for record in records)
+    assert all(
+        record["source_message_id"] == str(turn.source_message_id) for record in records
+    )
+    (final,) = finished(records, "turn")
+    assert final["provider_calls"] == final["provider_attempts"] == 1

@@ -21,6 +21,7 @@ import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, field_validator
 
+from app.ai import ops
 from app.api.deps import DBSession, IdempotencyKey, get_current_role
 from app.config import get_settings
 from app.modules.m1_gateway.normalizer import normalize_webhook
@@ -61,6 +62,7 @@ async def _handle_inbound(
 
     # ── 1. Previously accepted duplicate ─────────────────────────────────────
     if await has_accepted_inbound(payload.whatsapp_message_id):
+        ops.note("acceptance", "duplicate", source_message_id=payload.message_id)
         log.info("inbound.duplicate_accepted", wa_ref=wa_ref, source=source)
         return QueuedMessageResponse(
             status="duplicate",
@@ -70,6 +72,7 @@ async def _handle_inbound(
 
     # ── 2. Rate limit ──────────────────────────────────────────────────────────
     if await rate_limit_check(payload.customer_phone):
+        ops.note("acceptance", "rate_limited", source_message_id=payload.message_id)
         log.warning("inbound.rate_limited", wa_ref=wa_ref, source=source)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -89,11 +92,15 @@ async def _handle_inbound(
     from app.tasks.celery_app import celery_app
 
     try:
-        task = celery_app.send_task(
-            "m1.process_inbound_message",
-            kwargs=task_kwargs,
-            queue="default",
-        )
+        with ops.observe(
+            "publication", source_message_id=payload.message_id, route="broker",
+        ) as observation:
+            task = celery_app.send_task(
+                "m1.process_inbound_message",
+                kwargs=task_kwargs,
+                queue="default",
+            )
+            observation.published(task)
         log.info(
             "m1.task_dispatched",
             task_id=task.id,
@@ -101,6 +108,9 @@ async def _handle_inbound(
             source=source,
         )
         await mark_inbound_accepted(payload.whatsapp_message_id)
+        ops.note(
+            "acceptance", "accepted", source_message_id=payload.message_id, route="broker",
+        )
         return QueuedMessageResponse(queue_position=1, estimated_processing_seconds=10)
     except Exception as exc:
         # Celery broker unreachable → push to blackout queue (AOF-persisted)
@@ -122,8 +132,12 @@ async def _handle_inbound(
             )
         if blackout_accepted:
             await mark_inbound_accepted(payload.whatsapp_message_id)
+            ops.note(
+                "acceptance", "accepted", source_message_id=payload.message_id, route="blackout",
+            )
             return QueuedMessageResponse(queue_position=-1, estimated_processing_seconds=300)
 
+        ops.note("acceptance", "unconfirmed", source_message_id=payload.message_id)
         log.error("inbound.acceptance_failed", wa_ref=wa_ref, source=source)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
