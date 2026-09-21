@@ -22,6 +22,7 @@ from app.ai.provider_contract import (
 from app.ai.turn import AITurnExecutionError, AITurnService, FinalizedAITurnResult
 from app.modules.m1_gateway.service import ProcessedInbound
 from app.modules.m1_gateway.session_cache import SessionState
+from app.modules.m1_gateway.turn_recovery import TurnClaim
 from app.schemas.order_drafts import OrderDraftReplyResult
 from app.tasks import m1
 
@@ -74,7 +75,10 @@ class _SessionContext:
 
 class _Task:
     def __init__(self):
-        self.request = SimpleNamespace(retries=0)
+        self.request = SimpleNamespace(
+            retries=0,
+            id="11111111-1111-4111-8111-111111111111",
+        )
         self.retry_calls = 0
 
     def retry(self, **_kwargs):
@@ -292,6 +296,8 @@ def _patch_normal_flow(
         conversation_id=conversation_id,
         message_id=uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
         language="french",
+        content="inbound content",
+        extra={"content_type": "text"},
     )
     messaging = _Messaging(events, error=messaging_error)
     messaging.inbound_session = inbound_session
@@ -364,6 +370,26 @@ def _patch_normal_flow(
         lambda _content: False,
     )
     monkeypatch.setattr(m1, "_dispatch_maps_fanout", lambda **_kwargs: None)
+
+    async def _claim_turn(*_args, **_kwargs):
+        return TurnClaim(
+            action="process",
+            state="processing",
+            ownership_version=4,
+        )
+
+    async def _latest(*_args, **_kwargs):
+        return True
+
+    async def _lifecycle_write(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(m1, "claim_turn", _claim_turn)
+    monkeypatch.setattr(m1, "source_is_latest", _latest)
+    monkeypatch.setattr(m1, "mark_outcome_committed", _lifecycle_write)
+    monkeypatch.setattr(m1, "mark_send_state", _lifecycle_write)
+    monkeypatch.setattr(m1, "mark_skipped", _lifecycle_write)
+    monkeypatch.setattr(m1, "mark_skipped_in_session", _lifecycle_write)
 
     async def _allow_ai(*_args, **_kwargs):
         return True

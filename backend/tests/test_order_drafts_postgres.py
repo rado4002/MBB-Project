@@ -24,6 +24,7 @@ from app.models.catalog import Product, SellableItem
 from app.models.conversation import Conversation
 from app.models.customer import Customer
 from app.models.inventory import InventoryRecord
+from app.models.inbound_turn_lifecycle import InboundTurnLifecycle
 from app.models.lead import Lead
 from app.models.message import Message
 from app.models.order import Order
@@ -34,6 +35,11 @@ from app.modules.m7_conversion.order_drafts import (
     StaleOrderDraftAuthority,
     handle_order_draft_reply,
     prepare_order_draft,
+)
+from app.modules.m1_gateway.turn_recovery import (
+    add_pending_turn,
+    claim_turn,
+    mark_outcome_committed,
 )
 
 DATABASE_URL = os.environ.get("AI6B_TEST_DATABASE_URL")
@@ -318,7 +324,21 @@ async def test_real_ai_turn_terminal_draft_uses_authoritative_offer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     factory = async_sessionmaker(engine, expire_on_commit=False)
+    import app.database as database
+
+    monkeypatch.setattr(database, "async_session_factory", factory)
     seeded = await _seed(factory)
+    async with factory() as session:
+        add_pending_turn(
+            session,
+            source_message_id=seeded.source_message_id,
+            conversation_id=seeded.conversation_id,
+            ownership_version=1,
+        )
+        await session.commit()
+    assert (
+        await claim_turn(seeded.source_message_id, attempt_id="draft-terminal")
+    ).action == "process"
 
     from app.modules.product_offer.service import get_product_offer
 
@@ -376,6 +396,7 @@ async def test_real_ai_turn_terminal_draft_uses_authoritative_offer(
         authority_checker=current_authority,
         durable_session_factory=factory,
         commercial_state_loader=load_state,
+        turn_lifecycle_recorder=mark_outcome_committed,
     )
     finalized = await service.generate_finalized(
         AITurn(
@@ -406,7 +427,21 @@ async def test_real_ai_turn_terminal_draft_uses_authoritative_offer(
         assert draft.inventory_status == offer.inventory_status
         assert draft.inventory_updated_at == offer.inventory_updated_at
         assert draft.quantity == 2 and draft.status == "awaiting_confirmation"
+        lifecycle = await session.get(
+            InboundTurnLifecycle, seeded.source_message_id
+        )
+        assert lifecycle is not None
+        assert lifecycle.state == "outcome_committed"
+        assert lifecycle.outcome_type == "order_draft"
+        assert lifecycle.outbound_message_id == finalized.outbound_message_id
         confirmation = f"OUI {draft.confirmation_code}"
+    assert (
+        await claim_turn(
+            seeded.source_message_id,
+            attempt_id="draft-terminal-redelivery",
+        )
+    ).action == "resume_send"
+    assert adapter.calls == 1
     await _assert_state_counts(factory)
 
     # An unqualified yes is not the exact application-owned confirmation.

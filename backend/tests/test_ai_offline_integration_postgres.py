@@ -368,6 +368,7 @@ async def _install_runtime(
         idempotency_key: str,
         conversation_id: uuid.UUID | None = None,
         expected_ownership_version: int | None = None,
+        source_message_id: uuid.UUID | None = None,
     ) -> dict[str, str]:
         outbound_id = uuid.UUID(idempotency_key)
         async with factory() as session:
@@ -384,6 +385,7 @@ async def _install_runtime(
             idempotency_key=idempotency_key,
             conversation_id=conversation_id,
             expected_ownership_version=expected_ownership_version,
+            source_message_id=source_message_id,
         )
 
     monkeypatch.setattr(m1, "_send_safe", observe_send_boundary)

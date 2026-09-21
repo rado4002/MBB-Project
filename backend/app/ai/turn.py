@@ -78,6 +78,7 @@ AuthorityChecker = Callable[[TrustedCapabilityContext], Awaitable[bool]]
 DurableSessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
 AuditAppender = Callable[[AsyncSession, AITurnAuditRecord], Awaitable[object]]
 CommercialStateLoader = Callable[[uuid.UUID], Awaitable[CommercialState | None]]
+TurnLifecycleRecorder = Callable[..., Awaitable[bool]]
 
 
 class StaleAITurnAuthority(RuntimeError):
@@ -213,6 +214,7 @@ class AITurnService:
         audit_appender: AuditAppender | None = None,
         provider_identity: ProviderIdentity | None = None,
         commercial_state_loader: CommercialStateLoader | None = None,
+        turn_lifecycle_recorder: TurnLifecycleRecorder | None = None,
     ) -> None:
         self._adapter = adapter
         self._capability_registry = capability_registry
@@ -222,6 +224,7 @@ class AITurnService:
         self._durable_session_factory = durable_session_factory
         self._audit_appender = audit_appender or append_ai_turn_audit
         self._commercial_state_loader = commercial_state_loader
+        self._turn_lifecycle_recorder = turn_lifecycle_recorder
         configured_identity = provider_identity
         if configured_identity is None:
             candidate = getattr(adapter, "provider_identity", None)
@@ -613,6 +616,15 @@ class AITurnService:
                     )
                     try:
                         await self._audit_appender(session, audit_record)
+                        if self._turn_lifecycle_recorder is not None:
+                            await self._turn_lifecycle_recorder(
+                                session,
+                                source_message_id=turn.source_message_id,
+                                outbound_message_id=terminal_output.outbound_message_id,
+                                outcome_type=(
+                                    "handoff" if is_handoff else "order_draft"
+                                ),
+                            )
                         await session.commit()
                         persistence_observation.set(
                             "committed", transaction_outcome="committed",
@@ -706,12 +718,14 @@ def get_ai_turn_service() -> AITurnService:
     """Build the service using the repository's existing adapter factory."""
     from app.adapters import get_provider_turn_adapter
     from app.database import async_session_factory
+    from app.modules.m1_gateway.turn_recovery import mark_outcome_committed
 
     return AITurnService(
         get_provider_turn_adapter(),
         authority_checker=_ai_authority_is_current,
         durable_session_factory=async_session_factory,
         commercial_state_loader=_postgres_commercial_state_loader,
+        turn_lifecycle_recorder=mark_outcome_committed,
     )
 
 

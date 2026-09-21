@@ -31,6 +31,7 @@ from app.modules.m1_gateway.language_detector import (
     is_language_switch_request,
     is_opt_out,
 )
+from app.modules.m1_gateway.turn_recovery import add_pending_turn
 
 log = structlog.get_logger(__name__)
 
@@ -78,16 +79,29 @@ async def process_inbound(
     )
     existing_message = existing_result.scalar_one_or_none()
     if existing_message is not None:
+        conversation = await session.get(
+            Conversation, existing_message.conversation_id
+        )
+        if conversation is None:
+            raise ValueError("inbound conversation is missing")
+        customer = await session.get(Customer, conversation.customer_id)
         log.info("m1.inbound_duplicate_existing", wa_id=whatsapp_message_id)
         return ProcessedInbound(
-            customer_phone=customer_phone,
+            customer_phone=conversation.customer_id,
             conversation_id=existing_message.conversation_id,
-            message_id=message_id,
+            message_id=existing_message.message_id,
             language=existing_message.language,
+            is_opted_out=(
+                bool(customer and customer.opt_out_flag)
+                or is_opt_out(existing_message.content)
+            ),
+            is_voice_note=existing_message.content_type == "voice_note",
+            requires_escalation=existing_message.content_type == "voice_note",
             is_duplicate=True,
             existing_message_id=existing_message.message_id,
             whatsapp_message_id=whatsapp_message_id,
-            content=content,
+            content=existing_message.content,
+            extra={"content_type": existing_message.content_type},
         )
 
     # ── 1. Customer upsert ────────────────────────────────────────────────────
@@ -220,6 +234,12 @@ async def process_inbound(
     )
     session.add(msg)
     await session.flush()
+    add_pending_turn(
+        session,
+        source_message_id=message_id,
+        conversation_id=conversation.conversation_id,
+        ownership_version=conversation.ownership_version,
+    )
 
     # ── 6. Voice-note flag ────────────────────────────────────────────────────
     is_voice = content_type == "voice_note"

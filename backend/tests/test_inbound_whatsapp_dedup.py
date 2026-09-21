@@ -68,6 +68,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.models.message import Message
 from app.modules.m1_gateway.service import ProcessedInbound, process_inbound
+from app.modules.m1_gateway.turn_recovery import TurnClaim
 from app.schemas.common import ContentType
 from app.schemas.messages import InboundMessageRequest, validate_whatsapp_message_id_value
 
@@ -195,6 +196,16 @@ class _Session:
         self.execute_calls += 1
         return _ScalarResult(self.execute_result)
 
+    async def get(self, model, key):
+        if model.__name__ == "Conversation":
+            return SimpleNamespace(
+                conversation_id=key,
+                customer_id="+243812345678",
+            )
+        if model.__name__ == "Customer":
+            return SimpleNamespace(opt_out_flag=False)
+        return None
+
     async def commit(self):
         self.commit_calls += 1
 
@@ -235,9 +246,12 @@ def _dependency_patches(session, process_result=None, process_error=None):
     import app.modules.m1_gateway.session_cache as session_cache
 
     async def fake_process_inbound(**_kwargs):
-        if process_error is not None:
+        fake_process_inbound.calls += 1
+        if process_error is not None and fake_process_inbound.calls == 1:
             raise process_error
         return process_result
+
+    fake_process_inbound.calls = 0
 
     stack = ExitStack()
     stack.enter_context(patch.object(database, "async_session_factory", lambda: _SessionContext(session)))
@@ -269,6 +283,8 @@ class DuplicateM1Tests(unittest.IsolatedAsyncioTestCase):
             message_id=uuid.uuid4(),
             conversation_id=uuid.uuid4(),
             language="fr",
+            content="Mbote",
+            content_type="text",
         )
         session = _Session(execute_result=existing)
         result = await process_inbound(
@@ -293,17 +309,26 @@ class DuplicateM1Tests(unittest.IsolatedAsyncioTestCase):
         duplicate = ProcessedInbound(
             customer_phone="+243812345678",
             conversation_id=conversation_id,
-            message_id=uuid.uuid4(),
+            message_id=existing_id,
             language="fr",
             is_duplicate=True,
             existing_message_id=existing_id,
             whatsapp_message_id="WA-authoritative-id",
         )
         with _dependency_patches(session, process_result=duplicate):
-            result = await _run_process(task)
+            with patch.object(
+                m1,
+                "claim_turn",
+                return_value=TurnClaim(
+                    action="noop",
+                    state="skipped",
+                    ownership_version=1,
+                    disposition_code="duplicate_replay",
+                ),
+            ):
+                result = await _run_process(task)
 
-        self.assertEqual(result["status"], "duplicate_ignored")
-        self.assertEqual(result["existing_message_id"], str(existing_id))
+        self.assertEqual(result["status"], "skipped")
         self.assertEqual(result["conversation_id"], str(conversation_id))
         self.assertEqual(session.rollback_calls, 1)
         self.assertEqual(session.commit_calls, 0)
@@ -314,13 +339,35 @@ class DuplicateM1Tests(unittest.IsolatedAsyncioTestCase):
         session = _Session(execute_result=existing)
         task = _Task()
         error = IntegrityError("insert", {}, _ConstraintViolation(WHATSAPP_ID_INDEX))
-        with _dependency_patches(session, process_error=error):
-            result = await _run_process(task)
+        duplicate = ProcessedInbound(
+            customer_phone="+243812345678",
+            conversation_id=existing.conversation_id,
+            message_id=existing.message_id,
+            language="fr",
+            is_duplicate=True,
+            existing_message_id=existing.message_id,
+            whatsapp_message_id="WA-authoritative-id",
+        )
+        with _dependency_patches(
+            session,
+            process_result=duplicate,
+            process_error=error,
+        ):
+            with patch.object(
+                m1,
+                "claim_turn",
+                return_value=TurnClaim(
+                    action="noop",
+                    state="skipped",
+                    ownership_version=1,
+                    disposition_code="duplicate_replay",
+                ),
+            ):
+                result = await _run_process(task)
 
-        self.assertEqual(result["status"], "duplicate_ignored")
-        self.assertEqual(result["existing_message_id"], str(existing.message_id))
+        self.assertEqual(result["status"], "skipped")
         self.assertEqual(result["conversation_id"], str(existing.conversation_id))
-        self.assertEqual(session.rollback_calls, 1)
+        self.assertEqual(session.rollback_calls, 2)
         task.retry.assert_not_called()
 
     async def test_unrelated_integrity_error_rolls_back_and_retries(self):

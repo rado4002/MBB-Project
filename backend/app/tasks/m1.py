@@ -27,6 +27,15 @@ from app.ai.audit import (
 from app.ai.commercial_state import CommercialStateUpdate
 from app.config import get_settings
 from app.i18n.messages import t
+from app.modules.m1_gateway.turn_recovery import (
+    claim_turn,
+    load_recovery_outbound,
+    mark_outcome_committed,
+    mark_send_state,
+    mark_skipped,
+    mark_skipped_in_session,
+    source_is_latest,
+)
 from app.tasks.celery_app import celery_app, run_async
 
 log = structlog.get_logger(__name__)
@@ -148,6 +157,7 @@ async def _persist_outbound(
     audit_record: AITurnAuditRecord | None = None,
     expected_commercial_state_revision: int | None = None,
     commercial_state_update: CommercialStateUpdate | None = None,
+    outcome_type: str = "response",
 ) -> uuid.UUID | None:
     """Commit continuity state, one response, and its AI audit atomically."""
     with ops.observe(
@@ -174,7 +184,18 @@ async def _persist_outbound(
                     lock=True,
                     expected_ownership_version=expected_ownership_version,
                 ):
-                    await session.rollback()
+                    if source_message_id is not None:
+                        skipped = await mark_skipped_in_session(
+                            session,
+                            source_message_id=source_message_id,
+                            disposition_code="ownership_changed",
+                        )
+                        if skipped:
+                            await session.commit()
+                        else:
+                            await session.rollback()
+                    else:
+                        await session.rollback()
                     log.info(
                         "m1.persist_outbound.skipped",
                         conversation_id=str(conversation_id),
@@ -213,7 +234,15 @@ async def _persist_outbound(
                         .limit(1)
                     )
                     if latest_inbound_id != source_message_id:
-                        await session.rollback()
+                        skipped = await mark_skipped_in_session(
+                            session,
+                            source_message_id=source_message_id,
+                            disposition_code="superseded",
+                        )
+                        if skipped:
+                            await session.commit()
+                        else:
+                            await session.rollback()
                         log.info(
                             "m1.persist_outbound.skipped",
                             conversation_id=str(conversation_id),
@@ -227,7 +256,15 @@ async def _persist_outbound(
                     state_before = await read_commercial_state(session, conversation_id)
                     current_revision = state_before.revision if state_before else 0
                     if current_revision != expected_commercial_state_revision:
-                        await session.rollback()
+                        skipped = await mark_skipped_in_session(
+                            session,
+                            source_message_id=source_message_id,
+                            disposition_code="commercial_state_changed",
+                        )
+                        if skipped:
+                            await session.commit()
+                        else:
+                            await session.rollback()
                         log.info(
                             "m1.persist_outbound.skipped",
                             conversation_id=str(conversation_id),
@@ -280,6 +317,13 @@ async def _persist_outbound(
                         session,
                         AITurnAuditRecord.model_validate(audit_values, strict=True),
                     )
+                if source_message_id is not None:
+                    await mark_outcome_committed(
+                        session,
+                        source_message_id=source_message_id,
+                        outbound_message_id=outbound_id,
+                        outcome_type=outcome_type,
+                    )
                 await session.commit()
                 observation.set(
                     "committed", transaction_outcome="committed",
@@ -305,6 +349,65 @@ def _persistence_failure_result(conversation_id: str) -> dict:
         "status": "persistence_failed",
         "conversation_id": conversation_id,
         "send_status": "unknown_or_failed",
+    }
+
+
+def _task_attempt_id(task: Task) -> str:
+    candidate = getattr(getattr(task, "request", None), "id", None)
+    if isinstance(candidate, str) and 0 < len(candidate) <= 64:
+        return candidate
+    return str(uuid.uuid4())
+
+
+def _completed_lifecycle_result(*, claim, conversation_id: str) -> dict:
+    return {
+        "status": claim.state,
+        "conversation_id": conversation_id,
+        "send_status": (
+            "sent"
+            if claim.state == "send_completed"
+            else "unknown_or_failed"
+            if claim.state == "send_uncertain"
+            else "skipped"
+        ),
+        **(
+            {"outbound_message_id": str(claim.outbound_message_id)}
+            if claim.outbound_message_id is not None
+            else {}
+        ),
+    }
+
+
+async def _resume_committed_outbound(
+    *,
+    source_message_id: uuid.UUID,
+) -> dict:
+    recovered = await load_recovery_outbound(source_message_id)
+    if recovered is None:
+        return _persistence_failure_result("unknown")
+
+    if recovered.outcome_type == "handoff":
+        send_result = await _send_persisted_handoff_ack_safe(
+            recovered.customer_phone,
+            recovered.text,
+            outbound_message_id=recovered.outbound_message_id,
+            conversation_id=recovered.conversation_id,
+            source_message_id=source_message_id,
+        )
+    else:
+        send_result = await _send_safe(
+            recovered.customer_phone,
+            recovered.text,
+            idempotency_key=str(recovered.outbound_message_id),
+            conversation_id=recovered.conversation_id,
+            expected_ownership_version=recovered.ownership_version,
+            source_message_id=source_message_id,
+        )
+    return {
+        "status": "recovered",
+        "conversation_id": str(recovered.conversation_id),
+        "outbound_message_id": str(recovered.outbound_message_id),
+        "send_status": send_result["status"],
     }
 
 
@@ -389,40 +492,93 @@ async def _process(
             )
             if inbound.is_duplicate:
                 await session.rollback()
-                return {
-                    "status": "duplicate_ignored",
-                    "whatsapp_message_id": whatsapp_message_id,
-                    "existing_message_id": (
-                        str(inbound.existing_message_id)
-                        if inbound.existing_message_id else None
-                    ),
-                    "conversation_id": str(inbound.conversation_id),
-                }
-            await session.commit()
+            else:
+                await session.commit()
         except IntegrityError as exc:
             await session.rollback()
             if _integrity_constraint_name(exc) == _INBOUND_WHATSAPP_UNIQUE_INDEX:
                 log.info("m1.inbound_duplicate_conflict", wa_id=whatsapp_message_id)
-                return await _duplicate_result(session, whatsapp_message_id)
-            log.error("m1.process_inbound.integrity_error", error_type=type(exc).__name__)
-            raise task.retry(exc=exc, countdown=2 ** task.request.retries * 30)
+                inbound = await process_inbound(
+                    session=session,
+                    customer_phone=customer_phone,
+                    content=content,
+                    content_type=content_type,
+                    timestamp=parsed_ts,
+                    whatsapp_message_id=whatsapp_message_id,
+                    message_id=msg_uuid,
+                )
+                await session.rollback()
+                if not inbound.is_duplicate:
+                    raise RuntimeError("inbound uniqueness conflict could not be reconciled")
+            else:
+                log.error("m1.process_inbound.integrity_error", error_type=type(exc).__name__)
+                raise task.retry(exc=exc, countdown=2 ** task.request.retries * 30)
         except Exception as exc:
             await session.rollback()
             log.error("m1.process_inbound.error", phone=customer_phone, error=str(exc))
             raise task.retry(exc=exc, countdown=2 ** task.request.retries * 30)
 
+        msg_uuid = inbound.message_id
+        customer_phone = inbound.customer_phone
+        content = inbound.content
+        content_type = str(inbound.extra.get("content_type", content_type))
         conv_id = str(inbound.conversation_id)
         language = inbound.language
+
+        claim = await claim_turn(
+            inbound.message_id,
+            attempt_id=_task_attempt_id(task),
+        )
+        if claim.action == "noop":
+            return _completed_lifecycle_result(
+                claim=claim,
+                conversation_id=conv_id,
+            )
+        if claim.action == "busy":
+            return {
+                "status": "already_processing",
+                "conversation_id": conv_id,
+                "send_status": "skipped",
+            }
+        if claim.action == "resume_send":
+            return await _resume_committed_outbound(
+                source_message_id=inbound.message_id,
+            )
+
+        if not await source_is_latest(
+            session,
+            conversation_id=inbound.conversation_id,
+            source_message_id=inbound.message_id,
+        ):
+            await session.rollback()
+            await mark_skipped(
+                inbound.message_id,
+                disposition_code="superseded",
+            )
+            return {
+                "status": "superseded",
+                "conversation_id": conv_id,
+                "send_status": "skipped",
+            }
         expected_ownership_version = await _ai_reply_ownership_version(
             session,
             inbound.conversation_id,
         )
-        if expected_ownership_version is None:
+        if (
+            expected_ownership_version is None
+            or expected_ownership_version != claim.ownership_version
+        ):
             waiting_for_human = await _ai_is_waiting_for_human(
                 session,
                 inbound.conversation_id,
             )
             await session.rollback()
+            await mark_skipped(
+                inbound.message_id,
+                disposition_code=(
+                    "waiting_for_human" if waiting_for_human else "ownership_changed"
+                ),
+            )
             log.info(
                 "m1.autonomous_reply.skipped",
                 conv_id=conv_id,
@@ -447,6 +603,8 @@ async def _process(
                 language=language,
                 processing_time_ms=int((time.monotonic() - t0) * 1000),
                 expected_ownership_version=expected_ownership_version,
+                source_message_id=inbound.message_id,
+                outcome_type="opt_out",
             )
             if outbound_id is None:
                 return _persistence_failure_result(conv_id)
@@ -456,6 +614,7 @@ async def _process(
                 idempotency_key=str(outbound_id),
                 conversation_id=inbound.conversation_id,
                 expected_ownership_version=expected_ownership_version,
+                source_message_id=inbound.message_id,
             )
             return {
                 "status": "opt_out",
@@ -479,6 +638,8 @@ async def _process(
                 language=language,
                 processing_time_ms=int((time.monotonic() - t0) * 1000),
                 expected_ownership_version=expected_ownership_version,
+                source_message_id=inbound.message_id,
+                outcome_type="voice_note",
             )
             if outbound_id is None:
                 return _persistence_failure_result(conv_id)
@@ -488,6 +649,7 @@ async def _process(
                 idempotency_key=str(outbound_id),
                 conversation_id=inbound.conversation_id,
                 expected_ownership_version=expected_ownership_version,
+                source_message_id=inbound.message_id,
             )
             return {
                 "status": "escalated_voice_note",
@@ -516,6 +678,12 @@ async def _process(
                     customer_text=content,
                 )
                 if draft_reply is not None:
+                    await mark_outcome_committed(
+                        session,
+                        source_message_id=inbound.message_id,
+                        outbound_message_id=draft_reply.outbound_message_id,
+                        outcome_type="draft_reply",
+                    )
                     await session.commit()
                     observation.set(
                         "committed", transaction_outcome="committed",
@@ -554,11 +722,16 @@ async def _process(
                     idempotency_key=str(draft_reply.outbound_message_id),
                     conversation_id=inbound.conversation_id,
                     expected_ownership_version=expected_ownership_version,
+                    source_message_id=inbound.message_id,
                 )
             else:
                 log.info(
                     "m1.order_draft.order_reply_send_skipped",
                     order_id=str(draft_reply.order_id),
+                )
+                await mark_skipped(
+                    inbound.message_id,
+                    disposition_code="order_committed_no_send",
                 )
                 send_result = {"status": "skipped"}
             result = {
@@ -675,6 +848,7 @@ async def _process(
                     finalized_turn.text,
                     outbound_message_id=finalized_turn.outbound_message_id,
                     conversation_id=inbound.conversation_id,
+                    source_message_id=inbound.message_id,
                 )
                 return {
                     "status": "waiting_for_human",
@@ -698,6 +872,7 @@ async def _process(
                     idempotency_key=str(finalized_turn.outbound_message_id),
                     conversation_id=inbound.conversation_id,
                     expected_ownership_version=expected_ownership_version,
+                    source_message_id=inbound.message_id,
                 )
                 return {
                     "status": "awaiting_order_draft_confirmation",
@@ -728,6 +903,12 @@ async def _process(
                 commercial_state_snapshot_revision
             ),
             commercial_state_update=commercial_state_update,
+            outcome_type=(
+                "fallback"
+                if audit_record is not None
+                and audit_record.outcome == AITurnOutcome.fallback_used
+                else "response"
+            ),
         )
         if out_msg_id is None:
             return _persistence_failure_result(conv_id)
@@ -796,6 +977,7 @@ async def _process(
             idempotency_key=str(out_msg_id),
             conversation_id=inbound.conversation_id,
             expected_ownership_version=expected_ownership_version,
+            source_message_id=inbound.message_id,
         )
 
         log.info(
@@ -825,6 +1007,7 @@ async def _send_safe(
     idempotency_key: str,
     conversation_id: uuid.UUID | None = None,
     expected_ownership_version: int | None = None,
+    source_message_id: uuid.UUID | None = None,
 ) -> dict[str, str]:
     """Send once through the adapter and report only confirmed outcomes."""
     with ops.observe(
@@ -835,6 +1018,19 @@ async def _send_safe(
         from app.database import async_session_factory
 
         if not settings.whatsapp_send_enabled:
+            if source_message_id is not None:
+                try:
+                    await mark_skipped(
+                        source_message_id,
+                        disposition_code="whatsapp_send_disabled",
+                    )
+                except Exception as exc:
+                    log.error(
+                        "m1.turn_recovery.send_skip_failed",
+                        error_type=type(exc).__name__,
+                    )
+                    observation.set("uncertain", reason="recovery_state_unavailable")
+                    return {"status": "unknown_or_failed"}
             log.info("m1.send_message.skipped", reason="whatsapp_send_disabled")
             observation.set("skipped", reason="whatsapp_send_disabled")
             return {"status": "skipped"}
@@ -856,12 +1052,25 @@ async def _send_safe(
                         expected_ownership_version=expected_ownership_version,
                     ):
                         await session.rollback()
+                        if source_message_id is not None:
+                            await mark_skipped(
+                                source_message_id,
+                                disposition_code="ownership_changed_before_send",
+                            )
                         log.info(
                             "m1.send_message.skipped",
                             reason="ai_authority_changed",
                         )
                         observation.set("skipped", reason="ai_authority_changed")
                         return {"status": "skipped"}
+                    if source_message_id is not None and not await mark_send_state(
+                        source_message_id,
+                        state="send_uncertain",
+                    ):
+                        observation.set(
+                            "uncertain", reason="recovery_state_unavailable"
+                        )
+                        return {"status": "unknown_or_failed"}
                     adapter = get_messaging_adapter()
                     provider_message_id = await adapter.send_message(
                         phone,
@@ -875,6 +1084,16 @@ async def _send_safe(
                     error_type="UnconfirmedProviderMessageId",
                 )
                 observation.set("uncertain", reason="unconfirmed_provider_id")
+                return {"status": "unknown_or_failed"}
+            if source_message_id is not None and not await mark_send_state(
+                source_message_id,
+                state="send_completed",
+            ):
+                log.error(
+                    "m1.send_message.unknown_or_failed",
+                    error_type="RecoveryCompletionNotCommitted",
+                )
+                observation.set("uncertain", reason="recovery_state_unavailable")
                 return {"status": "unknown_or_failed"}
             log.info("m1.send_message.sent")
             observation.set("confirmed")
@@ -897,6 +1116,7 @@ async def _send_persisted_handoff_ack_safe(
     *,
     outbound_message_id: uuid.UUID,
     conversation_id: uuid.UUID,
+    source_message_id: uuid.UUID | None = None,
 ) -> dict[str, str]:
     """Send a committed terminal acknowledgment through the existing ledger key."""
     with ops.observe(
@@ -911,6 +1131,19 @@ async def _send_persisted_handoff_ack_safe(
         from app.models.message import Message
 
         if not settings.whatsapp_send_enabled:
+            if source_message_id is not None:
+                try:
+                    await mark_skipped(
+                        source_message_id,
+                        disposition_code="whatsapp_send_disabled",
+                    )
+                except Exception as exc:
+                    log.error(
+                        "m1.turn_recovery.send_skip_failed",
+                        error_type=type(exc).__name__,
+                    )
+                    observation.set("uncertain", reason="recovery_state_unavailable")
+                    return {"status": "unknown_or_failed"}
             log.info("m1.send_message.skipped", reason="whatsapp_send_disabled")
             observation.set("skipped", reason="whatsapp_send_disabled")
             return {"status": "skipped"}
@@ -940,6 +1173,12 @@ async def _send_persisted_handoff_ack_safe(
             return {"status": "unknown_or_failed"}
 
         try:
+            if source_message_id is not None and not await mark_send_state(
+                source_message_id,
+                state="send_uncertain",
+            ):
+                observation.set("uncertain", reason="recovery_state_unavailable")
+                return {"status": "unknown_or_failed"}
             provider_message_id = await get_messaging_adapter().send_message(
                 phone,
                 text,
@@ -947,6 +1186,12 @@ async def _send_persisted_handoff_ack_safe(
             )
             if not isinstance(provider_message_id, str) or not provider_message_id.strip():
                 raise ValueError("unconfirmed provider message ID")
+            if source_message_id is not None and not await mark_send_state(
+                source_message_id,
+                state="send_completed",
+            ):
+                observation.set("uncertain", reason="recovery_state_unavailable")
+                return {"status": "unknown_or_failed"}
             observation.set("confirmed")
             return {
                 "status": "sent",
