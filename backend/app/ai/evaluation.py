@@ -82,6 +82,7 @@ class EvaluationOutcomeClass(str, Enum):
     clarification = "clarification"
     truthful_fallback = "truthful_fallback"
     handoff = "handoff"
+    order_draft = "order_draft"
     refusal = "refusal"
     error = "error"
 
@@ -375,10 +376,20 @@ class EvaluationObservation(StrictEvaluationModel):
             and result.status == "success"
             for result in self.tool_results
         )
+        completed_order_draft = any(
+            result.capability_name == "prepare_order_draft"
+            and result.status == "success"
+            for result in self.tool_results
+        )
         if (self.final_outcome == EvaluationOutcomeClass.handoff) != completed_handoff:
             raise ValueError("handoff outcome must match a successful handoff result")
+        if (self.final_outcome == EvaluationOutcomeClass.order_draft) != completed_order_draft:
+            raise ValueError(
+                "order_draft outcome must match a successful draft result"
+            )
         if self.final_outcome not in {
             EvaluationOutcomeClass.handoff,
+            EvaluationOutcomeClass.order_draft,
             EvaluationOutcomeClass.error,
         }:
             final_result = self.provider_calls[-1].result
