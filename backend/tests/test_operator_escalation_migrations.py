@@ -16,7 +16,7 @@ A7_REVISION = "a7b8c9d0e1f2"
 
 def test_b1_b2_c3_are_additive_linear_reversible_migrations() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_current_head() == A7_REVISION
+    assert script.get_revision(A7_REVISION) is not None
     assert script.get_revision(A7_REVISION).down_revision == F6_REVISION
     assert script.get_revision(F6_REVISION).down_revision == E5_REVISION
     assert script.get_revision(E5_REVISION).down_revision == D4_REVISION

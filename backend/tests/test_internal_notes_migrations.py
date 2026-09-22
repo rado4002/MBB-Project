@@ -13,11 +13,12 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 
 REVISION = "e5f6a7b8c9d0"
+CURRENT_HEAD = ScriptDirectory.from_config(Config("alembic.ini")).get_current_head()
 
 
 def test_internal_notes_migration_is_additive_seed_free_and_reversible() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_current_head() == "f6a7b8c9d0e1"
+    assert script.get_revision("f6a7b8c9d0e1").down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == "d4e5f6a7b8c9"
 
     source = (
@@ -64,9 +65,10 @@ async def test_disposable_database_upgrade_downgrade_and_reupgrade() -> None:
             )
             assert await connection.scalar(
                 text(
-                    "SELECT version_num = 'e5f6a7b8c9d0' "
+                    "SELECT version_num = :revision "
                     "FROM mbb.alembic_version"
-                )
+                ),
+                {"revision": CURRENT_HEAD},
             )
     finally:
         await engine.dispose()

@@ -7,6 +7,8 @@ import uuid
 from pathlib import Path
 
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -14,6 +16,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 DATABASE_URL = os.environ.get("AI2B_MIGRATION_DATABASE_URL")
 PREVIOUS_REVISION = "a7b8c9d0e1f2"
 AI2B_REVISION = "b8c9d0e1f2a3"
+CURRENT_HEAD = ScriptDirectory.from_config(Config("alembic.ini")).get_current_head()
 
 pytestmark = pytest.mark.skipif(
     not DATABASE_URL,
@@ -120,9 +123,10 @@ async def test_ai2b_migration_round_trip_preserves_existing_business_rows() -> N
     _migrate("upgrade", "head")
     engine = create_async_engine(DATABASE_URL)
     async with engine.connect() as connection:
+        assert CURRENT_HEAD is not None
         assert await connection.scalar(
             text("SELECT version_num = :revision FROM mbb.alembic_version"),
-            {"revision": AI2B_REVISION},
+            {"revision": CURRENT_HEAD},
         )
         assert await connection.scalar(
             text("SELECT COUNT(*) FROM mbb.customers WHERE phone_number = '+243810000081'")

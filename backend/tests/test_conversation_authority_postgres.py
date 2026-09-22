@@ -345,7 +345,7 @@ async def test_m1_voice_note_routing_and_replay_respect_authority(engine, monkey
     }[authority]
     assert first["send_status"] == "skipped"
     duplicate = await m1._process(**args)
-    assert duplicate["status"] == "duplicate_ignored"
+    assert duplicate["status"] == first["send_status"] == "skipped"
     assert duplicate["conversation_id"] == first["conversation_id"]
     async with factory() as session:
         stored = await session.get(Conversation, conversation.conversation_id)

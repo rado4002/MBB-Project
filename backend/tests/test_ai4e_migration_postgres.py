@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 DATABASE_URL = os.environ.get("AI4E_MIGRATION_DATABASE_URL")
 PREVIOUS_REVISION = "c9d0e1f2a3b4"
-HEAD_REVISION = "d0e1f2a3b4c5"
+AI4E_REVISION = "d0e1f2a3b4c5"
 
 pytestmark = pytest.mark.skipif(
     not DATABASE_URL,
@@ -77,7 +77,7 @@ async def test_ai4e_reason_constraint_round_trip_preserves_historical_reason() -
             )
         await engine.dispose()
 
-        _migrate("upgrade", HEAD_REVISION)
+        _migrate("upgrade", AI4E_REVISION)
         engine = create_async_engine(DATABASE_URL)
         reasons = (
             "qualified_purchase_intent",
