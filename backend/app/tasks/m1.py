@@ -189,6 +189,7 @@ async def _persist_outbound(
                             session,
                             source_message_id=source_message_id,
                             disposition_code="ownership_changed",
+                            only_uncommitted=True,
                         )
                         if skipped:
                             await session.commit()
@@ -238,6 +239,7 @@ async def _persist_outbound(
                             session,
                             source_message_id=source_message_id,
                             disposition_code="superseded",
+                            only_uncommitted=True,
                         )
                         if skipped:
                             await session.commit()
@@ -260,6 +262,7 @@ async def _persist_outbound(
                             session,
                             source_message_id=source_message_id,
                             disposition_code="commercial_state_changed",
+                            only_uncommitted=True,
                         )
                         if skipped:
                             await session.commit()
@@ -554,6 +557,7 @@ async def _process(
             await mark_skipped(
                 inbound.message_id,
                 disposition_code="superseded",
+                only_uncommitted=True,
             )
             return {
                 "status": "superseded",
@@ -578,6 +582,7 @@ async def _process(
                 disposition_code=(
                     "waiting_for_human" if waiting_for_human else "ownership_changed"
                 ),
+                only_uncommitted=True,
             )
             log.info(
                 "m1.autonomous_reply.skipped",
@@ -684,6 +689,12 @@ async def _process(
                         outbound_message_id=draft_reply.outbound_message_id,
                         outcome_type="draft_reply",
                     )
+                    if draft_reply.order_id is not None:
+                        await mark_skipped_in_session(
+                            session,
+                            source_message_id=inbound.message_id,
+                            disposition_code="order_committed_no_send",
+                        )
                     await session.commit()
                     observation.set(
                         "committed", transaction_outcome="committed",
@@ -728,10 +739,6 @@ async def _process(
                 log.info(
                     "m1.order_draft.order_reply_send_skipped",
                     order_id=str(draft_reply.order_id),
-                )
-                await mark_skipped(
-                    inbound.message_id,
-                    disposition_code="order_committed_no_send",
                 )
                 send_result = {"status": "skipped"}
             result = {

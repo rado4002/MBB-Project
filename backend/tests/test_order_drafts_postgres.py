@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from app.ai.commercial_state import CommercialStateUpdate, update_commercial_state
@@ -19,7 +19,8 @@ from app.ai.provider_contract import (
     ProviderToolCall,
     ProviderTurnResult,
 )
-from app.ai.turn import AITurn, AITurnService
+from app.ai.turn import AITurn, AITurnPersistenceError, AITurnService
+from app.models.ai_turn_audit import AITurnAudit
 from app.models.catalog import Product, SellableItem
 from app.models.conversation import Conversation
 from app.models.customer import Customer
@@ -248,6 +249,129 @@ async def _assert_state_counts(factory, *, orders: int = 0) -> None:
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(Order)) == orders
         assert await session.scalar(select(func.count()).select_from(Payment)) == 0
+
+
+@pytest.mark.asyncio
+async def test_order_commit_crash_preserves_no_send_on_recovery(engine, monkeypatch):
+    from app.tasks import m1
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    seeded = await _seed(factory)
+    prepared = await _prepare(factory, seeded)
+    async with factory() as session:
+        draft = await session.get(OrderDraft, (prepared.draft_id, prepared.draft_version))
+        content = f"OUI {draft.confirmation_code}"
+    calls = _block_m1_external_effects(monkeypatch, factory, whatsapp_send_enabled=True)
+
+    class WorkerCrash(BaseException):
+        pass
+
+    original_recorder = m1.mark_outcome_committed
+
+    async def crash_after_commit(session, **kwargs):
+        result = await original_recorder(session, **kwargs)
+        original_commit = session.commit
+
+        async def commit_then_crash():
+            await original_commit()
+            raise WorkerCrash
+
+        session.commit = commit_then_crash
+        return result
+
+    monkeypatch.setattr(m1, "mark_outcome_committed", crash_after_commit)
+    with pytest.raises(WorkerCrash):
+        await _process_m1_confirmation(content=content, sequence=900)
+    monkeypatch.setattr(m1, "mark_outcome_committed", original_recorder)
+
+    async with factory() as session:
+        draft = await session.get(OrderDraft, (prepared.draft_id, prepared.draft_version))
+        inbound = await session.get(Message, draft.resolved_by_message_id)
+        lifecycle = await session.get(InboundTurnLifecycle, inbound.message_id)
+        assert lifecycle.state == "skipped"
+        assert lifecycle.disposition_code == "order_committed_no_send"
+    replay = await m1._process(
+        task=SimpleNamespace(request=SimpleNamespace(id="order-crash-replay", retries=0)),
+        message_id=str(inbound.message_id),
+        customer_phone="+243810006001",
+        content=inbound.content,
+        content_type=inbound.content_type,
+        timestamp=inbound.timestamp.isoformat(),
+        whatsapp_message_id=inbound.whatsapp_message_id,
+    )
+    assert replay["send_status"] == "skipped"
+    assert calls == []
+    await _assert_state_counts(factory, orders=1)
+
+
+@pytest.mark.asyncio
+async def test_expired_claim_cannot_commit_duplicate_terminal_audit(engine, monkeypatch):
+    import app.database as database
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(database, "async_session_factory", factory)
+    seeded = await _seed(factory)
+    async with factory() as session:
+        add_pending_turn(
+            session,
+            source_message_id=seeded.source_message_id,
+            conversation_id=seeded.conversation_id,
+            ownership_version=1,
+        )
+        await session.commit()
+    await claim_turn(seeded.source_message_id, attempt_id="slow-terminal")
+    async with factory() as session:
+        await session.execute(
+            update(InboundTurnLifecycle)
+            .where(InboundTurnLifecycle.source_message_id == seeded.source_message_id)
+            .values(claim_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
+        )
+        await session.commit()
+    assert (await claim_turn(seeded.source_message_id, attempt_id="replacement")).action == "process"
+
+    class DraftAdapter:
+        async def generate_turn(self, _request):
+            return ProviderTurnResult(
+                tool_calls=(ProviderToolCall(
+                    call_id="draft",
+                    capability_name="prepare_order_draft",
+                    arguments={"selected_sellable_item_id": str(seeded.sellable_item_id), "quantity": 2},
+                ),),
+                finish_reason=ProviderFinishReason.tool_call,
+            )
+
+    async def authority(_context):
+        return True
+
+    async def load_state(_conversation_id):
+        return None
+
+    service = AITurnService(
+        DraftAdapter(),
+        authority_checker=authority,
+        commercial_state_loader=load_state,
+        durable_session_factory=factory,
+        turn_lifecycle_recorder=mark_outcome_committed,
+    )
+
+    async def finish_worker():
+        return await service.generate_finalized(AITurn(
+            user_content="Je le prends.",
+            language="french",
+            expected_ownership_version=1,
+            conversation_id=seeded.conversation_id,
+            source_message_id=seeded.source_message_id,
+            allowed_capabilities=("prepare_order_draft",),
+        ))
+
+    results = await asyncio.gather(finish_worker(), finish_worker(), return_exceptions=True)
+    assert sum(isinstance(result, AITurnPersistenceError) for result in results) == 1
+    async with factory() as session:
+        assert await session.scalar(select(func.count(AITurnAudit.turn_id))) == 1
+        assert await session.scalar(select(func.count()).select_from(OrderDraft)) == 1
+        assert await session.scalar(
+            select(func.count(Message.message_id)).where(Message.direction == "outbound")
+        ) == 1
 
 
 def _block_m1_external_effects(
@@ -685,6 +809,35 @@ async def test_m1_exact_confirmation_creates_and_replays_one_pending_order(
         assert inventory is not None
         assert (inventory.status, inventory.updated_at) == inventory_before
     await _assert_state_counts(factory, orders=1)
+
+
+@pytest.mark.asyncio
+async def test_m1_exact_cancellation_bypasses_provider_and_replays_without_order(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    seeded = await _seed(factory)
+    prepared = await _prepare(factory, seeded)
+    async with factory() as session:
+        draft = await session.get(OrderDraft, (prepared.draft_id, prepared.draft_version))
+        cancellation = f"NON {draft.confirmation_code}"
+
+    external_calls = _block_m1_external_effects(
+        monkeypatch, factory, whatsapp_send_enabled=False,
+    )
+    first = await _process_m1_confirmation(content=cancellation, sequence=901)
+    replay = await _process_m1_confirmation(content=cancellation, sequence=902)
+
+    assert first["status"] == "order_draft_cancelled"
+    assert replay["status"] == "order_draft_already_cancelled"
+    assert first["send_status"] == replay["send_status"] == "skipped"
+    assert external_calls == []
+    async with factory() as session:
+        draft = await session.get(OrderDraft, (prepared.draft_id, prepared.draft_version))
+        assert draft.status == "cancelled"
+        assert draft.order_id is None
+    await _assert_state_counts(factory)
 
 
 @pytest.mark.asyncio

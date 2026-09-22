@@ -12,6 +12,7 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from app.ai import ops
+from app.ai.audit import AITurnAuditRecord, AITurnOutcome
 from app.ai.capabilities import (
     CapabilityDefinition,
     CapabilityRegistry,
@@ -249,6 +250,79 @@ async def test_concurrent_claims_choose_one_worker(factory):
         claim_turn(inbound.message_id, attempt_id="worker-b"),
     )
     assert sorted(claim.action for claim in claims) == ["busy", "process"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("updates_state", [False, True])
+async def test_expired_claim_cannot_commit_a_second_outcome(factory, updates_state):
+    _customer, conversation, inbound = await _seed(factory)
+    assert (await claim_turn(inbound.message_id, attempt_id="slow-worker")).action == "process"
+    async with factory() as session:
+        await session.execute(
+            update(InboundTurnLifecycle)
+            .where(InboundTurnLifecycle.source_message_id == inbound.message_id)
+            .values(claim_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
+        )
+        await session.commit()
+    assert (await claim_turn(inbound.message_id, attempt_id="replacement")).action == "process"
+
+    async def finish_worker():
+        return await m1._persist_outbound(
+            conversation_id=conversation.conversation_id,
+            content="Réponse durable unique.",
+            language="french",
+            processing_time_ms=5,
+            expected_ownership_version=1,
+            source_message_id=inbound.message_id,
+            expected_commercial_state_revision=0,
+            commercial_state_update=(
+                CommercialStateUpdate(current_goal="objectif confirmé")
+                if updates_state else None
+            ),
+            audit_record=AITurnAuditRecord(
+                turn_id=uuid.uuid4(),
+                conversation_id=conversation.conversation_id,
+                policy_version="review",
+                outcome=AITurnOutcome.response_generated,
+            ),
+        )
+
+    # Both workers finish from the same still-authoritative snapshot. A reply
+    # need not mutate commercial state, so revision checks alone cannot dedup it.
+    results = await asyncio.gather(finish_worker(), finish_worker())
+    assert sum(result is not None for result in results) == 1
+    async with factory() as session:
+        lifecycle = await session.get(InboundTurnLifecycle, inbound.message_id)
+        assert lifecycle.state == "outcome_committed"
+        assert await session.scalar(select(func.count(AITurnAudit.turn_id))) == 1
+        assert await session.scalar(
+            select(func.count(Message.message_id)).where(Message.direction == "outbound")
+        ) == 1
+
+
+@pytest.mark.asyncio
+async def test_overlapping_senders_cannot_retry_an_uncertain_send(factory, monkeypatch):
+    import app.adapters as adapters
+
+    customer, conversation, inbound = await _seed(factory)
+    outbound_id = await _persist_output(factory, conversation, inbound)
+    messaging = _Messaging(error=TimeoutError("acknowledgement lost"))
+    monkeypatch.setattr(adapters, "get_messaging_adapter", lambda: messaging)
+    monkeypatch.setattr(m1, "settings", SimpleNamespace(whatsapp_send_enabled=True))
+
+    async def send_loaded_outbound():
+        return await m1._send_safe(
+            customer.phone_number,
+            "Réponse durable test.",
+            idempotency_key=str(outbound_id),
+            conversation_id=conversation.conversation_id,
+            expected_ownership_version=1,
+            source_message_id=inbound.message_id,
+        )
+
+    results = await asyncio.gather(send_loaded_outbound(), send_loaded_outbound())
+    assert all(result["status"] == "unknown_or_failed" for result in results)
+    assert len(messaging.calls) == 1
 
 
 @pytest.mark.asyncio

@@ -22,6 +22,10 @@ _CLAIM_TTL = timedelta(minutes=30)
 _TERMINAL_STATES = {"send_completed", "send_uncertain", "skipped"}
 
 
+class TurnOutcomeConflict(RuntimeError):
+    """Another execution already committed or closed this inbound turn."""
+
+
 @dataclass(frozen=True)
 class TurnClaim:
     action: Literal["process", "resume_send", "noop", "busy"]
@@ -144,6 +148,16 @@ async def _legacy_lifecycle(
     ):
         state = "skipped"
         disposition = "ai_not_eligible"
+
+    if state == "outcome_committed":
+        from app.config import get_settings
+
+        # Legacy outcome evidence does not prove transport was never invoked.
+        # Only Baileys can reconcile a replay against its durable UUID ledger;
+        # the official adapter discards that key and could send a duplicate.
+        if get_settings().whatsapp_mode != "baileys":
+            state = "send_uncertain"
+            disposition = "legacy_send_unverified"
 
     lifecycle = InboundTurnLifecycle(
         source_message_id=source.message_id,
@@ -327,8 +341,11 @@ async def mark_outcome_committed(
     )
     if lifecycle is None:
         return False
-    if lifecycle.state in _TERMINAL_STATES:
-        return False
+    if lifecycle.state not in {"pending", "processing"}:
+        # The lease limits redundant execution, but is not a commit fence.
+        # Reject the entire caller transaction, including its domain changes
+        # and audit, if another worker finished while this worker was running.
+        raise TurnOutcomeConflict("inbound turn outcome is already closed")
     lifecycle.state = "outcome_committed"
     lifecycle.outbound_message_id = outbound_message_id
     lifecycle.outcome_type = outcome_type
@@ -345,6 +362,7 @@ async def mark_skipped_in_session(
     *,
     source_message_id: uuid.UUID,
     disposition_code: str,
+    only_uncommitted: bool = False,
 ) -> bool:
     if not callable(getattr(session, "get", None)):
         return False
@@ -354,6 +372,8 @@ async def mark_skipped_in_session(
         with_for_update=True,
     )
     if lifecycle is None or lifecycle.state in {"send_completed", "send_uncertain"}:
+        return False
+    if only_uncommitted and lifecycle.state == "outcome_committed":
         return False
     lifecycle.state = "skipped"
     lifecycle.disposition_code = disposition_code
@@ -368,6 +388,7 @@ async def mark_skipped(
     source_message_id: uuid.UUID,
     *,
     disposition_code: str,
+    only_uncommitted: bool = False,
 ) -> bool:
     from app.database import async_session_factory
 
@@ -376,6 +397,7 @@ async def mark_skipped(
             session,
             source_message_id=source_message_id,
             disposition_code=disposition_code,
+            only_uncommitted=only_uncommitted,
         )
         await session.commit()
         return changed
@@ -400,6 +422,14 @@ async def mark_send_state(
         if lifecycle.state in {"send_completed", "skipped"}:
             await session.rollback()
             return lifecycle.state == state
+        if state == "send_uncertain" and lifecycle.state != "outcome_committed":
+            # Only one caller may cross into transport, even if two workers
+            # loaded the committed outbound before either began sending.
+            await session.rollback()
+            return False
+        if state == "send_completed" and lifecycle.state != "send_uncertain":
+            await session.rollback()
+            return False
         lifecycle.state = state
         lifecycle.attempt_id = None
         lifecycle.claim_expires_at = None

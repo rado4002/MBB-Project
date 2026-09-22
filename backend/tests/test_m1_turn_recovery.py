@@ -177,3 +177,29 @@ async def test_legacy_draft_reply_cannot_cross_an_ownership_generation() -> None
     assert lifecycle.disposition_code == "ownership_changed_before_send"
     assert lifecycle.outcome_type == "draft_reply"
     assert lifecycle.outbound_message_id == outbound_message_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["baileys", "official"])
+async def test_legacy_send_requires_durable_channel_reconciliation(monkeypatch, mode):
+    import app.config as config
+
+    monkeypatch.setattr(config, "get_settings", lambda: SimpleNamespace(whatsapp_mode=mode))
+    committed_at = datetime.now(timezone.utc)
+    source = SimpleNamespace(message_id=uuid.uuid4(), conversation_id=uuid.uuid4())
+    conversation = SimpleNamespace(
+        ownership_version=1,
+        ownership_updated_at=committed_at - timedelta(seconds=1),
+        owner_type="ai",
+        ai_execution_state="eligible",
+    )
+    audit = SimpleNamespace(
+        outcome="response_generated",
+        outbound_message_id=uuid.uuid4(),
+        created_at=committed_at,
+    )
+    session = _LegacySession(conversation, audit, None, source.message_id)
+    lifecycle = await turn_recovery._legacy_lifecycle(session, source)
+    assert lifecycle.state == (
+        "outcome_committed" if mode == "baileys" else "send_uncertain"
+    )
