@@ -62,7 +62,7 @@ async def create_and_schedule_relance(
     # Get previous hooks to avoid repetition
     previous_hooks = await _get_previous_hook_texts(session, lead.lead_id)
 
-    # Generate value hook using Claude
+    # Select a deterministic value hook; legacy Relance must not execute AI.
     hook_text, hook_type = await generate_relance_hook(
         attempt_number=next_attempt,
         language=conversation.language_detected,
