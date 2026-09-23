@@ -179,7 +179,11 @@ export function OwnershipDialog({
       if (controller.signal.aborted) return
       const error = asApiError(unknownError)
       setRequestError(error)
-      if (error.code === 'OWNERSHIP_CONFLICT') await onConflict()
+      if (error.code === 'OWNERSHIP_CONFLICT') {
+        await onConflict()
+        completedRef.current = true
+        onClose()
+      }
     } finally {
       if (controllerRef.current === controller) controllerRef.current = null
       submittingRef.current = false
@@ -201,15 +205,15 @@ export function OwnershipDialog({
       >
         <header className="ownership-dialog__header">
           <div>
-            <p className="eyebrow">Conversation control</p>
+            <p className="eyebrow">Conversation authority</p>
             <h2 id={titleId}>
-              {takingControl ? 'Escalate to Human' : 'Return to AI'}
+              {takingControl ? 'Take over conversation' : 'Return to AI'}
             </h2>
           </div>
         </header>
         <p id={descriptionId} className="ownership-dialog__description">
           {takingControl
-            ? 'Escalate this conversation to yourself? You will take control, and the MBB AI Assistant will be paused.'
+            ? 'Take over this conversation yourself? You will become the Human owner, and the MBB AI Assistant will be paused.'
             : 'Return this conversation to the MBB AI Assistant? Your active ownership will end, and the AI assistant will become eligible to handle future messages.'}
         </p>
         <form className="ownership-form" onSubmit={(event) => void submit(event)}>
@@ -235,10 +239,10 @@ export function OwnershipDialog({
             >
               {submitting
                 ? takingControl
-                  ? 'Taking control…'
+                  ? 'Taking over…'
                   : 'Returning to AI…'
                 : takingControl
-                  ? 'Take Control'
+                  ? 'Take over conversation'
                   : 'Return to AI'}
             </button>
           </div>

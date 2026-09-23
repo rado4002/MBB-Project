@@ -157,7 +157,8 @@ describe('read-only conversation workspace', () => {
     expect(screen.queryByText(firstId)).not.toBeInTheDocument()
     expect(screen.queryByText(/city|consent|opt-out|raw context/i)).not.toBeInTheDocument()
     expect(screen.queryByText('Conversation control')).not.toBeInTheDocument()
-    expect(screen.getAllByText('Controlled by MBB AI Assistant')).toHaveLength(1)
+    expect(within(screen.getByRole('group', { name: 'Conversation authority' }))
+      .getByText('MBB AI Assistant')).toBeInTheDocument()
   })
 
   it('loads history independently without hiding available conversation details', async () => {
@@ -245,7 +246,8 @@ describe('read-only conversation workspace', () => {
     expect(container.querySelector('script')).toBeNull()
     expect(container.querySelector('a[href^="http"]')).toBeNull()
     expect(screen.queryByText(/delivery status|authored by human/i)).not.toBeInTheDocument()
-    expect(screen.getAllByText('Controlled by MBB AI Assistant')).toHaveLength(1)
+    expect(within(screen.getByRole('group', { name: 'Conversation authority' }))
+      .getByText('MBB AI Assistant')).toBeInTheDocument()
   })
 
   it('shows a truthful empty history without hiding loaded detail', async () => {
@@ -493,7 +495,7 @@ describe('read-only conversation workspace', () => {
     const { container } = renderApp(`/inbox/${firstId}`)
     await screen.findByRole('region', { name: 'Conversation timeline' })
 
-    expect(screen.getByRole('button', { name: 'Escalate to Human' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Take over conversation' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /reply|send|assign|resolve|compose|return to ai/i })).not.toBeInTheDocument()
     expect(screen.queryByText(/channel|delivery status|unread|priority/i)).not.toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: 'Internal Note' })).toBeInTheDocument()

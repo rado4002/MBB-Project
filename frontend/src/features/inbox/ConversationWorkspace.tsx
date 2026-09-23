@@ -7,6 +7,7 @@ import {
   useState,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
   type RefObject,
 } from 'react'
 import { createPortal } from 'react-dom'
@@ -23,6 +24,8 @@ import type {
 import { ApiError, errorMessage } from '../../api/errors'
 import { useAuth } from '../../auth/AuthProvider'
 import { InlineAlert } from '../../components/InlineAlert'
+import { ConversationAuthority } from './ConversationAuthority'
+import { replyUnavailableReason } from './authorityPolicy'
 import { OwnershipDialog } from './OwnershipDialog'
 import { EscalationForm } from './EscalationForm'
 import {
@@ -49,25 +52,6 @@ function label(value: string | null) {
 
 function safeInterest(value: string) {
   return Array.from(value).slice(0, 80).join('')
-}
-
-function useMediaQuery(query: string) {
-  const [matches, setMatches] = useState(() =>
-    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-      ? window.matchMedia(query).matches
-      : false,
-  )
-
-  useEffect(() => {
-    if (typeof window.matchMedia !== 'function') return
-    const mediaQuery = window.matchMedia(query)
-    const update = () => setMatches(mediaQuery.matches)
-    update()
-    mediaQuery.addEventListener('change', update)
-    return () => mediaQuery.removeEventListener('change', update)
-  }, [query])
-
-  return matches
 }
 
 function actorLabel(senderType: MessageSenderType) {
@@ -104,55 +88,6 @@ function timelineItemKey(item: OperatorTimelineItem) {
   return item.kind === 'message'
     ? `message:${item.message_id}`
     : `internal_note:${item.note_id}`
-}
-
-function ownershipSummary(ownership: ConversationOwnership) {
-  if (ownership.owner_type === 'ai' && ownership.ai_execution_state === 'paused') {
-    return 'Waiting for Human'
-  }
-  const owner = ownership.owner_type === 'ai'
-    ? 'MBB AI Assistant'
-    : ownership.human_owner?.display_name ?? 'Human Operator'
-  return `Controlled by ${owner}`
-}
-
-const REPLY_ELIGIBLE_STATUSES = new Set([
-  'active',
-  'qualifying',
-  'nurturing',
-  'escalated',
-])
-
-function replyUnavailableReason(
-  detail: OperatorConversationDetail | null,
-  accountId: string | undefined,
-  hasReplyCapability: boolean,
-) {
-  if (!hasReplyCapability) {
-    return 'Reply unavailable — your account does not have permission to reply.'
-  }
-  if (!detail) {
-    return 'Reply unavailable — conversation ownership is unavailable.'
-  }
-  if (detail.ownership.owner_type === 'ai') {
-    if (detail.ownership.ai_execution_state === 'paused') {
-      return 'Reply unavailable — waiting for a Human Operator to take control.'
-    }
-    return 'Reply unavailable — this conversation is controlled by MBB AI Assistant.'
-  }
-  if (
-    detail.ownership.ai_execution_state !== 'paused' ||
-    !detail.ownership.human_owner
-  ) {
-    return 'Reply unavailable — conversation ownership is unavailable.'
-  }
-  if (detail.ownership.human_owner.account_id !== accountId) {
-    return `Reply unavailable — only ${detail.ownership.human_owner.display_name} may reply.`
-  }
-  if (!REPLY_ELIGIBLE_STATUSES.has(detail.status)) {
-    return 'Reply unavailable — this conversation is not currently eligible for replies.'
-  }
-  return null
 }
 
 function workspaceError(error: ApiError) {
@@ -212,14 +147,14 @@ function ConversationHeader({
   error,
   onRetry,
   headingRef,
-  ownershipRef,
+  authority,
 }: {
   detail: OperatorConversationDetail | null
   loading: boolean
   error: ApiError | null
   onRetry: () => Promise<void>
   headingRef: RefObject<HTMLHeadingElement | null>
-  ownershipRef: RefObject<HTMLSpanElement | null>
+  authority: ReactNode
 }) {
   const errorRef = useRef<HTMLDivElement>(null)
 
@@ -252,25 +187,15 @@ function ConversationHeader({
   const customerName = detail.customer.display_name?.trim() || 'Customer'
   return (
     <div className="conversation-header__content conversation-header__content--loaded">
-      <h2 id="workspace-heading" tabIndex={-1} ref={headingRef}>{customerName}</h2>
-      <span className="masked-phone">{detail.customer.phone_masked}</span>
+      <div className="conversation-identity">
+        <h2 id="workspace-heading" tabIndex={-1} ref={headingRef}>{customerName}</h2>
+        <span className="masked-phone">{detail.customer.phone_masked}</span>
+      </div>
       <p className="visually-hidden" role="status">Conversation details loaded.</p>
+      {authority}
       <div className="conversation-metadata" aria-label="Conversation attributes">
         <span>Status: {label(detail.status)}</span>
         <span>Language: {label(detail.language)}</span>
-        <span
-          className="ownership-summary"
-          ref={ownershipRef}
-          tabIndex={-1}
-          aria-live="polite"
-        >
-          {ownershipSummary(detail.ownership)}
-        </span>
-        <span>
-          AI {detail.ownership.ai_execution_state === 'paused'
-            ? 'paused'
-            : label(detail.ownership.ai_execution_state)}
-        </span>
         <span>
           Last activity <time dateTime={detail.updated_at}>{formatTimestamp(detail.updated_at)}</time>
         </span>
@@ -520,11 +445,17 @@ function MessageTimeline({
   client,
   conversationId,
   detail,
+  replyReason,
+  canReply,
+  onAuthorityConflict,
   onReplyAccepted,
 }: {
   client: ConversationApiClient
   conversationId: string
   detail: OperatorConversationDetail | null
+  replyReason: string | null
+  canReply: boolean
+  onAuthorityConflict: () => Promise<void>
   onReplyAccepted: () => Promise<void>
 }) {
   const auth = useAuth()
@@ -536,12 +467,6 @@ function MessageTimeline({
   const olderErrorRef = useRef<HTMLDivElement>(null)
   const lastMessageIdRef = useRef<string | null>(null)
 
-  const replyReason = replyUnavailableReason(
-    detail,
-    auth.session?.human.account_id,
-    Boolean(auth.session?.capabilities.includes('message.reply')),
-  )
-  const canReply = replyReason === null
   const canCreateNote = Boolean(
     auth.session?.capabilities.includes('internal_note.create'),
   )
@@ -684,6 +609,7 @@ function MessageTimeline({
           canReply={canReply}
           canCreateNote={canCreateNote}
           replyUnavailableReason={replyReason}
+          onAuthorityConflict={onAuthorityConflict}
           onReplyAccepted={(message) => {
             history.appendAccepted(message)
             return onReplyAccepted()
@@ -702,6 +628,7 @@ function ConversationComposer({
   canReply,
   canCreateNote,
   replyUnavailableReason,
+  onAuthorityConflict,
   onReplyAccepted,
   onNoteAccepted,
 }: {
@@ -711,6 +638,7 @@ function ConversationComposer({
   canReply: boolean
   canCreateNote: boolean
   replyUnavailableReason: string | null
+  onAuthorityConflict: () => Promise<void>
   onReplyAccepted: (message: OperatorMessageItem) => Promise<void>
   onNoteAccepted: (note: OperatorInternalNoteItem) => void
 }) {
@@ -821,6 +749,13 @@ function ConversationComposer({
     } catch (unknownError) {
       const apiError = unknownError instanceof ApiError ? unknownError : null
       setRequestError(apiError)
+      if (
+        activeMode === 'reply' &&
+        (apiError?.code === 'OWNERSHIP_CONFLICT' ||
+          apiError?.code === 'OWNERSHIP_VERSION_CONFLICT')
+      ) {
+        await onAuthorityConflict()
+      }
       if (activeMode === 'internal_note' && apiError?.code === 'IDEMPOTENCY_CONFLICT') {
         noteAttemptRef.current = null
       }
@@ -907,7 +842,7 @@ function ConversationComposer({
       </label>
       {requestError ? (
         <InlineAlert ref={errorRef} requestId={requestError.requestId}>
-          {errorMessage(requestError)} Your {activeMode === 'reply' ? 'reply' : 'internal note'} has been preserved.
+          {requestError.operatorMessage ?? errorMessage(requestError)} Your {activeMode === 'reply' ? 'reply' : 'internal note'} has been preserved.
         </InlineAlert>
       ) : null}
       <textarea
@@ -978,18 +913,24 @@ export function ConversationWorkspace({
   const detail = useConversationDetail(client, conversationId)
   const workspaceHeadingRef = useRef<HTMLHeadingElement>(null)
   const focusedConversationRef = useRef<string | null>(null)
-  const ownershipStatusRef = useRef<HTMLSpanElement>(null)
+  const authorityRef = useRef<HTMLDivElement>(null)
   const detailsButtonRef = useRef<HTMLButtonElement>(null)
   const ownershipButtonRef = useRef<HTMLButtonElement>(null)
-  const useNarrowActionMenu = useMediaQuery('(max-width: 30rem)')
   const [contextOpen, setContextOpen] = useState(false)
   const [ownershipOpen, setOwnershipOpen] = useState(false)
   const [ownershipAtOpen, setOwnershipAtOpen] =
     useState<ConversationOwnership | null>(null)
-  const [successfulVersion, setSuccessfulVersion] = useState<number | null>(null)
+  const [authorityFocusRequest, setAuthorityFocusRequest] = useState(0)
+  const [authorityNotice, setAuthorityNotice] = useState('')
   const closeContext = useCallback(() => setContextOpen(false), [])
   const closeOwnership = useCallback(() => setOwnershipOpen(false), [])
   const ownership = detail.detail?.ownership
+  const hasReplyCapability = Boolean(
+    auth.session?.capabilities.includes('message.reply'),
+  )
+  const hasOwnershipCapability = Boolean(
+    auth.session?.capabilities.includes('conversation.ownership.change'),
+  )
   const mayReturnOwnedConversation = Boolean(
     ownership?.owner_type === 'human' &&
       (
@@ -1001,8 +942,13 @@ export function ConversationWorkspace({
     ownership &&
       !detail.loading &&
       !detail.error &&
-      auth.session?.capabilities.includes('conversation.ownership.change') &&
+      hasOwnershipCapability &&
       (ownership.owner_type === 'ai' || mayReturnOwnedConversation),
+  )
+  const currentReplyReason = replyUnavailableReason(
+    detail.detail,
+    auth.session?.human.account_id,
+    hasReplyCapability,
   )
 
   const openOwnership = () => {
@@ -1013,15 +959,33 @@ export function ConversationWorkspace({
   const handleOwnershipChanged = async (
     result: { ownership: ConversationOwnership },
   ) => {
-    setSuccessfulVersion(result.ownership.version)
-    await Promise.all([detail.refresh(), onOwnershipChanged()])
+    detail.applyOwnership(result.ownership)
+    setAuthorityFocusRequest((current) => current + 1)
+    setAuthorityNotice(
+      result.ownership.owner_type === 'human'
+        ? `${result.ownership.human_owner?.display_name ?? 'A Human Operator'} now controls this conversation. AI is paused.`
+        : 'MBB AI Assistant now controls this conversation. AI is active.',
+    )
+    void onOwnershipChanged().catch(() => undefined)
   }
   const refreshOwnership = async () => {
     await Promise.all([detail.refresh(), onOwnershipChanged()])
   }
+  const reconcileAuthority = async () => {
+    await refreshOwnership()
+    setAuthorityNotice('Conversation authority changed on the server. Current authority is shown.')
+  }
+  const reconcileOwnershipDialogConflict = async () => {
+    await reconcileAuthority()
+    setAuthorityFocusRequest((current) => current + 1)
+  }
 
   useEffect(() => {
-    if (focusedConversationRef.current === conversationId || !workspaceHeadingRef.current) return
+    if (
+      detail.loading ||
+      focusedConversationRef.current === conversationId ||
+      !workspaceHeadingRef.current
+    ) return
     const activeElement = document.activeElement
     if (
       activeElement !== document.body &&
@@ -1031,10 +995,10 @@ export function ConversationWorkspace({
     focusedConversationRef.current = conversationId
   }, [conversationId, detail.loading])
   useEffect(() => {
-    if (successfulVersion !== null && !ownershipOpen) {
-      ownershipStatusRef.current?.focus()
+    if (authorityFocusRequest > 0 && !ownershipOpen) {
+      authorityRef.current?.focus()
     }
-  }, [ownershipOpen, successfulVersion])
+  }, [authorityFocusRequest, ownershipOpen])
 
   return (
     <section className="conversation-workspace" aria-labelledby="workspace-heading">
@@ -1049,69 +1013,34 @@ export function ConversationWorkspace({
           error={detail.error}
           onRetry={detail.retry}
           headingRef={workspaceHeadingRef}
-          ownershipRef={ownershipStatusRef}
+          authority={detail.detail ? (
+            <ConversationAuthority
+              detail={detail.detail}
+              accountId={auth.session?.human.account_id}
+              hasReplyCapability={hasReplyCapability}
+              hasOwnershipCapability={hasOwnershipCapability}
+              mayReturnOwnedConversation={mayReturnOwnedConversation}
+              canChangeOwnership={canChangeOwnership}
+              ownershipOpen={ownershipOpen}
+              notice={authorityNotice}
+              authorityRef={authorityRef}
+              actionRef={ownershipButtonRef}
+              onAction={openOwnership}
+            />
+          ) : null}
         />
-        {useNarrowActionMenu ? (
-          <details className="workspace-action-menu">
-            <summary className="button button--secondary">Actions</summary>
-            <div className="workspace-action-menu__items">
-              {canChangeOwnership ? (
-                <button
-                  className="button button--secondary"
-                  type="button"
-                  aria-haspopup="dialog"
-                  aria-expanded={ownershipOpen}
-                  onClick={openOwnership}
-                  ref={ownershipButtonRef}
-                >
-                  {ownership?.owner_type === 'ai' ? 'Escalate to Human' : 'Return to AI'}
-                </button>
-              ) : null}
-              <button
-                className="button button--secondary"
-                type="button"
-                aria-haspopup="dialog"
-                aria-expanded={contextOpen}
-                onClick={() => setContextOpen(true)}
-                ref={detailsButtonRef}
-              >
-                Details
-              </button>
-            </div>
-          </details>
-        ) : (
-          <div className="workspace-toolbar__actions">
-            {canChangeOwnership ? (
-              <button
-                className={`button ${ownership?.owner_type === 'human' ? 'button--secondary' : 'button--primary'}`}
-                type="button"
-                aria-haspopup="dialog"
-                aria-expanded={ownershipOpen}
-                aria-label={
-                  ownership?.owner_type === 'ai'
-                    ? 'Escalate to Human'
-                    : 'Return to AI'
-                }
-                onClick={openOwnership}
-                ref={ownershipButtonRef}
-              >
-                {ownership?.owner_type === 'ai'
-                  ? 'Escalate to Human'
-                  : 'Return to AI'}
-              </button>
-            ) : null}
-            <button
-              className="button button--secondary context-trigger"
-              type="button"
-              aria-haspopup="dialog"
-              aria-expanded={contextOpen}
-              onClick={() => setContextOpen(true)}
-              ref={detailsButtonRef}
-            >
-              Details
-            </button>
-          </div>
-        )}
+        <div className="workspace-toolbar__actions">
+          <button
+            className="button button--secondary context-trigger"
+            type="button"
+            aria-haspopup="dialog"
+            aria-expanded={contextOpen}
+            onClick={() => setContextOpen(true)}
+            ref={detailsButtonRef}
+          >
+            Details
+          </button>
+        </div>
         <EscalationForm
           key={conversationId}
           client={client}
@@ -1126,6 +1055,9 @@ export function ConversationWorkspace({
           client={client}
           conversationId={conversationId}
           detail={detail.detail}
+          replyReason={currentReplyReason}
+          canReply={currentReplyReason === null}
+          onAuthorityConflict={reconcileAuthority}
           onReplyAccepted={async () => {
             await Promise.all([detail.refresh(), onOwnershipChanged()])
           }}
@@ -1149,7 +1081,7 @@ export function ConversationWorkspace({
           returnFocusRef={ownershipButtonRef}
           onClose={closeOwnership}
           onChanged={handleOwnershipChanged}
-          onConflict={refreshOwnership}
+          onConflict={reconcileOwnershipDialogConflict}
         />
       ) : null}
     </section>

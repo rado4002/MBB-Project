@@ -91,45 +91,17 @@ describe('responsive Inbox workflow refinement', () => {
     })
   })
 
-  it('groups conversation actions in a keyboard-accessible narrow-screen overflow', async () => {
-    const originalMatchMedia = window.matchMedia
-    Object.defineProperty(window, 'matchMedia', {
-      configurable: true,
-      value: vi.fn().mockImplementation((query: string) => ({
-        matches: query === '(max-width: 30rem)',
-        media: query,
-        onchange: null,
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-        addListener: vi.fn(),
-        removeListener: vi.fn(),
-        dispatchEvent: vi.fn(),
-      })),
-    })
+  it('keeps the primary ownership action visible and keyboard-accessible on narrow screens', async () => {
     server.use(authenticated(), ...workspaceHandlers())
-    const user = userEvent.setup()
-    const view = renderApp(`/inbox/${conversationId}`)
+    renderApp(`/inbox/${conversationId}`)
 
-    try {
-      await waitFor(() => expect(document.getElementById('workspace-heading')).toHaveTextContent('Marie Client'))
-      const actions = screen.getByText('Actions')
-      const menu = actions.closest('details')
-      expect(actions.tagName).toBe('SUMMARY')
-      actions.focus()
-      expect(actions).toHaveFocus()
-      expect(menu).not.toHaveAttribute('open')
-      await user.click(actions)
-      expect(menu).toHaveAttribute('open')
-      expect(screen.getByRole('button', { name: 'Escalate to Human' }))
-        .toBeInTheDocument()
-      expect(screen.getByRole('button', { name: 'Details' })).toBeInTheDocument()
-    } finally {
-      view.unmount()
-      Object.defineProperty(window, 'matchMedia', {
-        configurable: true,
-        value: originalMatchMedia,
-      })
-    }
+    await waitFor(() => expect(document.getElementById('workspace-heading')).toHaveTextContent('Marie Client'))
+    const action = screen.getByRole('button', { name: 'Take over conversation' })
+    expect(action).toBeInTheDocument()
+    expect(action.closest('details')).toBeNull()
+    action.focus()
+    expect(action).toHaveFocus()
+    expect(screen.getByRole('button', { name: 'Details' })).toBeInTheDocument()
   })
 
   it('keeps selected row state distinct from keyboard focus', async () => {
@@ -349,7 +321,7 @@ describe('responsive Inbox workflow refinement', () => {
     const { container } = renderApp(`/inbox/${conversationId}`)
     await screen.findByRole('region', { name: 'Conversation timeline' })
 
-    expect(screen.getByRole('button', { name: 'Escalate to Human' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Take over conversation' })).toBeInTheDocument()
     expect(screen.queryByRole('button', {
       name: /reply|send|assign|resolve|compose|return to ai/i,
     })).not.toBeInTheDocument()

@@ -34,8 +34,9 @@ describe('responsive Inbox style contract', () => {
       /\.workspace-header \{[^}]*grid-template-columns: auto minmax\(0, 1fr\) auto;[^}]*padding: var\(--space-2\) var\(--space-3\)/,
     )
     expect(globalCss).toMatch(
-      /\.conversation-header__content--loaded \{[^}]*grid-template-columns: auto minmax\(0, 1fr\);[^}]*align-items: baseline/,
+      /\.conversation-authority \{[^}]*grid-template-columns: minmax\(0, 1fr\) auto;[^}]*align-items: center/,
     )
+    expect(globalCss).toMatch(/\.conversation-authority__facts \{[^}]*display: flex;[^}]*flex-wrap: wrap/)
     expect(globalCss).toMatch(/\.conversation-metadata \{[^}]*display: flex;[^}]*flex-wrap: wrap/)
     expect(globalCss).not.toContain('.workspace-summary')
     expect(globalCss).not.toContain('.workspace-detail-region')

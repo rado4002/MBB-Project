@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ConversationApiClient } from '../../api/conversations'
 import type {
+  ConversationOwnership,
   OperatorConversationDetail,
   OperatorInternalNoteItem,
   OperatorMessageItem,
@@ -65,6 +66,18 @@ export function useConversationDetail(
     ...state,
     retry: () => loadDetail(true),
     refresh: () => loadDetail(false),
+    applyOwnership: (ownership: ConversationOwnership) => {
+      controller.current?.abort()
+      version.current += 1
+      setState((current) => current.detail
+        ? {
+            ...current,
+            detail: { ...current.detail, ownership },
+            loading: false,
+            error: null,
+          }
+        : current)
+    },
   }
 }
 

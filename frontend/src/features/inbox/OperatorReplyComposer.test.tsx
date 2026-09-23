@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { delay, http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
@@ -321,6 +321,57 @@ describe('manual Human Operator replies', () => {
     expect(screen.getByRole('textbox', { name: 'Internal Note' })).toBeInTheDocument()
   })
 
+  it('reconciles a stale reply with server authority and preserves the draft for retry', async () => {
+    let ownershipVersion = 2
+    let replyCalls = 0
+    const idempotencyKeys: string[] = []
+    const requestVersions: number[] = []
+    server.use(
+      ...handlers(() => humanDetail({
+        ownership: {
+          ...humanDetail().ownership,
+          version: ownershipVersion,
+        },
+      })),
+      http.post('/api/v1/operator/conversations/:conversationId/replies', async ({ request }) => {
+        replyCalls += 1
+        idempotencyKeys.push(request.headers.get('Idempotency-Key') ?? '')
+        const body = await request.json() as { text: string; expected_ownership_version: number }
+        requestVersions.push(body.expected_ownership_version)
+        if (replyCalls === 1) {
+          ownershipVersion = 3
+          return HttpResponse.json(
+            {
+              error: {
+                code: 'OWNERSHIP_VERSION_CONFLICT',
+                message: 'Conversation ownership changed. Refresh before replying.',
+                request_id: 'reply-ownership-conflict',
+              },
+            },
+            { status: 409 },
+          )
+        }
+        return HttpResponse.json(acceptedReply(body.text), { status: 202 })
+      }),
+    )
+    const user = userEvent.setup()
+    renderApp(`/inbox/${conversationId}`)
+    const textbox = await screen.findByRole('textbox', { name: 'Reply to Customer' })
+    await user.type(textbox, 'Draft survives authority refresh')
+    await user.click(screen.getByRole('button', { name: 'Submit Reply' }))
+
+    expect(await screen.findByText(/Conversation ownership changed\. Refresh before replying\./))
+      .toBeInTheDocument()
+    expect(textbox).toHaveValue('Draft survives authority refresh')
+    expect(screen.getByText('Conversation authority changed on the server. Current authority is shown.'))
+      .toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Submit Reply' }))
+
+    expect(await screen.findByText('Draft survives authority refresh')).toBeInTheDocument()
+    expect(requestVersions).toEqual([2, 3])
+    expect(idempotencyKeys[1]).toBe(idempotencyKeys[0])
+  })
+
   it('removes the composer when refreshed ownership changes after acceptance', async () => {
     let detailCalls = 0
     server.use(
@@ -342,7 +393,8 @@ describe('manual Human Operator replies', () => {
     await waitFor(() =>
       expect(screen.queryByRole('textbox', { name: 'Reply to Customer' })).not.toBeInTheDocument(),
     )
-    expect(screen.getAllByText('Controlled by MBB AI Assistant').length).toBeGreaterThan(0)
+    expect(within(screen.getByRole('group', { name: 'Conversation authority' }))
+      .getByText('MBB AI Assistant')).toBeInTheDocument()
   })
 })
 

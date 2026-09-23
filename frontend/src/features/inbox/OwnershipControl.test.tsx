@@ -88,15 +88,16 @@ function handlers(
 }
 
 describe('Human and AI conversation ownership control', () => {
-  it('renders paused AI authority truthfully as waiting for Human', async () => {
+  it('renders paused AI authority and the waiting-for-Human restriction truthfully', async () => {
     server.use(...handlers(waitingDetail, waitingQueue))
     const { container } = renderApp('/inbox/' + conversationId)
 
-    expect((await screen.findAllByText('Waiting for Human')).length).toBeGreaterThan(0)
-    expect(screen.queryByText('Controlled by MBB AI Assistant')).not.toBeInTheDocument()
+    expect(within(await screen.findByRole('group', { name: 'Conversation authority' }))
+      .getByText('MBB AI Assistant')).toBeInTheDocument()
+    expect(screen.getByText('Paused')).toBeInTheDocument()
     expect(screen.getAllByText('Open escalation').length).toBeGreaterThan(0)
     expect(
-      screen.getByText('Reply unavailable — waiting for a Human Operator to take control.'),
+      screen.getByText('Reply unavailable — waiting for a Human Operator to take over.'),
     ).toBeInTheDocument()
     await expectAccessible(container)
   })
@@ -107,14 +108,17 @@ describe('Human and AI conversation ownership control', () => {
     const { container } = renderApp('/inbox/' + conversationId)
 
     const trigger = await screen.findByRole('button', {
-      name: 'Escalate to Human',
+      name: 'Take over conversation',
     })
     expect(screen.queryByRole('button', { name: 'Return to AI' })).not.toBeInTheDocument()
-    expect(screen.getAllByText('Controlled by MBB AI Assistant').length).toBeGreaterThan(0)
+    expect(within(screen.getByRole('group', { name: 'Conversation authority' }))
+      .getByText('MBB AI Assistant')).toBeInTheDocument()
+    expect(screen.getByText('Unavailable — this conversation is controlled by MBB AI Assistant.'))
+      .toBeInTheDocument()
     await user.click(trigger)
 
-    const dialog = screen.getByRole('dialog', { name: 'Escalate to Human' })
-    expect(within(dialog).getByRole('button', { name: 'Take Control' })).toHaveFocus()
+    const dialog = screen.getByRole('dialog', { name: 'Take over conversation' })
+    expect(within(dialog).getByRole('button', { name: 'Take over conversation' })).toHaveFocus()
     expect(within(dialog).queryByRole('textbox')).not.toBeInTheDocument()
     expect(within(dialog).queryByRole('combobox')).not.toBeInTheDocument()
     expect(within(dialog).queryByText(/type|priority|10–500|reason/i)).not.toBeInTheDocument()
@@ -122,7 +126,7 @@ describe('Human and AI conversation ownership control', () => {
     await expectAccessible(dialog)
   })
 
-  it('takes control once, refreshes detail and queue, swaps the action, and moves focus', async () => {
+  it('takes control once, applies the authoritative response, refreshes the queue, and moves focus', async () => {
     let state: 'ai' | 'human' = 'ai'
     let posts = 0
     let detailCalls = 0
@@ -152,22 +156,24 @@ describe('Human and AI conversation ownership control', () => {
     )
     const user = userEvent.setup()
     renderApp('/inbox/' + conversationId)
-    await user.click(await screen.findByRole('button', { name: 'Escalate to Human' }))
-    const submit = screen.getByRole('button', { name: 'Take Control' })
+    await user.click(await screen.findByRole('button', { name: 'Take over conversation' }))
+    const submit = screen.getByRole('button', { name: 'Take over conversation' })
     await user.dblClick(submit)
 
-    expect(screen.getByRole('button', { name: 'Taking control…' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Taking over…' })).toBeDisabled()
     const returnToAi = await screen.findByRole('button', { name: 'Return to AI' })
-    expect(returnToAi).toHaveClass('button--secondary')
-    expect(screen.queryByRole('button', { name: 'Escalate to Human' })).not.toBeInTheDocument()
-    expect(screen.getAllByText(/Controlled by Omar Operator/).length).toBeGreaterThan(0)
-    expect(screen.getByText('AI paused')).toBeInTheDocument()
+    expect(returnToAi).toHaveClass('button--primary')
+    expect(screen.queryByRole('button', { name: 'Take over conversation' })).not.toBeInTheDocument()
+    expect(screen.getByText('You — Omar Operator')).toBeInTheDocument()
+    expect(screen.getByText('Paused')).toBeInTheDocument()
+    expect(screen.getByText('Available to you')).toBeInTheDocument()
+    expect(screen.getByText('Omar Operator now controls this conversation. AI is paused.')).toBeInTheDocument()
     await waitFor(() =>
-      expect(document.querySelector('.ownership-summary')).toHaveFocus(),
+      expect(screen.getByRole('group', { name: 'Conversation authority' })).toHaveFocus(),
     )
     expect(posts).toBe(1)
     expect(sentBody).toEqual({ target_owner_type: 'human', expected_version: 1 })
-    expect(detailCalls).toBeGreaterThanOrEqual(2)
+    expect(detailCalls).toBe(1)
     expect(queueCalls).toBeGreaterThanOrEqual(2)
   })
 
@@ -202,17 +208,18 @@ describe('Human and AI conversation ownership control', () => {
     const first = renderApp('/inbox/' + conversationId)
     expect(await screen.findByRole('button', { name: 'Return to AI' })).toBeInTheDocument()
     expect(screen.getAllByText('Open escalation').length).toBeGreaterThan(0)
-    expect(screen.queryByRole('button', { name: 'Escalate to Human' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Take over conversation' })).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Return to AI' }))
     const dialog = screen.getByRole('dialog', { name: 'Return to AI' })
     await user.click(within(dialog).getByRole('button', { name: 'Return to AI' }))
-    expect(await screen.findByRole('button', { name: 'Escalate to Human' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Take over conversation' })).toBeInTheDocument()
     expect(screen.getAllByText('Open escalation').length).toBeGreaterThan(0)
     first.unmount()
 
     renderApp('/inbox/' + conversationId)
-    expect(await screen.findByRole('button', { name: 'Escalate to Human' })).toBeInTheDocument()
-    expect(screen.getAllByText('Controlled by MBB AI Assistant').length).toBeGreaterThan(0)
+    expect(await screen.findByRole('button', { name: 'Take over conversation' })).toBeInTheDocument()
+    expect(within(screen.getByRole('group', { name: 'Conversation authority' }))
+      .getByText('MBB AI Assistant')).toBeInTheDocument()
     expect(screen.getAllByText('Open escalation').length).toBeGreaterThan(0)
   })
 
@@ -240,15 +247,30 @@ describe('Human and AI conversation ownership control', () => {
 
     expect(await screen.findByText(/currently disabled/)).toBeInTheDocument()
     expect(screen.getByText('ownership-disabled')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Escalate to Human' })).not.toBeInTheDocument()
-    expect(screen.getAllByText(/Controlled by Omar Operator/).length).toBeGreaterThan(0)
+    expect(screen.queryByRole('button', { name: 'Take over conversation' })).not.toBeInTheDocument()
+    expect(screen.getByText('You — Omar Operator')).toBeInTheDocument()
   })
 
   it('shows the current owner on conflict and keeps the conversation selected', async () => {
+    let conflicted = false
+    const aliceDetail = (): OperatorConversationDetail => ({
+      ...humanDetail(),
+      ownership: {
+        ...humanDetail().ownership,
+        human_owner: {
+          account_id: 'alice-account',
+          display_name: 'Alice',
+        },
+        version: 3,
+      },
+    })
     server.use(
-      ...handlers(),
-      http.post('/api/v1/operator/conversations/:conversationId/ownership', () =>
-        HttpResponse.json(
+      ...handlers(
+        () => conflicted ? aliceDetail() : conversationDetailFixture(),
+      ),
+      http.post('/api/v1/operator/conversations/:conversationId/ownership', () => {
+        conflicted = true
+        return HttpResponse.json(
           {
             error: {
               code: 'OWNERSHIP_CONFLICT',
@@ -257,15 +279,19 @@ describe('Human and AI conversation ownership control', () => {
             },
           },
           { status: 409 },
-        ),
-      ),
+        )
+      }),
     )
     const user = userEvent.setup()
     renderApp('/inbox/' + conversationId + '?status=active')
-    await user.click(await screen.findByRole('button', { name: 'Escalate to Human' }))
-    await user.click(screen.getByRole('button', { name: 'Take Control' }))
+    await user.click(await screen.findByRole('button', { name: 'Take over conversation' }))
+    await user.click(screen.getByRole('button', { name: 'Take over conversation' }))
 
-    expect(await screen.findByText('This conversation is now controlled by Alice.')).toBeInTheDocument()
+    expect(await screen.findByText('Alice')).toBeInTheDocument()
+    expect(screen.getByText('Conversation authority changed on the server. Current authority is shown.'))
+      .toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.getByText('Unavailable — only Alice may reply.')).toBeInTheDocument()
     expect(window.location.pathname).toBe('/inbox/' + conversationId)
     expect(window.location.search).toBe('?status=active')
   })
@@ -275,7 +301,9 @@ describe('Human and AI conversation ownership control', () => {
     server.use(...handlers(conversationDetailFixture, conversationFixture, analyst))
     const first = renderApp('/inbox/' + conversationId)
     await screen.findByText('Solar starter kit')
-    expect(screen.queryByRole('button', { name: /Escalate to Human|Return to AI/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Take over conversation|Return to AI/ })).not.toBeInTheDocument()
+    expect(screen.getByText('Ownership action unavailable — your account does not have permission to change authority.'))
+      .toBeInTheDocument()
     first.unmount()
 
     server.use(
@@ -289,13 +317,13 @@ describe('Human and AI conversation ownership control', () => {
     )
     const second = renderApp('/inbox/' + conversationId)
     await screen.findByText(/Conversation data is temporarily unavailable/)
-    expect(screen.queryByRole('button', { name: /Escalate to Human|Return to AI/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Take over conversation|Return to AI/ })).not.toBeInTheDocument()
     second.unmount()
 
     server.use(...handlers())
     const user = userEvent.setup()
     renderApp('/inbox/' + conversationId)
-    const trigger = await screen.findByRole('button', { name: 'Escalate to Human' })
+    const trigger = await screen.findByRole('button', { name: 'Take over conversation' })
     await user.click(trigger)
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()

@@ -67,7 +67,7 @@ describe('conversation escalation creation', () => {
     expect(requests[0].headers.get('Idempotency-Key')).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
     expect(state.writes).toEqual([])
     const workspace = within(screen.getByRole('region', { name: 'Marie Client' }))
-    expect(workspace.getByText('Controlled by MBB AI Assistant')).toBeInTheDocument()
+    expect(workspace.getByText('MBB AI Assistant')).toBeInTheDocument()
     expect(workspace.getByText('Open escalation')).toBeInTheDocument()
   })
 
