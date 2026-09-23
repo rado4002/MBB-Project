@@ -140,17 +140,15 @@ describe('read-only conversation workspace', () => {
     renderApp(`/inbox/${firstId}`)
 
     expect(await screen.findByText('Loading conversation details…')).toBeInTheDocument()
-    expect(await screen.findByText('***5678')).toBeInTheDocument()
+    expect((await screen.findAllByText('***5678')).length).toBeGreaterThan(0)
     expect(screen.getByText('Lead score').nextElementSibling).toHaveTextContent('High')
     expect(screen.getByText('Sales Ready')).toBeInTheDocument()
     expect(screen.getByText('Request Quote')).toBeInTheDocument()
     expect(screen.getByText('Qualified Purchase Intent')).toBeInTheDocument()
-    expect(screen.getByText('Family cooking')).toBeInTheDocument()
+    expect(screen.getAllByText('Family cooking').length).toBeGreaterThan(0)
     expect(screen.getByText('Ready')).toBeInTheDocument()
     expect(screen.getByText(/Air Fryer 6L.*Sellable Now.*\$55\.00/)).toBeInTheDocument()
-    expect(
-      screen.getAllByText('Open escalation').some((node) => node.tagName === 'SPAN'),
-    ).toBe(true)
+    expect(screen.getByText('Open escalation ticket')).toBeInTheDocument()
     expect(screen.getByText('A'.repeat(80))).toBeInTheDocument()
     expect(screen.queryByText('A'.repeat(100))).not.toBeInTheDocument()
     expect(screen.queryByText('+243990005678')).not.toBeInTheDocument()
@@ -236,7 +234,7 @@ describe('read-only conversation workspace', () => {
     ))).toBe(true)
     expect(rendered.map((item) => item.textContent)).toEqual([
       expect.stringContaining('<script>alert(document.cookie)</script>'),
-      expect.stringContaining('Unknown sender'),
+      expect.stringContaining('Outbound message'),
       expect.stringContaining('Operator'),
       expect.stringContaining('System'),
       expect.stringContaining('MBB AI Assistant'),
@@ -411,7 +409,7 @@ describe('read-only conversation workspace', () => {
     await user.click(await screen.findByRole('link', { name: 'Conversation with Marie Client' }))
     await user.click(screen.getByRole('link', { name: 'Conversation with Second Customer' }))
 
-    expect(await screen.findByText('Current Customer')).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Current Customer' })).toBeInTheDocument()
     expect(await screen.findByText('Current message')).toBeInTheDocument()
     await delay(150)
     expect(screen.queryByText('Stale Customer')).not.toBeInTheDocument()

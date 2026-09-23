@@ -41,6 +41,18 @@ function formatTimestamp(value: string) {
   }).format(date)
 }
 
+function formatQueueTime(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '—'
+  return new Intl.DateTimeFormat(undefined, {
+    hour: 'numeric', minute: '2-digit',
+  }).format(date)
+}
+
+function initials(name: string) {
+  return name.split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase()
+}
+
 function previewFor(item: OperatorConversationQueueItem) {
   if (!item.latest_message) return 'No messages yet'
   if (item.latest_message.content_type === 'voice_note') return 'Voice note'
@@ -77,43 +89,24 @@ function QueueRow({
         onClick={() => onSelect(item.conversation_id)}
       >
         <article aria-label={`Conversation with ${customerName}`}>
-          <div className="conversation-row__heading">
-            <div>
+          <span className="conversation-avatar" aria-hidden="true">{initials(customerName)}</span>
+          <div className="conversation-row__body">
+            <span className="visually-hidden">{item.customer.phone_masked}</span>
+            <div className="conversation-row__heading">
               <h2>{customerName}</h2>
-              <p className="masked-phone">{item.customer.phone_masked}</p>
+              {latestTime ? (
+                <time dateTime={latestTime} aria-label={`Latest message ${formatTimestamp(latestTime)}`}>
+                  {formatQueueTime(latestTime)}
+                </time>
+              ) : null}
             </div>
-            {latestTime ? (
-              <time dateTime={latestTime} aria-label={`Latest message ${formatTimestamp(latestTime)}`}>
-                {formatTimestamp(latestTime)}
-              </time>
+            <p className="conversation-preview">{previewFor(item)}</p>
+            {(item.open_escalation.exists || item.awaiting_response_since) ? (
+              <span className="conversation-attention">
+                {item.open_escalation.exists ? 'Human review requested' : 'Awaiting response'}
+              </span>
             ) : null}
           </div>
-          <p className="conversation-preview">{previewFor(item)}</p>
-          {item.latest_message ? (
-            <p className="conversation-direction">
-              {item.latest_message.direction === 'inbound' ? 'Received' : 'Sent'}
-            </p>
-          ) : null}
-          <div className="conversation-labels" aria-label="Conversation labels">
-            <span>{statusLabels[item.status]}</span>
-            <span>{languageLabels[item.language]}</span>
-            <span>
-              {item.ownership.owner_type === 'ai'
-                ? item.ownership.ai_execution_state === 'paused'
-                  ? 'Waiting for Human'
-                  : 'Controlled by MBB AI Assistant'
-                : `Controlled by ${item.ownership.human_owner?.display_name ?? 'Human Operator'}`}
-            </span>
-            {item.open_escalation.exists ? <span>Open escalation</span> : null}
-          </div>
-          {item.awaiting_response_since ? (
-            <p className="awaiting-response">
-              Awaiting response since{' '}
-              <time dateTime={item.awaiting_response_since}>
-                {formatTimestamp(item.awaiting_response_since)}
-              </time>
-            </p>
-          ) : null}
         </article>
       </Link>
     </li>
@@ -136,6 +129,8 @@ export function ConversationQueuePage() {
   const location = useLocation()
   const { conversationId } = useParams<{ conversationId?: string }>()
   const [lastConversationId, setLastConversationId] = useState<string | undefined>(conversationId)
+  const [listSearch, setListSearch] = useState('')
+  const [quickFilter, setQuickFilter] = useState<'all' | 'waiting' | 'mine'>('all')
   const [searchParams, setSearchParams] = useSearchParams()
   const filters = useMemo(
     () => readConversationFilters(searchParams),
@@ -151,6 +146,12 @@ export function ConversationQueuePage() {
   )
   const queue = useConversationQueue(client, filters)
   const activeFilters = Object.entries(filters) as [keyof ConversationFilters, string][]
+  const visibleItems = queue.items.filter((item) => {
+    if (quickFilter === 'waiting' && !item.awaiting_response_since && !item.open_escalation.exists) return false
+    if (quickFilter === 'mine' && item.ownership.human_owner?.account_id !== auth.session?.human.account_id) return false
+    const needle = listSearch.trim().toLocaleLowerCase()
+    return !needle || `${item.customer.display_name ?? ''} ${item.customer.phone_masked} ${previewFor(item)}`.toLocaleLowerCase().includes(needle)
+  })
 
   useLayoutEffect(() => {
     if (conversationId) return
@@ -225,41 +226,42 @@ export function ConversationQueuePage() {
       <header className="page-header inbox-header">
         <div>
           <h1 tabIndex={-1} ref={headingRef}>Inbox</h1>
-          <p>Read-only conversation queue.</p>
         </div>
-        <button
-          className="button button--secondary"
-          type="button"
-          disabled={queue.loading || queue.refreshing}
-          onClick={() => void queue.refresh()}
-        >
-          {queue.refreshing ? 'Refreshing…' : 'Refresh'}
-        </button>
       </header>
-
-      {conversationId ? (
-        <details className="conversation-filters conversation-filters--compact">
-          <summary>
-            <span>Filters</span>
-            <span className="conversation-filters__summary-state">
-              {activeFilters.length ? `${activeFilters.length} active` : 'All conversations'}
-            </span>
-          </summary>
-          <div className="conversation-filters__body">
-            {filterControls}
-            {activeFilterControls}
-          </div>
-        </details>
-      ) : (
-        <section className="conversation-filters" aria-labelledby="filters-heading">
-          <h2 id="filters-heading">Filters</h2>
-          {filterControls}
-          {activeFilterControls}
-        </section>
-      )}
 
       <div className={`inbox-layout${conversationId ? ' inbox-layout--selected' : ''}`}>
         <section className="queue-panel" aria-labelledby="queue-heading" aria-busy={queue.loading || queue.refreshing}>
+          <div className="queue-tools">
+            <div className="queue-search-row">
+              <label className="queue-search">
+                <span className="visually-hidden">Search loaded conversations</span>
+                <input type="search" value={listSearch} onChange={(event) => setListSearch(event.target.value)} placeholder="Rechercher dans les conversations…" />
+              </label>
+              <button className="button button--secondary queue-refresh" type="button"
+                aria-label={queue.refreshing ? 'Refreshing…' : 'Refresh'} title="Refresh conversations"
+                disabled={queue.loading || queue.refreshing} onClick={() => void queue.refresh()}>
+                <span aria-hidden="true">↻</span>
+              </button>
+            </div>
+            <div className="queue-quick-filters" aria-label="Loaded conversation filters">
+              <button type="button" aria-pressed={quickFilter === 'all'} onClick={() => setQuickFilter('all')}>Tous</button>
+              <button type="button" aria-pressed={quickFilter === 'waiting'} onClick={() => setQuickFilter('waiting')}>En attente</button>
+              <button type="button" aria-pressed={quickFilter === 'mine'} onClick={() => setQuickFilter('mine')}>Mes conversations</button>
+            </div>
+            <p className="queue-filter-scope">Recherche et raccourcis sur les conversations chargées.</p>
+            <details className="conversation-filters conversation-filters--compact">
+              <summary>
+                <span>Filters</span>
+                <span className="conversation-filters__summary-state">
+                  {activeFilters.length ? `${activeFilters.length} active` : 'All conversations'}
+                </span>
+              </summary>
+              <div className="conversation-filters__body">
+                {filterControls}
+                {activeFilterControls}
+              </div>
+            </details>
+          </div>
           <h2 id="queue-heading" className="visually-hidden">Conversation queue</h2>
           {queue.refreshing ? <p className="queue-status" role="status">Refreshing conversations…</p> : null}
           {queue.error ? (
@@ -279,16 +281,16 @@ export function ConversationQueuePage() {
                 <span className="skeleton-row" />
               </div>
             </div>
-          ) : queue.items.length === 0 && !queue.error ? (
+          ) : visibleItems.length === 0 && !queue.error ? (
             <div className="queue-state">
-              <h3>{activeFilters.length ? 'No conversations match these filters' : 'No conversations are available'}</h3>
-              <p>{activeFilters.length ? 'Clear or change a filter to see other conversations.' : 'There are no conversations to show.'}</p>
+              <h3>{activeFilters.length || listSearch || quickFilter !== 'all' ? 'No conversations match these filters' : 'No conversations are available'}</h3>
+              <p>{activeFilters.length || listSearch || quickFilter !== 'all' ? 'Clear or change a filter to see other conversations.' : 'There are no conversations to show.'}</p>
               {activeFilters.length ? <button className="button button--secondary" type="button" onClick={clearFilters}>Clear Filters</button> : null}
             </div>
-          ) : queue.items.length > 0 ? (
+          ) : visibleItems.length > 0 ? (
             <>
               <ul className="conversation-list">
-                {queue.items.map((item) => (
+                {visibleItems.map((item) => (
                   <QueueRow
                     key={item.conversation_id}
                     item={item}

@@ -118,7 +118,7 @@ describe('routing and authenticated shell', () => {
     const navigation = screen.getByRole('navigation', { name: 'Primary navigation' })
     expect(navigation).toHaveTextContent('Inbox')
     expect(navigation).not.toHaveTextContent(/Home|Customers|Sales|Commerce|Operations|Insights|Administration|Channels|AI Configuration/)
-    expect(screen.queryByRole('searchbox')).not.toBeInTheDocument()
+    expect(screen.getByRole('searchbox', { name: 'Search loaded conversations' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /reply|filter|compose/i })).not.toBeInTheDocument()
   })
 

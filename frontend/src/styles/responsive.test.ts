@@ -3,6 +3,22 @@ import globalCss from './global.css?raw'
 import tokensCss from './tokens.css?raw'
 
 describe('responsive Inbox style contract', () => {
+  it('gives the conversation most width, drops context on tablet, and separates mobile screens', () => {
+    expect(globalCss).toContain('.inbox-page .inbox-layout { grid-template-columns: minmax(16rem, 27fr) minmax(0, 73fr); }')
+    expect(globalCss).toContain('.workspace-columns { grid-template-columns: minmax(0, 53fr) minmax(13rem, 20fr); }')
+    expect(globalCss).toContain('.context-panel--desktop { display: none; }')
+    expect(globalCss).toContain('.inbox-page--selected .inbox-header, .inbox-page--selected .queue-panel { display: none; }')
+    expect(globalCss).toContain('.workspace-header > a[aria-label="Back to Inbox"] { display: inline-flex;')
+    expect(globalCss).toContain('.message, .internal-note { width: min(88%, 30rem); }')
+  })
+
+  it('bounds bubbles and long content while retaining focus and touch affordances', () => {
+    expect(globalCss).toContain('.message { width: min(80%, 34rem); }')
+    expect(globalCss).toContain('.message--outbound { justify-self: end; }')
+    expect(globalCss).toContain('.message--system { width: min(100%, 34rem);')
+    expect(globalCss).toContain('.conversation-authority__action { min-height: 2.75rem; }')
+    expect(globalCss).toContain('.queue-search input { width: 100%; min-height: 2.75rem;')
+  })
   it('defines mobile, tablet, and desktop layouts without three narrow tablet columns', () => {
     expect(globalCss).toContain('@media (max-width: 47.99rem)')
     expect(globalCss).toContain('@media (min-width: 48rem)')

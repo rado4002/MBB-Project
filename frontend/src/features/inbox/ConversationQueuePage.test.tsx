@@ -67,8 +67,8 @@ describe('read-only conversation queue', () => {
     expect(screen.getByText('Voice note')).toBeInTheDocument()
     expect(screen.queryByText('https://provider.example/private-media')).not.toBeInTheDocument()
     expect(screen.getByText('Customer')).toBeInTheDocument()
-    expect(within(screen.getAllByRole('article')[0]).getByText('Open escalation')).toBeInTheDocument()
-    expect(screen.getByText(/Awaiting response since/)).toBeInTheDocument()
+    expect(within(screen.getAllByRole('article')[0]).getByText('Human review requested')).toBeInTheDocument()
+    expect(screen.queryByText(/Awaiting response since/)).not.toBeInTheDocument()
   })
 
   it('distinguishes unfiltered and filtered empty states', async () => {
@@ -329,10 +329,40 @@ describe('read-only conversation queue', () => {
       'href',
       '/inbox/11111111-1111-4111-8111-111111111111',
     )
-    expect(screen.queryByRole('searchbox')).not.toBeInTheDocument()
+    expect(screen.getByRole('searchbox', { name: 'Search loaded conversations' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /reply|assign|take over|resolve|escalate|compose|AI/i })).not.toBeInTheDocument()
     expect(screen.queryByText(/Jane Doe|Lorem ipsum|Priority|Unread/i)).not.toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'No conversation selected' })).toBeInTheDocument()
     await expectAccessible(container)
+  })
+
+  it('searches and filters only loaded rows without changing server filter URLs', async () => {
+    const second = {
+      ...conversationFixture('22222222-2222-4222-8222-222222222222'),
+      customer: { display_name: 'Amina Cliente', phone_masked: '***2222' },
+      awaiting_response_since: null,
+      open_escalation: { exists: false },
+      ownership: {
+        ...conversationFixture().ownership,
+        owner_type: 'human' as const,
+        human_owner: { account_id: 'operator-account', display_name: 'Omar Operator' },
+        ai_execution_state: 'paused' as const,
+      },
+    }
+    server.use(authenticated(), http.get('/api/v1/operator/conversations', () =>
+      HttpResponse.json({ items: [conversationFixture(), second], next_cursor: null }),
+    ))
+    const user = userEvent.setup()
+    renderApp('/inbox?status=active')
+    await screen.findByRole('link', { name: 'Conversation with Amina Cliente' })
+    const search = screen.getByRole('searchbox', { name: 'Search loaded conversations' })
+    await user.type(search, 'Amina')
+    expect(screen.getByRole('link', { name: 'Conversation with Amina Cliente' })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Conversation with Marie Client' })).not.toBeInTheDocument()
+    await user.clear(search)
+    await user.click(screen.getByRole('button', { name: 'En attente' }))
+    expect(screen.getByRole('link', { name: 'Conversation with Marie Client' })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Conversation with Amina Cliente' })).not.toBeInTheDocument()
+    expect(window.location.search).toBe('?status=active')
   })
 })

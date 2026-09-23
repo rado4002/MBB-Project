@@ -11,6 +11,10 @@ function roleLabel(role: HumanSummary['role']) {
   return role.charAt(0).toUpperCase() + role.slice(1)
 }
 
+function initials(name: string) {
+  return name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase()
+}
+
 export function AccountMenu({ human, onLogout }: AccountMenuProps) {
   const [open, setOpen] = useState(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
@@ -47,6 +51,7 @@ export function AccountMenu({ human, onLogout }: AccountMenuProps) {
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
+        <span className="account-menu__avatar" aria-hidden="true">{initials(human.display_name)}</span>
         <span className="account-menu__name">{human.display_name}</span>
         <span className="account-menu__role">{roleLabel(human.role)}</span>
         <svg aria-hidden="true" viewBox="0 0 20 20" width="16" height="16">

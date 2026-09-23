@@ -113,8 +113,7 @@ describe('Human and AI conversation ownership control', () => {
     expect(screen.queryByRole('button', { name: 'Return to AI' })).not.toBeInTheDocument()
     expect(within(screen.getByRole('group', { name: 'Conversation authority' }))
       .getByText('MBB AI Assistant')).toBeInTheDocument()
-    expect(screen.getByText('Unavailable — this conversation is controlled by MBB AI Assistant.'))
-      .toBeInTheDocument()
+    expect(screen.getAllByText('Reply unavailable — this conversation is controlled by MBB AI Assistant.')).toHaveLength(1)
     await user.click(trigger)
 
     const dialog = screen.getByRole('dialog', { name: 'Take over conversation' })
@@ -165,8 +164,8 @@ describe('Human and AI conversation ownership control', () => {
     expect(returnToAi).toHaveClass('button--primary')
     expect(screen.queryByRole('button', { name: 'Take over conversation' })).not.toBeInTheDocument()
     expect(screen.getByText('You — Omar Operator')).toBeInTheDocument()
-    expect(screen.getByText('Paused')).toBeInTheDocument()
-    expect(screen.getByText('Available to you')).toBeInTheDocument()
+    expect(screen.getByText('Human control')).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: 'Reply' })).toBeEnabled()
     expect(screen.getByText('Omar Operator now controls this conversation. AI is paused.')).toBeInTheDocument()
     await waitFor(() =>
       expect(screen.getByRole('group', { name: 'Conversation authority' })).toHaveFocus(),
@@ -287,11 +286,11 @@ describe('Human and AI conversation ownership control', () => {
     await user.click(await screen.findByRole('button', { name: 'Take over conversation' }))
     await user.click(screen.getByRole('button', { name: 'Take over conversation' }))
 
-    expect(await screen.findByText('Alice')).toBeInTheDocument()
+    expect(await within(screen.getByRole('group', { name: 'Conversation authority' })).findByText('Alice')).toBeInTheDocument()
     expect(screen.getByText('Conversation authority changed on the server. Current authority is shown.'))
       .toBeInTheDocument()
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-    expect(screen.getByText('Unavailable — only Alice may reply.')).toBeInTheDocument()
+    expect(screen.getByText('Reply unavailable — only Alice may reply.')).toBeInTheDocument()
     expect(window.location.pathname).toBe('/inbox/' + conversationId)
     expect(window.location.search).toBe('?status=active')
   })

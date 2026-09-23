@@ -1,6 +1,5 @@
 import type { RefObject } from 'react'
 import type { OperatorConversationDetail } from '../../api/contracts/conversations'
-import { replyUnavailableReason } from './authorityPolicy'
 
 function authorityLabel(detail: OperatorConversationDetail, accountId: string | undefined) {
   const ownership = detail.ownership
@@ -30,7 +29,6 @@ function ownershipUnavailableReason(
 export function ConversationAuthority({
   detail,
   accountId,
-  hasReplyCapability,
   hasOwnershipCapability,
   mayReturnOwnedConversation,
   canChangeOwnership,
@@ -42,7 +40,6 @@ export function ConversationAuthority({
 }: {
   detail: OperatorConversationDetail
   accountId: string | undefined
-  hasReplyCapability: boolean
   hasOwnershipCapability: boolean
   mayReturnOwnedConversation: boolean
   canChangeOwnership: boolean
@@ -53,7 +50,6 @@ export function ConversationAuthority({
   onAction: () => void
 }) {
   const ownership = detail.ownership
-  const replyReason = replyUnavailableReason(detail, accountId, hasReplyCapability)
   const unavailableAction = ownershipUnavailableReason(
     detail,
     hasOwnershipCapability,
@@ -71,26 +67,15 @@ export function ConversationAuthority({
       role="group"
       aria-label="Conversation authority"
     >
-      <div className="conversation-authority__facts">
-        <div>
-          <span className="conversation-authority__label">Authority</span>
-          <strong className="conversation-authority__value">
-            {authorityLabel(detail, accountId)}
-          </strong>
-        </div>
-        <div>
-          <span className="conversation-authority__label">AI state</span>
-          <strong className="conversation-authority__value">
-            {ownership.ai_execution_state === 'paused' ? 'Paused' : 'Active'}
-          </strong>
-        </div>
-        <div>
-          <span className="conversation-authority__label">Reply</span>
-          <strong className="conversation-authority__value">
-            {replyReason ? replyReason.replace('Reply unavailable — ', 'Unavailable — ') : 'Available to you'}
-          </strong>
-        </div>
-      </div>
+      <span className={`conversation-authority__status conversation-authority__status--${ownership.owner_type}`}>
+        <span className="conversation-authority__dot" aria-hidden="true" />
+        <strong>{authorityLabel(detail, accountId)}</strong>
+        <span aria-hidden="true">·</span>
+        <span>{ownership.owner_type === 'ai'
+          ? ownership.ai_execution_state === 'paused' ? 'Paused' : 'Handling'
+          : 'Human control'}</span>
+        {ownership.owner_type === 'human' ? <span>· AI paused</span> : null}
+      </span>
       {canChangeOwnership ? (
         <button
           className="button button--primary conversation-authority__action"

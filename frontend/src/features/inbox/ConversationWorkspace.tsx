@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useId,
@@ -42,6 +43,17 @@ function formatTimestamp(value: string) {
   }).format(date)
 }
 
+function formatDay(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'Date unavailable'
+  if (date.toDateString() === new Date().toDateString()) return "Aujourd'hui"
+  return new Intl.DateTimeFormat(undefined, { dateStyle: 'long' }).format(date)
+}
+
+function initials(name: string) {
+  return name.split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase()
+}
+
 function label(value: string | null) {
   if (!value) return 'Not available'
   return value
@@ -75,6 +87,9 @@ function messageActorLabel(message: OperatorMessageItem) {
   }
   if (message.sender_type === 'ai') {
     return message.sender_display_name || 'MBB AI Assistant'
+  }
+  if (message.sender_type === 'unknown' && message.direction === 'outbound') {
+    return 'Outbound message'
   }
   return actorLabel(message.sender_type)
 }
@@ -188,22 +203,14 @@ function ConversationHeader({
   return (
     <div className="conversation-header__content conversation-header__content--loaded">
       <div className="conversation-identity">
-        <h2 id="workspace-heading" tabIndex={-1} ref={headingRef}>{customerName}</h2>
-        <span className="masked-phone">{detail.customer.phone_masked}</span>
+        <span className="conversation-avatar conversation-avatar--header" aria-hidden="true">{initials(customerName)}</span>
+        <div>
+          <h2 id="workspace-heading" tabIndex={-1} ref={headingRef}>{customerName}</h2>
+          <p className="masked-phone">{detail.customer.phone_masked}</p>
+        </div>
       </div>
       <p className="visually-hidden" role="status">Conversation details loaded.</p>
       {authority}
-      <div className="conversation-metadata" aria-label="Conversation attributes">
-        <span>Status: {label(detail.status)}</span>
-        <span>Language: {label(detail.language)}</span>
-        <span>
-          Last activity <time dateTime={detail.updated_at}>{formatTimestamp(detail.updated_at)}</time>
-        </span>
-        {detail.open_escalation.exists ? <span>Open escalation</span> : null}
-        {detail.open_escalation.reason ? (
-          <span>Reason: {label(detail.open_escalation.reason)}</span>
-        ) : null}
-      </div>
     </div>
   )
 }
@@ -235,77 +242,82 @@ function ContextBody({
   if (!detail) return <p>Context is unavailable.</p>
   const ProductHeading = productHeadingLevel
   const commercial = detail.commercial_context
+  const lead = detail.lead
+  const hasMoreContext = Boolean(
+    detail.open_escalation.reason ||
+    (commercial && (
+      commercial.purchase_intent !== 'none' || commercial.next_objective ||
+      commercial.expressed_needs.length || commercial.decision_constraints.length ||
+      commercial.current_concern || commercial.selected_products.length
+    )) ||
+    (lead && (lead.score || lead.stage || lead.intent || lead.product_interests.length)),
+  )
   return (
     <>
-      <dl className="context-details">
-        {detail.open_escalation.reason ? (
-          <div><dt>Handoff reason</dt><dd>{label(detail.open_escalation.reason)}</dd></div>
-        ) : null}
-        {commercial ? (
-          <>
-            <div><dt>Goal</dt><dd>{commercial.current_goal || 'Not stated'}</dd></div>
-            <div><dt>Purchase intent</dt><dd>{label(commercial.purchase_intent)}</dd></div>
-            <div><dt>Next objective</dt><dd>{label(commercial.next_objective)}</dd></div>
-            <div>
-              <dt>Needs</dt>
-              <dd>{commercial.expressed_needs.length
-                ? commercial.expressed_needs.join(', ')
-                : 'None stated'}</dd>
-            </div>
-            <div>
-              <dt>Constraints</dt>
-              <dd>{commercial.decision_constraints.length
-                ? commercial.decision_constraints
-                  .map((constraint) => `${label(constraint.kind)}: ${constraint.value}`)
-                  .join(', ')
-                : 'None stated'}</dd>
-            </div>
-            <div>
-              <dt>Concern</dt>
-              <dd>{commercial.current_concern
-                ? `${label(commercial.current_concern.kind)}${commercial.current_concern.detail
-                  ? `: ${commercial.current_concern.detail}`
-                  : ''}`
-                : 'None'}</dd>
-            </div>
-          </>
-        ) : null}
-        {detail.lead ? (
-          <>
-            <div><dt>Lead score</dt><dd>{label(detail.lead.score)}</dd></div>
-            <div><dt>Lead stage</dt><dd>{label(detail.lead.stage)}</dd></div>
-            <div><dt>Lead intent</dt><dd>{label(detail.lead.intent)}</dd></div>
-          </>
-        ) : null}
+      <div className="context-client">
+        <span className="conversation-avatar" aria-hidden="true">{initials(detail.customer.display_name?.trim() || 'Customer')}</span>
+        <div><strong>{detail.customer.display_name?.trim() || 'Customer'}</strong><p>{detail.customer.phone_masked}</p></div>
+      </div>
+      <dl className="context-details context-details--primary">
+        <div><dt>Language</dt><dd>{label(detail.language)}</dd></div>
+        <div><dt>Last activity</dt><dd><time dateTime={detail.updated_at}>{formatTimestamp(detail.updated_at)}</time></dd></div>
+        <div><dt>Control</dt><dd>{detail.ownership.owner_type === 'ai' ? 'MBB AI Assistant' : detail.ownership.human_owner?.display_name || 'Human Operator'}</dd></div>
+        {detail.open_escalation.exists ? <div><dt>Review</dt><dd>Open escalation ticket</dd></div> : null}
+        {commercial?.current_goal ? <div><dt>Current goal</dt><dd>{commercial.current_goal}</dd></div> : null}
       </dl>
-      {commercial ? (
-        <>
-          <ProductHeading>Selected products</ProductHeading>
-          {commercial.selected_products.length ? (
-            <ul className="interest-list">
-              {commercial.selected_products.map((product) => (
-                <li key={product.sellable_item_id}>
-                  {product.display_name || 'Unavailable selected item'}
-                  {product.offer_status ? ` — ${label(product.offer_status)}` : ''}
-                  {product.current_usd_price ? ` — $${product.current_usd_price}` : ''}
-                </li>
-              ))}
-            </ul>
-          ) : <p>No selected product.</p>}
-        </>
+      {hasMoreContext ? (
+        <details className="context-more">
+          <summary>Voir plus de contexte</summary>
+          <div className="context-more__body">
+            <dl className="context-details">
+              {detail.open_escalation.reason ? (
+                <div><dt>Handoff reason</dt><dd>{label(detail.open_escalation.reason)}</dd></div>
+              ) : null}
+              {commercial?.purchase_intent && commercial.purchase_intent !== 'none' ? (
+                <div><dt>Purchase intent</dt><dd>{label(commercial.purchase_intent)}</dd></div>
+              ) : null}
+              {commercial?.next_objective ? <div><dt>Next objective</dt><dd>{label(commercial.next_objective)}</dd></div> : null}
+              {commercial?.expressed_needs.length ? <div><dt>Needs</dt><dd>{commercial.expressed_needs.join(', ')}</dd></div> : null}
+              {commercial?.decision_constraints.length ? (
+                <div><dt>Constraints</dt><dd>{commercial.decision_constraints
+                  .map((constraint) => `${label(constraint.kind)}: ${constraint.value}`)
+                  .join(', ')}</dd></div>
+              ) : null}
+              {commercial?.current_concern ? (
+                <div><dt>Concern</dt><dd>{label(commercial.current_concern.kind)}
+                  {commercial.current_concern.detail ? `: ${commercial.current_concern.detail}` : ''}</dd></div>
+              ) : null}
+              {lead?.score ? <div><dt>Lead score</dt><dd>{label(lead.score)}</dd></div> : null}
+              {lead?.stage ? <div><dt>Lead stage</dt><dd>{label(lead.stage)}</dd></div> : null}
+              {lead?.intent ? <div><dt>Lead intent</dt><dd>{label(lead.intent)}</dd></div> : null}
+            </dl>
+            {commercial?.selected_products.length ? (
+              <>
+                <ProductHeading>Selected products</ProductHeading>
+                <ul className="interest-list">
+                  {commercial.selected_products.map((product) => (
+                    <li key={product.sellable_item_id}>
+                      {product.display_name || 'Unavailable selected item'}
+                      {product.offer_status ? ` — ${label(product.offer_status)}` : ''}
+                      {product.current_usd_price ? ` — $${product.current_usd_price}` : ''}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
+            {lead?.product_interests.length ? (
+              <>
+                <ProductHeading>Product interests</ProductHeading>
+                <ul className="interest-list">
+                  {lead.product_interests.slice(0, 5).map((interest, index) => (
+                    <li key={`${index}-${interest}`}>{safeInterest(interest)}</li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
+          </div>
+        </details>
       ) : null}
-      {detail.lead ? (
-        <>
-          <ProductHeading>Product interests</ProductHeading>
-          {detail.lead.product_interests.length ? (
-            <ul className="interest-list">
-              {detail.lead.product_interests.slice(0, 5).map((interest, index) => (
-                <li key={`${index}-${interest}`}>{safeInterest(interest)}</li>
-              ))}
-            </ul>
-          ) : <p>No product interests available.</p>}
-        </>
-      ) : <p>No lead context is available.</p>}
     </>
   )
 }
@@ -561,41 +573,52 @@ function MessageTimeline({
             </InlineAlert>
           ) : null}
           <ol className="message-list">
-            {history.items.map((item) => {
+            {history.items.map((item, index) => {
+              const previous = history.items[index - 1]
+              const day = formatDay(item.occurred_at)
+              const dateSeparator = !previous || formatDay(previous.occurred_at) !== day
+                ? <li className="message-day"><time dateTime={item.occurred_at}>{day}</time></li>
+                : null
               if (item.kind === 'internal_note') {
                 return (
-                  <li key={timelineItemKey(item)} className="internal-note">
-                    <article aria-label={`Internal note by ${item.author.display_name}`}>
-                      <header>
-                        <strong>
-                          Internal Note
-                          <span className="internal-note__author"> · {item.author.display_name} — Operator</span>
-                        </strong>
-                        <time dateTime={item.occurred_at}>{formatTimestamp(item.occurred_at)}</time>
-                      </header>
-                      <p className="message-text">{item.text}</p>
-                    </article>
-                  </li>
+                  <Fragment key={timelineItemKey(item)}>
+                    {dateSeparator}
+                    <li className="internal-note">
+                      <article aria-label={`Internal note by ${item.author.display_name}`}>
+                        <header>
+                          <strong>
+                            Internal Note
+                            <span className="internal-note__author"> · {item.author.display_name} — Operator</span>
+                          </strong>
+                          <time dateTime={item.occurred_at}>{formatTimestamp(item.occurred_at)}</time>
+                        </header>
+                        <p className="message-text">{item.text}</p>
+                      </article>
+                    </li>
+                  </Fragment>
                 )
               }
               const message = item
               const actor = messageActorLabel(message)
               const delivery = deliveryLabel(message.delivery_state)
               return (
-                <li key={timelineItemKey(message)} className={`message message--${message.direction}`}>
-                  <article aria-label={`${actor} message`}>
-                    <header>
-                      <strong>{actor}</strong>
-                      <time dateTime={message.occurred_at}>{formatTimestamp(message.occurred_at)}</time>
-                    </header>
-                    {messageContent(message)}
-                    {delivery ? (
-                      <footer className={`message-delivery message-delivery--${message.delivery_state}`}>
-                        {delivery}
-                      </footer>
-                    ) : null}
-                  </article>
-                </li>
+                <Fragment key={timelineItemKey(message)}>
+                  {dateSeparator}
+                  <li className={`message message--${message.direction}${message.sender_type === 'system' ? ' message--system' : ''}`}>
+                    <article aria-label={`${actor} message`}>
+                      <header>
+                        <strong>{actor}</strong>
+                        <time dateTime={message.occurred_at}>{formatTimestamp(message.occurred_at)}</time>
+                      </header>
+                      {messageContent(message)}
+                      {delivery ? (
+                        <footer className={`message-delivery message-delivery--${message.delivery_state}`}>
+                          {delivery}
+                        </footer>
+                      ) : null}
+                    </article>
+                  </li>
+                </Fragment>
               )
             })}
           </ol>
@@ -1017,7 +1040,6 @@ export function ConversationWorkspace({
             <ConversationAuthority
               detail={detail.detail}
               accountId={auth.session?.human.account_id}
-              hasReplyCapability={hasReplyCapability}
               hasOwnershipCapability={hasOwnershipCapability}
               mayReturnOwnedConversation={mayReturnOwnedConversation}
               canChangeOwnership={canChangeOwnership}

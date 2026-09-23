@@ -114,7 +114,7 @@ describe('responsive Inbox workflow refinement', () => {
     const row = rowLink.closest('li')
     expect(rowLink).toHaveAttribute('aria-current', 'page')
     expect(row).toHaveClass('conversation-row--selected')
-    expect(document.getElementById('workspace-heading')).toHaveFocus()
+    await waitFor(() => expect(document.getElementById('workspace-heading')).toHaveFocus())
     expect(rowLink).not.toHaveFocus()
 
     rowLink.focus()
