@@ -83,19 +83,20 @@ function actorLabel(senderType: MessageSenderType) {
 
 function messageActorLabel(message: OperatorMessageItem) {
   if (message.sender_type === 'operator' && message.operator_author) {
-    return `${message.operator_author.display_name} — Operator`
+    return message.operator_author.display_name
   }
   if (message.sender_type === 'ai') {
     return message.sender_display_name || 'MBB AI Assistant'
   }
   if (message.sender_type === 'unknown' && message.direction === 'outbound') {
-    return 'Outbound message'
+    return 'Outgoing'
   }
   return actorLabel(message.sender_type)
 }
 
 function deliveryLabel(state: OperatorMessageItem['delivery_state']) {
   if (!state) return null
+  if (state === 'accepted') return 'Pending delivery'
   return state.charAt(0).toUpperCase() + state.slice(1)
 }
 
@@ -347,6 +348,9 @@ function ContextDrawer({
   open,
   onClose,
   returnFocusRef,
+  client,
+  conversationId,
+  onRefresh,
   detail,
   loading,
   error,
@@ -354,6 +358,9 @@ function ContextDrawer({
   open: boolean
   onClose: () => void
   returnFocusRef: RefObject<HTMLButtonElement | null>
+  client: ConversationApiClient
+  conversationId: string
+  onRefresh: () => Promise<void>
   detail: OperatorConversationDetail | null
   loading: boolean
   error: ApiError | null
@@ -446,6 +453,15 @@ function ContextDrawer({
             error={error}
             productHeadingLevel="h3"
           />
+          <div className="context-drawer__actions">
+            <EscalationForm
+              client={client}
+              conversationId={conversationId}
+              available={Boolean(detail && !loading && !error)}
+              hasOpenEscalation={Boolean(detail?.open_escalation.exists)}
+              onRefresh={onRefresh}
+            />
+          </div>
         </div>
       </section>
     </div>,
@@ -588,7 +604,7 @@ function MessageTimeline({
                         <header>
                           <strong>
                             Internal Note
-                            <span className="internal-note__author"> · {item.author.display_name} — Operator</span>
+                            <span className="internal-note__author"> · {item.author.display_name}</span>
                           </strong>
                           <time dateTime={item.occurred_at}>{formatTimestamp(item.occurred_at)}</time>
                         </header>
@@ -606,16 +622,16 @@ function MessageTimeline({
                   {dateSeparator}
                   <li className={`message message--${message.direction}${message.sender_type === 'system' ? ' message--system' : ''}`}>
                     <article aria-label={`${actor} message`}>
-                      <header>
-                        <strong>{actor}</strong>
-                        <time dateTime={message.occurred_at}>{formatTimestamp(message.occurred_at)}</time>
-                      </header>
-                      {messageContent(message)}
-                      {delivery ? (
-                        <footer className={`message-delivery message-delivery--${message.delivery_state}`}>
-                          {delivery}
-                        </footer>
+                      {message.sender_type !== 'customer' && message.sender_type !== 'unknown' && message.sender_type !== 'system' ? (
+                        <header><strong>{actor}</strong></header>
                       ) : null}
+                      {messageContent(message)}
+                      <div className="message-meta">
+                        <time dateTime={message.occurred_at}>{formatTimestamp(message.occurred_at)}</time>
+                        {delivery && message.delivery_state !== 'sent' ? (
+                          <span className={`message-delivery message-delivery--${message.delivery_state}`}>{delivery}</span>
+                        ) : null}
+                      </div>
                     </article>
                   </li>
                 </Fragment>
@@ -890,16 +906,12 @@ function ConversationComposer({
             <span className="internal-note-warning" role="note">
               Internal only — not sent to the customer or available to AI.
             </span>
-          ) : (
-            <span className="composer-guidance">
-              Sent to the customer through the conversation channel.
-            </span>
-          )}
+          ) : null}
           <span>{Array.from(text).length}/4,096 · Ctrl+Enter to submit</span>
         </div>
         <button className="button button--primary" type="submit" disabled={submitting}>
           {activeMode === 'reply'
-            ? submitting ? 'Submitting…' : 'Submit Reply'
+            ? submitting ? 'Sending…' : 'Send'
             : submitting ? 'Adding…' : 'Add Internal Note'}
         </button>
       </div>
@@ -1063,14 +1075,6 @@ export function ConversationWorkspace({
             Details
           </button>
         </div>
-        <EscalationForm
-          key={conversationId}
-          client={client}
-          conversationId={conversationId}
-          available={Boolean(detail.detail && !detail.loading && !detail.error)}
-          hasOpenEscalation={Boolean(detail.detail?.open_escalation.exists)}
-          onRefresh={refreshOwnership}
-        />
       </header>
       <div className="workspace-columns">
         <MessageTimeline
@@ -1090,6 +1094,9 @@ export function ConversationWorkspace({
         open={contextOpen}
         onClose={closeContext}
         returnFocusRef={detailsButtonRef}
+        client={client}
+        conversationId={conversationId}
+        onRefresh={refreshOwnership}
         detail={detail.detail}
         loading={detail.loading}
         error={detail.error}

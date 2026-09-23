@@ -229,17 +229,16 @@ describe('read-only conversation workspace', () => {
 
     const history = await screen.findByRole('region', { name: 'Conversation timeline' })
     const rendered = within(history).getAllByRole('article')
-    expect(rendered.every((item) => (
-      item.querySelector('header strong') && item.querySelector('header time[datetime]')
-    ))).toBe(true)
+    expect(rendered.every((item) => item.querySelector('time[datetime]'))).toBe(true)
     expect(rendered.map((item) => item.textContent)).toEqual([
       expect.stringContaining('<script>alert(document.cookie)</script>'),
-      expect.stringContaining('Outbound message'),
+      expect.stringContaining('Legacy outbound'),
       expect.stringContaining('Operator'),
-      expect.stringContaining('System'),
+      expect.stringContaining('Voice note unavailable'),
       expect.stringContaining('MBB AI Assistant'),
       expect.stringContaining('Image unavailable'),
     ])
+    expect(within(history).queryByText('Outbound message')).not.toBeInTheDocument()
     expect(within(history).getByText('Voice note unavailable')).toBeInTheDocument()
     expect(container.querySelector('script')).toBeNull()
     expect(container.querySelector('a[href^="http"]')).toBeNull()

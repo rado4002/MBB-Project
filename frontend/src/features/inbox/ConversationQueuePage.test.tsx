@@ -365,4 +365,16 @@ describe('read-only conversation queue', () => {
     expect(screen.queryByRole('link', { name: 'Conversation with Amina Cliente' })).not.toBeInTheDocument()
     expect(window.location.search).toBe('?status=active')
   })
+
+  it('explains the local search limit only when additional queue pages exist', async () => {
+    server.use(authenticated(), http.get('/api/v1/operator/conversations', () =>
+      HttpResponse.json({ items: [conversationFixture()], next_cursor: 'more-conversations' }),
+    ))
+    const user = userEvent.setup()
+    renderApp('/inbox')
+    await screen.findByText('Marie Client')
+    expect(screen.queryByText(/Search and quick views cover loaded conversations/)).not.toBeInTheDocument()
+    await user.type(screen.getByRole('searchbox', { name: 'Search loaded conversations' }), 'Marie')
+    expect(screen.getByText(/Search and quick views cover loaded conversations/)).toBeInTheDocument()
+  })
 })

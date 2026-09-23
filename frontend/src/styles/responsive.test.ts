@@ -16,8 +16,10 @@ describe('responsive Inbox style contract', () => {
     expect(globalCss).toContain('.message { width: min(80%, 34rem); }')
     expect(globalCss).toContain('.message--outbound { justify-self: end; }')
     expect(globalCss).toContain('.message--system { width: min(100%, 34rem);')
-    expect(globalCss).toContain('.conversation-authority__action { min-height: 2.75rem; }')
+    expect(globalCss).toMatch(/\.conversation-authority__action \{ min-height: 2\.75rem;/)
     expect(globalCss).toContain('.queue-search input { width: 100%; min-height: 2.75rem;')
+    expect(globalCss).toMatch(/\.conversation-row h2 \{[^}]*text-overflow: ellipsis; white-space: nowrap/)
+    expect(globalCss).toContain('.conversation-preview { -webkit-line-clamp: 1; }')
   })
   it('defines mobile, tablet, and desktop layouts without three narrow tablet columns', () => {
     expect(globalCss).toContain('@media (max-width: 47.99rem)')

@@ -141,7 +141,7 @@ describe('responsive Inbox workflow refinement', () => {
     expect(within(dialog).getByText('Solar starter kit')).toBeInTheDocument()
 
     await user.tab()
-    expect(close).toHaveFocus()
+    expect(within(dialog).getByRole('button', { name: 'Create escalation' })).toHaveFocus()
     await expectAccessible(document.body)
     await user.keyboard('{Escape}')
 
@@ -258,7 +258,7 @@ describe('responsive Inbox workflow refinement', () => {
 
     expect(await screen.findByText('Solar starter kit')).toBeInTheDocument()
     const alert = await screen.findByRole('alert')
-    expect(alert).toHaveFocus()
+    await waitFor(() => expect(alert).toHaveFocus())
     expect(alert).toHaveTextContent('history-focus-ref')
     expect(screen.getByRole('region', { name: 'Conversation queue' })).toBeInTheDocument()
   })

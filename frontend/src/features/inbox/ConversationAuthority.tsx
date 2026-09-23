@@ -74,7 +74,6 @@ export function ConversationAuthority({
         <span>{ownership.owner_type === 'ai'
           ? ownership.ai_execution_state === 'paused' ? 'Paused' : 'Handling'
           : 'Human control'}</span>
-        {ownership.owner_type === 'human' ? <span>· AI paused</span> : null}
       </span>
       {canChangeOwnership ? (
         <button

@@ -38,6 +38,7 @@ function setup(capability = true, alreadyOpen = false) {
 
 async function openForm() {
   const user = userEvent.setup()
+  await user.click(await screen.findByRole('button', { name: 'Details' }))
   await user.click(await screen.findByRole('button', { name: 'Create escalation' }))
   fireEvent.change(screen.getByLabelText('Escalation reason'), { target: { value: '  Customer needs help  ' } })
   return user
@@ -54,6 +55,8 @@ describe('conversation escalation creation', () => {
       return HttpResponse.json({ escalation_id: 'ticket', status: 'open' }, { status: 201 })
     }))
     const { container } = renderApp(`/inbox/${conversationId}`)
+    await screen.findByRole('button', { name: 'Details' })
+    expect(screen.queryByRole('button', { name: 'Create escalation' })).not.toBeInTheDocument()
     const user = await openForm()
     await user.selectOptions(screen.getByLabelText('Escalation type'), 'payment_issue')
     await user.selectOptions(screen.getByLabelText('Escalation priority'), 'high')
@@ -66,6 +69,7 @@ describe('conversation escalation creation', () => {
     expect(requests[0].headers.get('X-CSRF-Token')).toBe('escalation-csrf')
     expect(requests[0].headers.get('Idempotency-Key')).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
     expect(state.writes).toEqual([])
+    await user.click(screen.getByRole('button', { name: 'Close' }))
     const workspace = within(screen.getByRole('region', { name: 'Marie Client' }))
     expect(within(workspace.getByRole('group', { name: 'Conversation authority' })).getByText('MBB AI Assistant')).toBeInTheDocument()
     expect(workspace.getByText('Open escalation ticket')).toBeInTheDocument()
@@ -164,21 +168,24 @@ describe('conversation escalation creation', () => {
     renderApp(`/inbox/${conversationId}`)
     const user = await openForm()
     await user.click(screen.getByRole('button', { name: 'Submit escalation' }))
-    expect(await screen.findByRole('button', { name: 'Retry details' })).toBeInTheDocument()
-    expect(screen.getByText('Escalation created.')).toBeInTheDocument()
+    expect(await screen.findByText('Escalation created.')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Retry same submission' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Close' }))
+    expect(await screen.findByRole('button', { name: 'Retry details' })).toBeInTheDocument()
   })
 
   it('hides the action without capability', async () => {
     setup(false)
     renderApp(`/inbox/${conversationId}`)
     await screen.findByRole('region', { name: 'Marie Client' })
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Details' }))
     expect(screen.queryByRole('button', { name: 'Create escalation' })).not.toBeInTheDocument()
   })
 
   it('disables creation when authoritative detail already has an open escalation', async () => {
     setup(true, true)
     renderApp(`/inbox/${conversationId}`)
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Details' }))
     expect(await screen.findByRole('button', { name: 'Create escalation' })).toBeDisabled()
   })
 })

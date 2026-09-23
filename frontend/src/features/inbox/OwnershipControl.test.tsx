@@ -97,7 +97,7 @@ describe('Human and AI conversation ownership control', () => {
     expect(screen.getByText('Paused')).toBeInTheDocument()
     expect(screen.getAllByText('Open escalation').length).toBeGreaterThan(0)
     expect(
-      screen.getByText('Reply unavailable — waiting for a Human Operator to take over.'),
+      screen.getByText('Human takeover required to reply.'),
     ).toBeInTheDocument()
     await expectAccessible(container)
   })
@@ -113,7 +113,7 @@ describe('Human and AI conversation ownership control', () => {
     expect(screen.queryByRole('button', { name: 'Return to AI' })).not.toBeInTheDocument()
     expect(within(screen.getByRole('group', { name: 'Conversation authority' }))
       .getByText('MBB AI Assistant')).toBeInTheDocument()
-    expect(screen.getAllByText('Reply unavailable — this conversation is controlled by MBB AI Assistant.')).toHaveLength(1)
+    expect(screen.getAllByText('Human takeover required to reply.')).toHaveLength(1)
     await user.click(trigger)
 
     const dialog = screen.getByRole('dialog', { name: 'Take over conversation' })

@@ -235,7 +235,7 @@ export function ConversationQueuePage() {
             <div className="queue-search-row">
               <label className="queue-search">
                 <span className="visually-hidden">Search loaded conversations</span>
-                <input type="search" value={listSearch} onChange={(event) => setListSearch(event.target.value)} placeholder="Rechercher dans les conversations…" />
+                <input type="search" value={listSearch} onChange={(event) => setListSearch(event.target.value)} placeholder="Rechercher…" />
               </label>
               <button className="button button--secondary queue-refresh" type="button"
                 aria-label={queue.refreshing ? 'Refreshing…' : 'Refresh'} title="Refresh conversations"
@@ -246,9 +246,11 @@ export function ConversationQueuePage() {
             <div className="queue-quick-filters" aria-label="Loaded conversation filters">
               <button type="button" aria-pressed={quickFilter === 'all'} onClick={() => setQuickFilter('all')}>Tous</button>
               <button type="button" aria-pressed={quickFilter === 'waiting'} onClick={() => setQuickFilter('waiting')}>En attente</button>
-              <button type="button" aria-pressed={quickFilter === 'mine'} onClick={() => setQuickFilter('mine')}>Mes conversations</button>
+              <button type="button" aria-pressed={quickFilter === 'mine'} onClick={() => setQuickFilter('mine')}>À moi</button>
             </div>
-            <p className="queue-filter-scope">Recherche et raccourcis sur les conversations chargées.</p>
+            {(listSearch.trim() || quickFilter !== 'all') && queue.nextCursor ? (
+              <p className="queue-filter-scope" role="note">Search and quick views cover loaded conversations. Load more for additional results.</p>
+            ) : null}
             <details className="conversation-filters conversation-filters--compact">
               <summary>
                 <span>Filters</span>

@@ -75,7 +75,7 @@ function handlers(
 }
 
 describe('manual Human Operator replies', () => {
-  it('submits the authoritative contract and immediately shows Operator authorship as Accepted', async () => {
+  it('submits the authoritative contract and immediately shows Operator authorship as pending delivery', async () => {
     let requestBody: unknown
     let csrfHeader = ''
     let idempotencyHeader = ''
@@ -95,18 +95,16 @@ describe('manual Human Operator replies', () => {
     expect(screen.queryByText(/^Reply unavailable/)).not.toBeInTheDocument()
     expect(screen.queryByText('Composer mode')).not.toBeInTheDocument()
     expect(screen.getByText('Reply to Customer')).toHaveClass('visually-hidden')
-    const guidance = screen.getByText('Sent to the customer through the conversation channel.')
-    expect(guidance).toBeInTheDocument()
-    const compactMeta = guidance.closest('.reply-composer__meta')
+    const compactMeta = textbox.closest('form')?.querySelector('.reply-composer__meta')
     expect(compactMeta).toContainElement(screen.getByText('0/4,096 · Ctrl+Enter to submit'))
     expect(textbox).toHaveAttribute('maxlength', '4096')
     expect(textbox).toHaveAttribute('rows', '2')
 
     await user.type(textbox, 'Bonjour Marie')
-    await user.click(screen.getByRole('button', { name: 'Submit Reply' }))
+    await user.click(screen.getByRole('button', { name: 'Send' }))
 
-    expect(await screen.findByText('Omar Operator — Operator')).toBeInTheDocument()
-    expect(screen.getByText('Accepted')).toBeInTheDocument()
+    expect(await within(screen.getByRole('region', { name: 'Conversation timeline' })).findByText('Omar Operator')).toBeInTheDocument()
+    expect(screen.getByText('Pending delivery')).toBeInTheDocument()
     expect(screen.queryByText('Sent')).not.toBeInTheDocument()
     expect(textbox).toHaveValue('')
     expect(textbox).toHaveAttribute('rows', '2')
@@ -137,7 +135,7 @@ describe('manual Human Operator replies', () => {
     const textbox = await screen.findByRole('textbox', { name: 'Reply to Customer' })
 
     await user.type(textbox, '   ')
-    await user.click(screen.getByRole('button', { name: 'Submit Reply' }))
+    await user.click(screen.getByRole('button', { name: 'Send' }))
     expect(screen.getByText('Enter a reply before submitting.')).toBeInTheDocument()
     expect(calls).toBe(0)
 
@@ -201,11 +199,11 @@ describe('manual Human Operator replies', () => {
       await screen.findByRole('textbox', { name: 'Reply to Customer' }),
       'Only once',
     )
-    const button = screen.getByRole('button', { name: 'Submit Reply' })
+    const button = screen.getByRole('button', { name: 'Send' })
     fireEvent.click(button)
     fireEvent.click(button)
-    expect(await screen.findByRole('button', { name: 'Submitting…' })).toBeDisabled()
-    expect(await screen.findByText('Accepted')).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Sending…' })).toBeDisabled()
+    expect(await screen.findByText('Pending delivery')).toBeInTheDocument()
     expect(calls).toBe(1)
   })
 
@@ -230,12 +228,12 @@ describe('manual Human Operator replies', () => {
     renderApp(`/inbox/${conversationId}`)
     const textbox = await screen.findByRole('textbox', { name: 'Reply to Customer' })
     await user.type(textbox, 'Preserve me')
-    await user.click(screen.getByRole('button', { name: 'Submit Reply' }))
+    await user.click(screen.getByRole('button', { name: 'Send' }))
 
     expect(await screen.findByText('reply-ref')).toBeInTheDocument()
     expect(textbox).toHaveValue('Preserve me')
-    await user.click(screen.getByRole('button', { name: 'Submit Reply' }))
-    expect(await screen.findByText('Accepted')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    expect(await screen.findByText('Pending delivery')).toBeInTheDocument()
     expect(keys[0]).toBe(keys[1])
   })
 
@@ -244,7 +242,7 @@ describe('manual Human Operator replies', () => {
       'AI control',
       conversationDetailFixture(),
       sessionFixture(),
-      'Reply unavailable — this conversation is controlled by MBB AI Assistant.',
+      'Human takeover required to reply.',
     ],
     [
       'another Human Operator for an Administrator',
@@ -358,14 +356,14 @@ describe('manual Human Operator replies', () => {
     renderApp(`/inbox/${conversationId}`)
     const textbox = await screen.findByRole('textbox', { name: 'Reply to Customer' })
     await user.type(textbox, 'Draft survives authority refresh')
-    await user.click(screen.getByRole('button', { name: 'Submit Reply' }))
+    await user.click(screen.getByRole('button', { name: 'Send' }))
 
     expect(await screen.findByText(/Conversation ownership changed\. Refresh before replying\./))
       .toBeInTheDocument()
     expect(textbox).toHaveValue('Draft survives authority refresh')
     expect(screen.getByText('Conversation authority changed on the server. Current authority is shown.'))
       .toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Submit Reply' }))
+    await user.click(screen.getByRole('button', { name: 'Send' }))
 
     expect(await screen.findByText('Draft survives authority refresh')).toBeInTheDocument()
     expect(requestVersions).toEqual([2, 3])
@@ -387,9 +385,9 @@ describe('manual Human Operator replies', () => {
     renderApp(`/inbox/${conversationId}`)
     const textbox = await screen.findByRole('textbox', { name: 'Reply to Customer' })
     await user.type(textbox, 'Ownership refresh')
-    await user.click(screen.getByRole('button', { name: 'Submit Reply' }))
+    await user.click(screen.getByRole('button', { name: 'Send' }))
 
-    expect(await screen.findByText('Accepted')).toBeInTheDocument()
+    expect(await screen.findByText('Pending delivery')).toBeInTheDocument()
     await waitFor(() =>
       expect(screen.queryByRole('textbox', { name: 'Reply to Customer' })).not.toBeInTheDocument(),
     )
@@ -436,7 +434,7 @@ describe('internal conversation notes', () => {
     expect(card).toBeInTheDocument()
     expect(card.querySelector('.message-text')?.textContent).toBe(noteText)
     expect(container.querySelector('script')).not.toBeInTheDocument()
-    expect(screen.queryByText('Accepted')).not.toBeInTheDocument()
+    expect(screen.queryByText('Pending delivery')).not.toBeInTheDocument()
     expect(screen.queryByText('Sent')).not.toBeInTheDocument()
     expect(note).toHaveValue('')
     expect(requestBody).toEqual({ text: noteText })
@@ -450,8 +448,8 @@ describe('internal conversation notes', () => {
     await user.click(screen.getByRole('radio', { name: 'Reply' }))
     expect(screen.getByRole('textbox', { name: 'Reply to Customer' }))
       .toHaveValue('Reply draft stays here')
-    await user.click(screen.getByRole('button', { name: 'Submit Reply' }))
-    expect(await screen.findByText('Accepted')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    expect(await screen.findByText('Pending delivery')).toBeInTheDocument()
     expect(replyIdempotencyHeader).not.toBe(idempotencyHeader)
     await expectAccessible(container)
   })

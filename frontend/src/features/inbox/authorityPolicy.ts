@@ -19,10 +19,7 @@ export function replyUnavailableReason(
     return 'Reply unavailable — conversation ownership is unavailable.'
   }
   if (detail.ownership.owner_type === 'ai') {
-    if (detail.ownership.ai_execution_state === 'paused') {
-      return 'Reply unavailable — waiting for a Human Operator to take over.'
-    }
-    return 'Reply unavailable — this conversation is controlled by MBB AI Assistant.'
+    return 'Human takeover required to reply.'
   }
   if (
     detail.ownership.ai_execution_state !== 'paused' ||
