@@ -37,6 +37,9 @@ describe('responsive Inbox style contract', () => {
       /\.conversation-authority \{[^}]*grid-template-columns: minmax\(0, 1fr\) auto;[^}]*align-items: center/,
     )
     expect(globalCss).toMatch(/\.conversation-authority__facts \{[^}]*display: flex;[^}]*flex-wrap: wrap/)
+    expect(globalCss).toMatch(
+      /@media \(max-width: 79\.99rem\)[\s\S]*?\.conversation-authority \{ grid-template-columns: 1fr; \}[\s\S]*?\.conversation-authority__action \{ width: 100%; max-width: none; \}/,
+    )
     expect(globalCss).toMatch(/\.conversation-metadata \{[^}]*display: flex;[^}]*flex-wrap: wrap/)
     expect(globalCss).not.toContain('.workspace-summary')
     expect(globalCss).not.toContain('.workspace-detail-region')
