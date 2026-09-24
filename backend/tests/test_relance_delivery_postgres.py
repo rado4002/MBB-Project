@@ -8,10 +8,13 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 import pytest_asyncio
+from fastapi import Response
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import Settings
+from app.api.browser_auth_deps import BrowserPrincipal, BrowserSessionContext
+from app.api.v1.operator_conversations import get_operator_conversation, get_operator_timeline
 from app.models.conversation import Conversation
 from app.models.customer import Customer
 from app.models.escalation_ticket import EscalationTicket
@@ -28,6 +31,7 @@ from app.modules.m6_relance.delivery import (
     prepare_candidate_delivery,
 )
 from app.modules.m6_relance.readiness import record_verified_opt_in
+from app.operator_identity.browser_auth import BrowserAuthState
 
 DATABASE_URL = os.environ.get("E2_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="requires disposable PostgreSQL")
@@ -130,7 +134,7 @@ async def _outbound(factory):
 async def test_confirmed_send_repeats_reuse_uuid_and_count_once(factory, monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: (_ for _ in ()).throw(
         AssertionError("network must not be used")))
-    now, _, _, _, lead_id, _, candidate_id = await _seed(factory)
+    now, _, conversation_id, _, lead_id, operator_id, candidate_id = await _seed(factory)
     fake = FakeTransport()
     first = await deliver_candidate(factory, candidate_id=candidate_id, transport=fake,
                                     settings=_settings(), now=now)
@@ -149,7 +153,47 @@ async def test_confirmed_send_repeats_reuse_uuid_and_count_once(factory, monkeyp
         assert await session.scalar(select(func.count()).select_from(RelanceCandidate).where(
             RelanceCandidate.lead_id == lead_id,
             RelanceCandidate.confirmed_sent_at.is_not(None))) == 1
-        # A confirmed send is the only evidence that can start attempt 2's clock.
+        account = await session.get(OperatorAccount, operator_id)
+        principal = BrowserPrincipal(
+            account=account,
+            session=BrowserSessionContext(
+                raw_token="offline-test",
+                record=object(),
+                state=BrowserAuthState(
+                    redis_client=object(),
+                    settings=Settings(
+                        _env_file=None,
+                        browser_session_hmac_secret="s" * 32,
+                        browser_csrf_hmac_secret="c" * 32,
+                    ),
+                ),
+            ),
+            capabilities=frozenset({"conversation.read", "message.read", "internal_note.read"}),
+        )
+        detail = await get_operator_conversation(
+            conversation_id=conversation_id,
+            response=Response(),
+            principal=principal,
+            db=session,
+        )
+        assert detail.follow_up is not None
+        assert detail.follow_up.status == "sent"
+        assert detail.follow_up.confirmed_sent_count == 1
+        assert detail.follow_up.next_possible_at == candidate.confirmed_sent_at + timedelta(hours=72)
+        timeline = await get_operator_timeline(
+            conversation_id=conversation_id,
+            response=Response(),
+            principal=principal,
+            _message_principal=principal,
+            _note_principal=principal,
+            db=session,
+        )
+        relance_message = next(
+            item for item in timeline.items
+            if item.kind == "message" and item.message_id == rows[0].message_id
+        )
+        assert relance_message.follow_up_attempt == 1
+        assert sum(item.kind == "message" for item in timeline.items) == 2
 
 
 @pytest.mark.asyncio
