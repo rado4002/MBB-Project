@@ -73,6 +73,10 @@ def _settings(**overrides):
     )
 
 
+def test_second_attempt_delay_defaults_to_72_hours():
+    assert Settings(_env_file=None).relance_delay_2_hours == 72
+
+
 async def _seed(factory, *, language="french", consent=True):
     now = datetime.now(timezone.utc).replace(hour=10, minute=0, second=0, microsecond=0)
     if now < datetime.now(timezone.utc):
