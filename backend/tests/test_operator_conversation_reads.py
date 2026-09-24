@@ -118,10 +118,10 @@ class FakeReadDatabase:
         self.execute_count += 1
         self.statements.append(statement)
         sql = str(statement.compile(dialect=postgresql.dialect()))
+        if "operator_follow_up" in sql:
+            return FakeMappingResult(self.detail_rows)
         if "JOIN LATERAL" in sql:
             return FakeMappingResult(self.queue_rows)
-        if "LEFT OUTER JOIN mbb.leads" in sql:
-            return FakeMappingResult(self.detail_rows)
         if "FROM mbb.messages" in sql:
             return FakeMappingResult(self.message_rows)
         raise AssertionError(f"Unexpected E1 query: {sql}")
@@ -267,6 +267,14 @@ def _detail_row(conversation_id: uuid.UUID, now: datetime) -> dict[str, Any]:
             "F",
         ],
         "has_open_escalation": True,
+        "follow_up_attempt": None,
+        "follow_up_source_message_id": None,
+        "follow_up_scheduled_at": None,
+        "follow_up_cancelled_at": None,
+        "follow_up_confirmed_sent_at": None,
+        "follow_up_delivery_status": None,
+        "follow_up_confirmed_sent_count": None,
+        "follow_up_latest_inbound_id": None,
     }
 
 
@@ -541,8 +549,10 @@ async def test_detail_is_minimized_and_missing_is_indistinguishable(
         "open_escalation",
         "ownership",
         "commercial_context",
+        "follow_up",
     }
     assert body["ownership"]["owner_type"] == "ai"
+    assert body["follow_up"] is None
     assert body["ownership"]["human_owner"] is None
     assert body["customer"]["phone_masked"] == "***5678"
     assert len(body["lead"]["product_interests"]) == 5
@@ -576,6 +586,43 @@ async def test_detail_is_minimized_and_missing_is_indistinguishable(
     assert missing.status_code == inaccessible.status_code == 404
     assert missing.json()["error"]["code"] == "CONVERSATION_NOT_FOUND"
     assert inaccessible.json()["error"]["code"] == "CONVERSATION_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_detail_exposes_uncertain_follow_up_as_operator_safe_state(
+    operator_harness,
+) -> None:
+    client, database, _account_value = operator_harness
+    conversation_id = uuid.uuid4()
+    source_message_id = uuid.uuid4()
+    row = _detail_row(conversation_id, datetime.now(timezone.utc))
+    row.update(
+        follow_up_attempt=1,
+        follow_up_source_message_id=source_message_id,
+        follow_up_scheduled_at=None,
+        follow_up_cancelled_at=None,
+        follow_up_confirmed_sent_at=None,
+        follow_up_delivery_status="uncertain",
+        follow_up_confirmed_sent_count=0,
+        follow_up_latest_inbound_id=source_message_id,
+    )
+    database.detail_rows = [row]
+
+    response = await client.get(
+        f"/api/v1/operator/conversations/{conversation_id}"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["follow_up"] == {
+        "status": "uncertain",
+        "confirmed_sent_count": 0,
+        "attempt_number": 1,
+        "scheduled_at": None,
+        "next_possible_at": None,
+        "stop_reason": None,
+    }
+    assert "delivery_status" not in response.text
+    assert "candidate_id" not in response.text
 
 
 @pytest.mark.asyncio

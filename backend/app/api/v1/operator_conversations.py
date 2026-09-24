@@ -7,7 +7,7 @@ import binascii
 import hashlib
 import hmac
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, Header, Query, Request, Response, status
 from pydantic import UUID4
 from sqlalchemy import (
     TIMESTAMP,
+    Integer,
     String,
     and_,
     case,
@@ -41,7 +42,7 @@ from app.api.browser_auth_deps import (
     validate_state_changing_request,
 )
 from app.api.browser_auth_errors import BrowserAuthError
-from app.config import Settings
+from app.config import Settings, get_settings
 from app.database import get_db
 from app.ai.commercial_state import (
     COMMERCIAL_STATE_KEY,
@@ -56,6 +57,8 @@ from app.models.lead import Lead
 from app.models.internal_note import InternalNote
 from app.models.message import Message
 from app.models.operator_account import OperatorAccount
+from app.models.relance_candidate import RelanceCandidate
+from app.models.relance_delivery import RelanceDelivery
 from app.modules.m4_conversation.ownership import (
     ConversationNotFound as OwnershipConversationNotFound,
     IdempotencyConflict as OwnershipIdempotencyConflict,
@@ -104,6 +107,7 @@ from app.schemas.operator_conversations import (
     OperatorCommercialContext,
     OperatorCommercialConstraint,
     OperatorConversationOwnership,
+    OperatorFollowUpSummary,
     OperatorConversationQueueItem,
     OperatorConversationQueueResponse,
     OperatorCustomerSummary,
@@ -594,7 +598,50 @@ def _timeline_message_item(row: Any) -> OperatorTimelineMessageItem:
         delivery_state_timestamp=row["delivery_state_timestamp"],
         ai_actor_display_name=row.get("ai_actor_display_name"),
     )
-    return OperatorTimelineMessageItem(**message.model_dump())
+    return OperatorTimelineMessageItem(
+        **message.model_dump(), follow_up_attempt=row.get("follow_up_attempt")
+    )
+
+
+def _operator_follow_up_summary(row: Any) -> OperatorFollowUpSummary | None:
+    """Map a lateral join to a minimized browser-safe Relance summary."""
+    if row["follow_up_attempt"] is None:
+        return None
+    sent_count = row["follow_up_confirmed_sent_count"] or 0
+    latest_inbound_id = row["follow_up_latest_inbound_id"]
+    delivery_status = row["follow_up_delivery_status"]
+    status_value: str
+    stop_reason = None
+    if delivery_status == "uncertain":
+        status_value = "uncertain"
+    elif delivery_status == "failed":
+        status_value = "failed"
+    elif row["follow_up_cancelled_at"] is not None:
+        status_value = "stopped"
+        if latest_inbound_id is not None and latest_inbound_id != row["follow_up_source_message_id"]:
+            stop_reason = "customer_replied"
+    elif row["follow_up_confirmed_sent_at"] is not None:
+        if sent_count < 2 and latest_inbound_id != row["follow_up_source_message_id"]:
+            status_value = "stopped"
+            stop_reason = "customer_replied"
+        else:
+            status_value = "sent"
+    else:
+        status_value = "planned"
+
+    next_possible_at = None
+    if status_value == "sent" and row["follow_up_attempt"] == 1:
+        next_possible_at = row["follow_up_confirmed_sent_at"] + timedelta(
+            hours=get_settings().relance_delay_2_hours
+        )
+    return OperatorFollowUpSummary(
+        status=status_value,
+        confirmed_sent_count=sent_count,
+        attempt_number=row["follow_up_attempt"],
+        scheduled_at=row["follow_up_scheduled_at"] if status_value == "planned" else None,
+        next_possible_at=next_possible_at,
+        stop_reason=stop_reason,
+    )
 
 
 def _timeline_note_item(row: Any) -> OperatorInternalNoteItem:
@@ -1248,6 +1295,17 @@ async def get_operator_timeline(
         )
 
     ai_actor_display_name = _ai_actor_display_name()
+    follow_up_attempt = (
+        select(RelanceCandidate.attempt_number)
+        .join(
+            RelanceDelivery,
+            RelanceDelivery.candidate_id == RelanceCandidate.candidate_id,
+        )
+        .where(RelanceDelivery.outbound_message_id == Message.message_id)
+        .limit(1)
+        .correlate(Message)
+        .scalar_subquery()
+    )
     message_items = select(
         literal("message").label("kind"),
         Message.message_id.label("item_id"),
@@ -1261,6 +1319,7 @@ async def get_operator_timeline(
         Message.delivery_state.label("delivery_state"),
         Message.delivery_state_timestamp.label("delivery_state_timestamp"),
         ai_actor_display_name.label("ai_actor_display_name"),
+        follow_up_attempt.label("follow_up_attempt"),
     ).where(
         Message.conversation_id == conversation_id,
         (Message.operator_author_account_id.is_(None))
@@ -1281,6 +1340,7 @@ async def get_operator_timeline(
             "delivery_state_timestamp"
         ),
         cast(literal(None), String(100)).label("ai_actor_display_name"),
+        cast(literal(None), Integer).label("follow_up_attempt"),
     ).where(InternalNote.conversation_id == conversation_id)
     timeline = union_all(message_items, note_items).subquery("operator_timeline")
     statement = (
@@ -1345,6 +1405,47 @@ async def get_operator_conversation(
 ) -> OperatorConversationDetail:
     open_escalation = _open_escalation_exists()
     effective_handoff_reason = _effective_handoff_reason()
+    follow_up_sent_count = (
+        select(func.count())
+        .select_from(RelanceCandidate)
+        .join(Lead, Lead.lead_id == RelanceCandidate.lead_id)
+        .where(
+            Lead.conversation_id == Conversation.conversation_id,
+            RelanceCandidate.confirmed_sent_at.is_not(None),
+        )
+        .correlate(Conversation)
+        .scalar_subquery()
+    )
+    follow_up_latest_inbound = (
+        select(Message.message_id)
+        .where(
+            Message.conversation_id == Conversation.conversation_id,
+            Message.direction == "inbound",
+        )
+        .order_by(Message.created_at.desc(), Message.timestamp.desc(), Message.message_id.desc())
+        .limit(1)
+        .correlate(Conversation)
+        .scalar_subquery()
+    )
+    follow_up_state = (
+        select(
+            RelanceCandidate.attempt_number.label("attempt"),
+            RelanceCandidate.source_message_id.label("source_message_id"),
+            RelanceCandidate.scheduled_at.label("scheduled_at"),
+            RelanceCandidate.cancelled_at.label("cancelled_at"),
+            RelanceCandidate.confirmed_sent_at.label("confirmed_sent_at"),
+            RelanceDelivery.status.label("delivery_status"),
+        )
+        .join(Lead, Lead.lead_id == RelanceCandidate.lead_id)
+        .outerjoin(
+            RelanceDelivery,
+            RelanceDelivery.candidate_id == RelanceCandidate.candidate_id,
+        )
+        .where(Lead.conversation_id == Conversation.conversation_id)
+        .order_by(RelanceCandidate.created_at.desc(), RelanceCandidate.attempt_number.desc())
+        .limit(1)
+        .lateral("operator_follow_up")
+    )
     statement = (
         select(
             Conversation.conversation_id,
@@ -1371,6 +1472,14 @@ async def get_operator_conversation(
                 "commercial_state"
             ),
             OperatorAccount.display_name.label("human_owner_display_name"),
+            follow_up_state.c.attempt.label("follow_up_attempt"),
+            follow_up_state.c.source_message_id.label("follow_up_source_message_id"),
+            follow_up_state.c.scheduled_at.label("follow_up_scheduled_at"),
+            follow_up_state.c.cancelled_at.label("follow_up_cancelled_at"),
+            follow_up_state.c.confirmed_sent_at.label("follow_up_confirmed_sent_at"),
+            follow_up_state.c.delivery_status.label("follow_up_delivery_status"),
+            follow_up_sent_count.label("follow_up_confirmed_sent_count"),
+            follow_up_latest_inbound.label("follow_up_latest_inbound_id"),
         )
         .join(Customer, Customer.phone_number == Conversation.customer_id)
         .outerjoin(
@@ -1378,6 +1487,7 @@ async def get_operator_conversation(
             OperatorAccount.account_id == Conversation.human_owner_account_id,
         )
         .outerjoin(Lead, Lead.conversation_id == Conversation.conversation_id)
+        .outerjoin(follow_up_state, true())
         .where(
             Conversation.conversation_id == conversation_id,
             _operator_access_predicate(principal),
@@ -1406,6 +1516,7 @@ async def get_operator_conversation(
         db,
         row.get("commercial_state"),
     )
+    follow_up = _operator_follow_up_summary(row)
     response.headers["Cache-Control"] = "no-store"
     return OperatorConversationDetail(
         conversation_id=row["conversation_id"],
@@ -1424,6 +1535,7 @@ async def get_operator_conversation(
         ),
         ownership=_ownership_from_row(row),
         commercial_context=commercial_context,
+        follow_up=follow_up,
     )
 
 

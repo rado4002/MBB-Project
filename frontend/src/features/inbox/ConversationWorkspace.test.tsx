@@ -153,6 +153,7 @@ describe('read-only conversation workspace', () => {
     expect(screen.queryByText('A'.repeat(100))).not.toBeInTheDocument()
     expect(screen.queryByText('+243990005678')).not.toBeInTheDocument()
     expect(screen.queryByText(firstId)).not.toBeInTheDocument()
+    expect(screen.queryByText('Follow-up')).not.toBeInTheDocument()
     expect(screen.queryByText(/city|consent|opt-out|raw context/i)).not.toBeInTheDocument()
     expect(screen.queryByText('Conversation control')).not.toBeInTheDocument()
     expect(within(screen.getByRole('group', { name: 'Conversation authority' }))
@@ -175,6 +176,133 @@ describe('read-only conversation workspace', () => {
     expect(await screen.findByText('Solar starter kit')).toBeInTheDocument()
     expect(screen.getByText('Loading messages…')).toBeInTheDocument()
     expect(await screen.findByText('Bonjour, je souhaite des informations.')).toBeInTheDocument()
+  })
+
+  it.each([
+    { language: 'french' as const, text: 'Bonjour, avez-vous encore des questions ?' },
+    { language: 'lingala' as const, text: 'Mbote, ozali na motuna mosusu ?' },
+    { language: 'swahili' as const, text: 'Habari, una swali lingine ?' },
+  ])('shows a sent follow-up in Context, Details, and its existing timeline message ($language)', async ({ language, text }) => {
+    server.use(
+      authenticated(),
+      http.get('/api/v1/operator/conversations/:conversationId', () =>
+        HttpResponse.json({
+          ...conversationDetailFixture(),
+          language,
+          follow_up: {
+            status: 'sent',
+            confirmed_sent_count: 1,
+            attempt_number: 1,
+            scheduled_at: null,
+            next_possible_at: '2026-08-05T12:30:00Z',
+            stop_reason: null,
+          },
+        }),
+      ),
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', () =>
+        HttpResponse.json({
+          items: [messageFixture('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', {
+            direction: 'outbound',
+            sender_type: 'unknown',
+            language,
+            delivery_state: 'sent',
+            text,
+            follow_up_attempt: 1,
+          })],
+          next_older_cursor: null,
+        }),
+      ),
+    )
+    const user = userEvent.setup()
+    renderApp(`/inbox/${firstId}`)
+
+    const followUp = await screen.findByText('Follow-up')
+    expect(followUp.parentElement).toHaveTextContent('1 of 2 sent')
+    const history = screen.getByRole('region', { name: 'Conversation timeline' })
+    expect(within(history).getAllByRole('article')).toHaveLength(1)
+    expect(within(history).getByText('Follow-up 1 of 2')).toBeInTheDocument()
+    expect(within(history).getByText(text)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Details' }))
+    expect(screen.getByRole('dialog', { name: 'Conversation details' })).toHaveTextContent('1 of 2 sent')
+    expect(screen.queryByText(/confirmed_sent_at|candidate_id|delivery_state enum/i)).not.toBeInTheDocument()
+  })
+
+  it('shows uncertain delivery as paused and hides Relance internals', async () => {
+    server.use(
+      authenticated(),
+      http.get('/api/v1/operator/conversations/:conversationId', () =>
+        HttpResponse.json({
+          ...conversationDetailFixture(),
+          follow_up: {
+            status: 'uncertain',
+            confirmed_sent_count: 0,
+            attempt_number: 1,
+            scheduled_at: null,
+            next_possible_at: null,
+            stop_reason: null,
+          },
+        }),
+      ),
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', () =>
+        HttpResponse.json({ items: [], next_older_cursor: null }),
+      ),
+    )
+    renderApp(`/inbox/${firstId}`)
+    const followUp = await screen.findByText('Follow-up')
+    expect(followUp.parentElement).toHaveTextContent('Delivery uncertain')
+    expect(followUp.parentElement).toHaveTextContent('Automatic follow-up paused')
+    expect(screen.queryByText('prepared')).not.toBeInTheDocument()
+  })
+
+  it('shows customer reply stop and terminal second-send state in Context', async () => {
+    server.use(
+      authenticated(),
+      http.get('/api/v1/operator/conversations/:conversationId', () =>
+        HttpResponse.json({
+          ...conversationDetailFixture(),
+          follow_up: {
+            status: 'stopped',
+            confirmed_sent_count: 1,
+            attempt_number: 1,
+            scheduled_at: null,
+            next_possible_at: null,
+            stop_reason: 'customer_replied',
+          },
+        }),
+      ),
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', () =>
+        HttpResponse.json({ items: [], next_older_cursor: null }),
+      ),
+    )
+    const stopped = renderApp(`/inbox/${firstId}`)
+    const stoppedFollowUp = await screen.findByText('Follow-up')
+    expect(stoppedFollowUp.parentElement).toHaveTextContent('Stopped · Customer replied')
+    stopped.unmount()
+
+    server.use(
+      authenticated(),
+      http.get('/api/v1/operator/conversations/:conversationId', () =>
+        HttpResponse.json({
+          ...conversationDetailFixture(),
+          follow_up: {
+            status: 'sent',
+            confirmed_sent_count: 2,
+            attempt_number: 2,
+            scheduled_at: null,
+            next_possible_at: null,
+            stop_reason: null,
+          },
+        }),
+      ),
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', () =>
+        HttpResponse.json({ items: [], next_older_cursor: null }),
+      ),
+    )
+    renderApp(`/inbox/${firstId}`)
+    const terminal = await screen.findByText('Follow-up')
+    expect(terminal.parentElement).toHaveTextContent('2 of 2 sent')
+    expect(terminal.parentElement).not.toHaveTextContent('Next follow-up possible')
   })
 
   it('renders chronological plain-text messages, authoritative actors, and local media placeholders', async () => {

@@ -75,6 +75,15 @@ export interface OperatorLeadSummary {
   product_interests: string[]
 }
 
+export interface OperatorFollowUpSummary {
+  status: 'planned' | 'sent' | 'stopped' | 'failed' | 'uncertain'
+  confirmed_sent_count: number
+  attempt_number: number
+  scheduled_at: string | null
+  next_possible_at: string | null
+  stop_reason: 'customer_replied' | null
+}
+
 export interface OperatorConversationDetail {
   conversation_id: string
   status: ConversationStatus
@@ -124,6 +133,7 @@ export interface OperatorConversationDetail {
       current_usd_price: string | null
     }>
   } | null
+  follow_up?: OperatorFollowUpSummary | null
 }
 
 export interface ConversationOwnership {
@@ -192,6 +202,7 @@ export interface OperatorInternalNoteItem {
 
 export interface OperatorTimelineMessageItem extends OperatorMessageItem {
   kind: 'message'
+  follow_up_attempt?: number | null
 }
 
 export type OperatorTimelineItem = OperatorTimelineMessageItem | OperatorInternalNoteItem

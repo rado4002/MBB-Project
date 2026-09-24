@@ -8,13 +8,14 @@ from typing import Any
 
 import pytest
 from fastapi import Response
-from sqlalchemy import insert, text, update
+from sqlalchemy import insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.api.browser_auth_deps import BrowserPrincipal, BrowserSessionContext
 from app.api.v1.operator_conversations import (
     get_operator_conversation,
     get_operator_message_history,
+    get_operator_timeline,
     list_operator_conversations,
 )
 from app.config import Settings
@@ -24,6 +25,8 @@ from app.models.escalation_ticket import EscalationTicket
 from app.models.lead import Lead
 from app.models.message import Message
 from app.models.operator_account import OperatorAccount
+from app.models.relance_candidate import RelanceCandidate
+from app.models.relance_delivery import RelanceDelivery
 from app.operator_identity.browser_auth import BrowserAuthState
 
 DATABASE_URL = os.environ.get("E1_TEST_DATABASE_URL")
@@ -256,6 +259,7 @@ async def test_realistic_query_counts_and_postgresql_plans() -> None:
                 assert detail.ownership.ai_execution_state == "paused"
                 assert detail.ownership.version == 2
                 assert detail.open_escalation.exists is True
+                assert detail.follow_up is None
                 assert len(counted.statements) == 1
                 detail_statement = counted.statements[0]
 
@@ -272,6 +276,82 @@ async def test_realistic_query_counts_and_postgresql_plans() -> None:
                 assert len(history.items) == 3
                 assert len(counted.statements) == 2
                 access_statement, history_statement = counted.statements
+
+                lead_id = await session.scalar(
+                    select(Lead.lead_id).where(Lead.conversation_id == conversation_ids[0])
+                )
+                source_message_id = await session.scalar(
+                    select(Message.message_id)
+                    .where(
+                        Message.conversation_id == conversation_ids[0],
+                        Message.direction == "inbound",
+                    )
+                    .order_by(Message.created_at.desc(), Message.timestamp.desc())
+                    .limit(1)
+                )
+                sent_at = datetime(2026, 8, 2, 12, tzinfo=timezone.utc)
+                outbound_message_id = uuid.uuid4()
+                candidate_id = uuid.uuid4()
+                session.add_all([
+                    Message(
+                        message_id=outbound_message_id,
+                        conversation_id=conversation_ids[0],
+                        timestamp=sent_at,
+                        direction="outbound",
+                        content="Bonjour, avez-vous encore des questions ?",
+                        content_type="text",
+                        language="french",
+                        delivery_state="sent",
+                        delivery_state_timestamp=sent_at,
+                    ),
+                    RelanceCandidate(
+                        candidate_id=candidate_id,
+                        lead_id=lead_id,
+                        source_message_id=source_message_id,
+                        attempt_number=1,
+                        scheduled_at=sent_at,
+                        confirmed_sent_at=sent_at,
+                    ),
+                    RelanceDelivery(
+                        candidate_id=candidate_id,
+                        outbound_message_id=outbound_message_id,
+                        status="sent",
+                        updated_at=sent_at,
+                    ),
+                ])
+                await session.flush()
+
+                counted.reset()
+                detail_with_follow_up = await get_operator_conversation(
+                    conversation_id=conversation_ids[0],
+                    response=Response(),
+                    principal=principal,
+                    db=counted,
+                )
+                assert detail_with_follow_up.follow_up is not None
+                assert detail_with_follow_up.follow_up.status == "sent"
+                assert detail_with_follow_up.follow_up.confirmed_sent_count == 1
+                assert detail_with_follow_up.follow_up.next_possible_at == (
+                    sent_at + timedelta(hours=72)
+                )
+                assert len(counted.statements) == 1
+
+                counted.reset()
+                timeline = await get_operator_timeline(
+                    conversation_id=conversation_ids[0],
+                    response=Response(),
+                    principal=principal,
+                    _message_principal=principal,
+                    _note_principal=principal,
+                    db=counted,
+                    limit=30,
+                    before=None,
+                )
+                relance_message = next(
+                    item for item in timeline.items
+                    if item.kind == "message" and item.message_id == outbound_message_id
+                )
+                assert relance_message.follow_up_attempt == 1
 
                 plans = {
                     "queue": _plan_summary(

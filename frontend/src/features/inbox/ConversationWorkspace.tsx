@@ -157,6 +157,32 @@ function messageContent(message: OperatorMessageItem) {
   )
 }
 
+function FollowUpContext({ detail }: { detail: OperatorConversationDetail }) {
+  const followUp = detail.follow_up
+  if (!followUp) return null
+  let description: ReactNode
+  if (followUp.status === 'planned') {
+    description = <>Planned{followUp.scheduled_at ? <> · <time dateTime={followUp.scheduled_at}>{formatTimestamp(followUp.scheduled_at)}</time></> : null}</>
+  } else if (followUp.status === 'sent') {
+    description = <>
+      {followUp.confirmed_sent_count} of 2 sent
+      {followUp.next_possible_at ? <> · Next follow-up possible <time dateTime={followUp.next_possible_at}>{formatTimestamp(followUp.next_possible_at)}</time></> : null}
+    </>
+  } else if (followUp.status === 'stopped') {
+    description = followUp.stop_reason === 'customer_replied' ? 'Stopped · Customer replied' : 'Stopped'
+  } else if (followUp.status === 'uncertain') {
+    description = <>Delivery uncertain<br />Automatic follow-up paused</>
+  } else {
+    description = 'Follow-up failed'
+  }
+  return (
+    <div className={`follow-up-context follow-up-context--${followUp.status}`}>
+      <strong>Follow-up</strong>
+      <p>{description}</p>
+    </div>
+  )
+}
+
 function ConversationHeader({
   detail,
   loading,
@@ -266,6 +292,7 @@ function ContextBody({
         {detail.open_escalation.exists ? <div><dt>Review</dt><dd>Open escalation ticket</dd></div> : null}
         {commercial?.current_goal ? <div><dt>Current goal</dt><dd>{commercial.current_goal}</dd></div> : null}
       </dl>
+      <FollowUpContext detail={detail} />
       {hasMoreContext ? (
         <details className="context-more">
           <summary>Voir plus de contexte</summary>
@@ -624,6 +651,9 @@ function MessageTimeline({
                     <article aria-label={`${actor} message`}>
                       {message.sender_type !== 'customer' && message.sender_type !== 'unknown' && message.sender_type !== 'system' ? (
                         <header><strong>{actor}</strong></header>
+                      ) : null}
+                      {message.follow_up_attempt ? (
+                        <p className="message-follow-up-attribution">Follow-up {message.follow_up_attempt} of 2</p>
                       ) : null}
                       {messageContent(message)}
                       <div className="message-meta">

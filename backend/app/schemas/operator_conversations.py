@@ -64,6 +64,15 @@ class OperatorLeadSummary(BaseModel):
     product_interests: list[str] = Field(default_factory=list, max_length=5)
 
 
+class OperatorFollowUpSummary(BaseModel):
+    status: Literal["planned", "sent", "stopped", "failed", "uncertain"]
+    confirmed_sent_count: int = Field(ge=0, le=2)
+    attempt_number: int = Field(ge=1, le=2)
+    scheduled_at: datetime | None = None
+    next_possible_at: datetime | None = None
+    stop_reason: Literal["customer_replied"] | None = None
+
+
 class OperatorCommercialConstraint(BaseModel):
     kind: Literal["budget", "portability", "timing", "compatibility", "preference"]
     value: str
@@ -121,6 +130,7 @@ class OperatorConversationDetail(BaseModel):
     open_escalation: OperatorOpenEscalation
     ownership: OperatorConversationOwnership
     commercial_context: OperatorCommercialContext | None = None
+    follow_up: OperatorFollowUpSummary | None = None
 
 
 class OperatorOwnershipTransitionRequest(BaseModel):
@@ -191,6 +201,7 @@ class OperatorInternalNoteItem(BaseModel):
 
 class OperatorTimelineMessageItem(OperatorMessageItem):
     kind: Literal["message"] = "message"
+    follow_up_attempt: int | None = Field(default=None, ge=1, le=2)
 
 
 OperatorTimelineItem = Annotated[
