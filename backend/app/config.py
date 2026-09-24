@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     relance_delay_1_hours: float = Field(
         default=24, gt=0, allow_inf_nan=False, validation_alias="RELANCE_DELAY_1"
     )  # hours
+    # Names and exact Meta locale codes must come from approved template records.
+    # Empty by default: a localized fallback text never authorizes delivery.
+    relance_template_french_name: str = ""
+    relance_template_french_locale: str = ""
+    relance_template_lingala_name: str = ""
+    relance_template_lingala_locale: str = ""
+    relance_template_swahili_name: str = ""
+    relance_template_swahili_locale: str = ""
     scheduled_tasks_enabled: bool = False  # safety gate for Celery beat schedules
     m1_maps_fanout_enabled: bool = True  # safety gate for M1 MAPS task submission
 

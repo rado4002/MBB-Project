@@ -10,6 +10,7 @@ from app.models.internal_note import InternalNote
 from app.models.lead import Lead
 from app.models.relance import Relance
 from app.models.relance_candidate import RelanceCandidate
+from app.models.whatsapp_relance_opt_in import WhatsAppRelanceOptIn
 from app.models.maps_tag import MapsTag
 from app.models.order import Order
 from app.models.order_draft import OrderDraft
@@ -40,6 +41,7 @@ __all__ = [
     "Lead",
     "Relance",
     "RelanceCandidate",
+    "WhatsAppRelanceOptIn",
     "MapsTag",
     "Order",
     "OrderDraft",
