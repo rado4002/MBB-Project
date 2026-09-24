@@ -88,3 +88,40 @@ class OfficialWebhookAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message_id, "")
         self.assertEqual(template_id, "")
         client_factory.assert_not_called()
+
+    async def test_official_template_uses_explicit_locale_offline(self):
+        adapter = whatsapp_official_adapter.WhatsAppOfficialAdapter()
+        payloads = []
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"messages": [{"id": "wamid.fake"}]}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def post(self, url, *, json, headers):
+                payloads.append(json)
+                return FakeResponse()
+
+        with (
+            patch.object(whatsapp_official_adapter.settings, "whatsapp_send_enabled", True),
+            patch.object(whatsapp_official_adapter.httpx, "AsyncClient", FakeClient),
+        ):
+            result = await adapter.send_template(
+                "+243990000000", "followup_ln", [], locale="ln",
+                idempotency_key="00000000-0000-4000-8000-000000000001",
+            )
+
+        self.assertEqual(result, "wamid.fake")
+        self.assertEqual(payloads[0]["template"]["language"]["code"], "ln")

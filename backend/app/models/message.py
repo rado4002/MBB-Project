@@ -26,8 +26,10 @@ class Message(Base):
         ),
         CheckConstraint(
             "(operator_author_account_id IS NULL AND author_display_name IS NULL "
-            "AND accepted_ownership_version IS NULL AND delivery_state IS NULL "
-            "AND delivery_state_timestamp IS NULL) OR "
+            "AND accepted_ownership_version IS NULL "
+            "AND ((delivery_state IS NULL AND delivery_state_timestamp IS NULL) "
+            "OR (direction = 'outbound' AND content_type = 'text' "
+            "AND delivery_state IS NOT NULL AND delivery_state_timestamp IS NOT NULL))) OR "
             "(operator_author_account_id IS NOT NULL "
             "AND char_length(btrim(author_display_name)) BETWEEN 1 AND 100 "
             "AND accepted_ownership_version > 0 "

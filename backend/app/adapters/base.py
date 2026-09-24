@@ -106,6 +106,7 @@ class BaseMessagingAdapter(ABC):
 
     @abstractmethod
     async def send_template(
-        self, phone: str, template_name: str, params: list[str]
+        self, phone: str, template_name: str, params: list[str], *,
+        locale: str = "fr", idempotency_key: str | None = None,
     ) -> str:
         """Send a pre-approved template message."""

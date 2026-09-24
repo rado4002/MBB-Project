@@ -123,10 +123,16 @@ class WhatsAppOfficialAdapter(BaseMessagingAdapter):
 
         return ""  # unreachable
 
-    async def send_template(self, phone: str, template_name: str, params: list[str]) -> str:
+    async def send_template(
+        self, phone: str, template_name: str, params: list[str], *,
+        locale: str = "fr", idempotency_key: str | None = None,
+    ) -> str:
         """
         Send a pre-approved Meta template message with positional parameters.
         """
+        # Cloud API does not provide a proven idempotent send contract for this
+        # key. Relance must remain offline until that transport gap is resolved.
+        del idempotency_key
         if not settings.whatsapp_send_enabled:
             log.warning(
                 "wa_official.template_skipped_safety_gate",
@@ -153,7 +159,7 @@ class WhatsAppOfficialAdapter(BaseMessagingAdapter):
             "type": "template",
             "template": {
                 "name": template_name,
-                "language": {"code": "fr"},
+                "language": {"code": locale},
                 "components": components,
             },
         }

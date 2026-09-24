@@ -146,12 +146,16 @@ class BaileysAdapter(BaseMessagingAdapter):
 
         return ""  # unreachable
 
-    async def send_template(self, phone: str, template_name: str, params: list[str]) -> str:
+    async def send_template(
+        self, phone: str, template_name: str, params: list[str], *,
+        locale: str = "fr", idempotency_key: str | None = None,
+    ) -> str:
         """
         Baileys doesn't support official templates — send as formatted text.
         Template parameters are injected in order.
         """
+        del locale
         text = template_name
         for i, p in enumerate(params, start=1):
             text = text.replace(f"{{{{{i}}}}}", p)
-        return await self.send_message(phone, text)
+        return await self.send_message(phone, text, idempotency_key=idempotency_key)
