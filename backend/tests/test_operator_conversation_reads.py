@@ -273,9 +273,74 @@ def _detail_row(conversation_id: uuid.UUID, now: datetime) -> dict[str, Any]:
         "follow_up_cancelled_at": None,
         "follow_up_confirmed_sent_at": None,
         "follow_up_delivery_status": None,
+        "follow_up_delivery_reason": None,
         "follow_up_confirmed_sent_count": None,
         "follow_up_latest_inbound_id": None,
+        "follow_up_currently_ready": False,
     }
+
+
+def test_follow_up_projection_never_infers_reply_reason_from_later_inbound() -> None:
+    from app.api.v1.operator_conversations import _operator_follow_up_summary
+
+    now = datetime.now(timezone.utc)
+    source_id, later_id = uuid.uuid4(), uuid.uuid4()
+    row = _detail_row(uuid.uuid4(), now)
+    row.update(
+        follow_up_attempt=1,
+        follow_up_source_message_id=source_id,
+        follow_up_latest_inbound_id=later_id,
+        follow_up_cancelled_at=now,
+        follow_up_confirmed_sent_count=0,
+    )
+    summary = _operator_follow_up_summary(row)
+    assert summary.status == "stopped"
+    assert summary.stop_reason is None
+
+    row["follow_up_cancelled_at"] = None
+    row["follow_up_confirmed_sent_at"] = now
+    row["follow_up_confirmed_sent_count"] = 1
+    row["follow_up_currently_ready"] = True
+    summary = _operator_follow_up_summary(row)
+    assert summary.status == "stopped"
+    assert summary.stop_reason is None
+    assert summary.next_possible_at is None
+
+    row["follow_up_cancelled_at"] = now
+    row["follow_up_confirmed_sent_at"] = None
+    row["follow_up_confirmed_sent_count"] = 0
+    row["follow_up_delivery_reason"] = "new_inbound"
+    assert _operator_follow_up_summary(row).stop_reason == "customer_replied"
+
+
+def test_follow_up_projection_only_shows_time_when_ready() -> None:
+    from app.api.v1.operator_conversations import _operator_follow_up_summary
+
+    now = datetime.now(timezone.utc)
+    source_id = uuid.uuid4()
+    row = _detail_row(uuid.uuid4(), now)
+    row.update(
+        follow_up_attempt=1,
+        follow_up_source_message_id=source_id,
+        follow_up_latest_inbound_id=source_id,
+        follow_up_confirmed_sent_count=0,
+    )
+    assert _operator_follow_up_summary(row).status == "waiting"
+    row["follow_up_currently_ready"] = True
+    summary = _operator_follow_up_summary(row)
+    assert summary.status == "planned"
+    assert summary.scheduled_at is None
+    row["follow_up_confirmed_sent_at"] = now
+    row["follow_up_confirmed_sent_count"] = 1
+    summary = _operator_follow_up_summary(row)
+    assert summary.status == "sent"
+    assert summary.next_possible_at == now + timedelta(hours=72)
+    row["follow_up_currently_ready"] = False
+    assert _operator_follow_up_summary(row).next_possible_at is None
+    row["follow_up_delivery_status"] = "uncertain"
+    summary = _operator_follow_up_summary(row)
+    assert summary.status == "uncertain"
+    assert summary.next_possible_at is None
 
 
 def _message_row(

@@ -65,7 +65,7 @@ class OperatorLeadSummary(BaseModel):
 
 
 class OperatorFollowUpSummary(BaseModel):
-    status: Literal["planned", "sent", "stopped", "failed", "uncertain"]
+    status: Literal["planned", "waiting", "sent", "stopped", "failed", "uncertain"]
     confirmed_sent_count: int = Field(ge=0, le=2)
     attempt_number: int = Field(ge=1, le=2)
     scheduled_at: datetime | None = None

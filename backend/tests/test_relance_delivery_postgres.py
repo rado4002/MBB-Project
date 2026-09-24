@@ -14,7 +14,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import Settings
 from app.api.browser_auth_deps import BrowserPrincipal, BrowserSessionContext
-from app.api.v1.operator_conversations import get_operator_conversation, get_operator_timeline
+from app.api.v1 import operator_conversations as operator_projection
+from app.api.v1.operator_conversations import (
+    get_operator_conversation, get_operator_message_history, get_operator_timeline,
+    list_operator_conversations,
+)
 from app.models.conversation import Conversation
 from app.models.customer import Customer
 from app.models.escalation_ticket import EscalationTicket
@@ -130,6 +134,25 @@ async def _outbound(factory):
         return (await session.scalars(select(Message).where(Message.direction == "outbound"))).all()
 
 
+def _principal(account):
+    return BrowserPrincipal(
+        account=account,
+        session=BrowserSessionContext(
+            raw_token="offline-test",
+            record=object(),
+            state=BrowserAuthState(
+                redis_client=object(),
+                settings=Settings(
+                    _env_file=None,
+                    browser_session_hmac_secret="s" * 32,
+                    browser_csrf_hmac_secret="c" * 32,
+                ),
+            ),
+        ),
+        capabilities=frozenset({"conversation.read", "message.read", "internal_note.read"}),
+    )
+
+
 @pytest.mark.asyncio
 async def test_confirmed_send_repeats_reuse_uuid_and_count_once(factory, monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: (_ for _ in ()).throw(
@@ -154,22 +177,10 @@ async def test_confirmed_send_repeats_reuse_uuid_and_count_once(factory, monkeyp
             RelanceCandidate.lead_id == lead_id,
             RelanceCandidate.confirmed_sent_at.is_not(None))) == 1
         account = await session.get(OperatorAccount, operator_id)
-        principal = BrowserPrincipal(
-            account=account,
-            session=BrowserSessionContext(
-                raw_token="offline-test",
-                record=object(),
-                state=BrowserAuthState(
-                    redis_client=object(),
-                    settings=Settings(
-                        _env_file=None,
-                        browser_session_hmac_secret="s" * 32,
-                        browser_csrf_hmac_secret="c" * 32,
-                    ),
-                ),
-            ),
-            capabilities=frozenset({"conversation.read", "message.read", "internal_note.read"}),
-        )
+        principal = _principal(account)
+        monkeypatch.setattr(operator_projection, "get_settings", lambda: _settings(
+            RELANCE_DELAY_2=72, relance_enabled=True, scheduled_tasks_enabled=True,
+        ))
         detail = await get_operator_conversation(
             conversation_id=conversation_id,
             response=Response(),
@@ -187,13 +198,56 @@ async def test_confirmed_send_repeats_reuse_uuid_and_count_once(factory, monkeyp
             _message_principal=principal,
             _note_principal=principal,
             db=session,
+            limit=30,
+            before=None,
         )
         relance_message = next(
             item for item in timeline.items
             if item.kind == "message" and item.message_id == rows[0].message_id
         )
         assert relance_message.follow_up_attempt == 1
+        assert relance_message.text is None
         assert sum(item.kind == "message" for item in timeline.items) == 2
+        history = await get_operator_message_history(
+            conversation_id=conversation_id, response=Response(), principal=principal,
+            _message_principal=principal, db=session, limit=30, before=None,
+        )
+        assert next(item for item in history.items if item.message_id == rows[0].message_id).text is None
+        queue = await list_operator_conversations(
+            response=Response(), principal=principal, db=session,
+            limit=25, cursor=None, conversation_status=None,
+            escalation_state=None, language=None,
+        )
+        assert queue.items[0].latest_message.preview == "Template content unavailable"
+
+
+@pytest.mark.asyncio
+async def test_prepared_relance_is_absent_from_operator_reads(factory):
+    now, _, conversation_id, _, _, operator_id, candidate_id = await _seed(factory)
+    state, reserved_id = await prepare_candidate_delivery(
+        factory, candidate_id=candidate_id, settings=_settings(), now=now,
+    )
+    assert state == "prepared"
+    async with factory() as session:
+        principal = _principal(await session.get(OperatorAccount, operator_id))
+        timeline = await get_operator_timeline(
+            conversation_id=conversation_id, response=Response(), principal=principal,
+            _message_principal=principal, _note_principal=principal, db=session,
+            limit=30, before=None,
+        )
+        assert all(item.message_id != reserved_id for item in timeline.items if item.kind == "message")
+        assert sum(item.kind == "message" for item in timeline.items) == 1
+        history = await get_operator_message_history(
+            conversation_id=conversation_id, response=Response(), principal=principal,
+            _message_principal=principal, db=session, limit=30, before=None,
+        )
+        assert all(item.message_id != reserved_id for item in history.items)
+        queue = await list_operator_conversations(
+            response=Response(), principal=principal, db=session,
+            limit=25, cursor=None, conversation_status=None,
+            escalation_state=None, language=None,
+        )
+        assert queue.items[0].latest_message.direction == "inbound"
 
 
 @pytest.mark.asyncio
@@ -460,7 +514,7 @@ async def test_customer_reply_after_first_send_stops_sequence(factory):
 
 @pytest.mark.asyncio
 async def test_reply_after_second_selection_cancels_before_dispatch(factory):
-    now, phone, _, _, lead_id, _, first_id = await _seed(factory)
+    now, phone, conversation_id, _, lead_id, operator_id, first_id = await _seed(factory)
     await deliver_candidate(factory, candidate_id=first_id, transport=FakeTransport(),
                             settings=_settings(), now=now)
     due = now + timedelta(hours=48)
@@ -480,11 +534,19 @@ async def test_reply_after_second_selection_cancels_before_dispatch(factory):
     ))[0] == "cancelled"
     assert fake.calls == [] and second.confirmed_sent_at is None
     assert (await _scan_at(factory, due + timedelta(days=5)))[1] == 0
+    async with factory() as session:
+        principal = _principal(await session.get(OperatorAccount, operator_id))
+        detail = await get_operator_conversation(
+            conversation_id=conversation_id, response=Response(),
+            principal=principal, db=session,
+        )
+        assert detail.follow_up.status == "stopped"
+        assert detail.follow_up.stop_reason is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["human", "ai_paused", "escalation", "opt_out", "dormant"])
-async def test_authority_change_after_first_send_suppresses_second(factory, change):
+async def test_authority_change_after_first_send_suppresses_second(factory, change, monkeypatch):
     now, phone, conversation_id, _, lead_id, operator_id, first_id = await _seed(factory)
     await deliver_candidate(factory, candidate_id=first_id, transport=FakeTransport(),
                             settings=_settings(), now=now)
@@ -511,6 +573,46 @@ async def test_authority_change_after_first_send_suppresses_second(factory, chan
         await session.commit()
     assert (await _scan_at(factory, now + timedelta(days=4)))[1] == 0
     assert len(await _attempts(factory, lead_id)) == 1
+    monkeypatch.setattr(operator_projection, "get_settings", lambda: _settings(
+        RELANCE_DELAY_2=72, relance_enabled=True, scheduled_tasks_enabled=True,
+    ))
+    async with factory() as session:
+        principal = _principal(await session.get(OperatorAccount, operator_id))
+        detail = await get_operator_conversation(
+            conversation_id=conversation_id, response=Response(),
+            principal=principal, db=session,
+        )
+        assert detail.follow_up.next_possible_at is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocker", ["consent", "template", "scheduler"])
+async def test_operator_next_time_requires_current_readiness(factory, blocker, monkeypatch):
+    now, _, conversation_id, _, _, operator_id, first_id = await _seed(factory)
+    assert (await deliver_candidate(
+        factory, candidate_id=first_id, transport=FakeTransport(),
+        settings=_settings(), now=now,
+    ))[0] == "sent"
+    settings = _settings(
+        RELANCE_DELAY_2=72, relance_enabled=True, scheduled_tasks_enabled=True,
+        **({"relance_template_french_name": ""} if blocker == "template" else {}),
+    )
+    if blocker == "scheduler":
+        settings.scheduled_tasks_enabled = False
+    if blocker == "consent":
+        async with factory() as session:
+            grant = await session.scalar(select(WhatsAppRelanceOptIn))
+            await session.delete(grant)
+            await session.commit()
+    monkeypatch.setattr(operator_projection, "get_settings", lambda: settings)
+    async with factory() as session:
+        principal = _principal(await session.get(OperatorAccount, operator_id))
+        detail = await get_operator_conversation(
+            conversation_id=conversation_id, response=Response(),
+            principal=principal, db=session,
+        )
+        assert detail.follow_up.status == "sent"
+        assert detail.follow_up.next_possible_at is None
 
 
 @pytest.mark.asyncio

@@ -331,9 +331,7 @@ async def test_realistic_query_counts_and_postgresql_plans() -> None:
                 assert detail_with_follow_up.follow_up is not None
                 assert detail_with_follow_up.follow_up.status == "sent"
                 assert detail_with_follow_up.follow_up.confirmed_sent_count == 1
-                assert detail_with_follow_up.follow_up.next_possible_at == (
-                    sent_at + timedelta(hours=72)
-                )
+                assert detail_with_follow_up.follow_up.next_possible_at is None
                 assert len(counted.statements) == 1
 
                 counted.reset()
@@ -352,6 +350,7 @@ async def test_realistic_query_counts_and_postgresql_plans() -> None:
                     if item.kind == "message" and item.message_id == outbound_message_id
                 )
                 assert relance_message.follow_up_attempt == 1
+                assert relance_message.text is None
 
                 plans = {
                     "queue": _plan_summary(

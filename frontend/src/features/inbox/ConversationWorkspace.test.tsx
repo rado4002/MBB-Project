@@ -179,10 +179,10 @@ describe('read-only conversation workspace', () => {
   })
 
   it.each([
-    { language: 'french' as const, text: 'Bonjour, avez-vous encore des questions ?' },
-    { language: 'lingala' as const, text: 'Mbote, ozali na motuna mosusu ?' },
-    { language: 'swahili' as const, text: 'Habari, una swali lingine ?' },
-  ])('shows a sent follow-up in Context, Details, and its existing timeline message ($language)', async ({ language, text }) => {
+    { language: 'french' as const },
+    { language: 'lingala' as const },
+    { language: 'swahili' as const },
+  ])('shows a sent follow-up without inventing template text ($language)', async ({ language }) => {
     server.use(
       authenticated(),
       http.get('/api/v1/operator/conversations/:conversationId', () =>
@@ -206,7 +206,7 @@ describe('read-only conversation workspace', () => {
             sender_type: 'unknown',
             language,
             delivery_state: 'sent',
-            text,
+            text: '[WhatsApp template: internal_name (fr)]',
             follow_up_attempt: 1,
           })],
           next_older_cursor: null,
@@ -221,7 +221,8 @@ describe('read-only conversation workspace', () => {
     const history = screen.getByRole('region', { name: 'Conversation timeline' })
     expect(within(history).getAllByRole('article')).toHaveLength(1)
     expect(within(history).getByText('Follow-up 1 of 2')).toBeInTheDocument()
-    expect(within(history).getByText(text)).toBeInTheDocument()
+    expect(within(history).getByText('Template content unavailable')).toBeInTheDocument()
+    expect(within(history).queryByText(/\[WhatsApp template:/)).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Details' }))
     expect(screen.getByRole('dialog', { name: 'Conversation details' })).toHaveTextContent('1 of 2 sent')
@@ -253,6 +254,37 @@ describe('read-only conversation workspace', () => {
     expect(followUp.parentElement).toHaveTextContent('Delivery uncertain')
     expect(followUp.parentElement).toHaveTextContent('Automatic follow-up paused')
     expect(screen.queryByText('prepared')).not.toBeInTheDocument()
+  })
+
+  it.each([
+    { status: 'waiting', label: 'Follow-up on hold' },
+    { status: 'planned', label: 'Follow-up possible' },
+    { status: 'stopped', label: 'Stopped' },
+  ] as const)('keeps candidate and stopped wording conservative ($status)', async ({ status, label }) => {
+    server.use(
+      authenticated(),
+      http.get('/api/v1/operator/conversations/:conversationId', () =>
+        HttpResponse.json({
+          ...conversationDetailFixture(),
+          follow_up: {
+            status,
+            confirmed_sent_count: 0,
+            attempt_number: 1,
+            scheduled_at: '2026-09-26T09:00:00Z',
+            next_possible_at: null,
+            stop_reason: null,
+          },
+        }),
+      ),
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', () =>
+        HttpResponse.json({ items: [], next_older_cursor: null }),
+      ),
+    )
+    renderApp(`/inbox/${firstId}`)
+    const followUp = await screen.findByText('Follow-up')
+    expect(followUp.parentElement).toHaveTextContent(label)
+    expect(followUp.parentElement).not.toHaveTextContent('Customer replied')
+    expect(followUp.parentElement).not.toHaveTextContent('26 Sep')
   })
 
   it('shows customer reply stop and terminal second-send state in Context', async () => {

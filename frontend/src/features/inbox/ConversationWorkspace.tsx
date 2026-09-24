@@ -162,7 +162,9 @@ function FollowUpContext({ detail }: { detail: OperatorConversationDetail }) {
   if (!followUp) return null
   let description: ReactNode
   if (followUp.status === 'planned') {
-    description = <>Planned{followUp.scheduled_at ? <> · <time dateTime={followUp.scheduled_at}>{formatTimestamp(followUp.scheduled_at)}</time></> : null}</>
+    description = 'Follow-up possible'
+  } else if (followUp.status === 'waiting') {
+    description = 'Follow-up on hold'
   } else if (followUp.status === 'sent') {
     description = <>
       {followUp.confirmed_sent_count} of 2 sent
@@ -655,7 +657,9 @@ function MessageTimeline({
                       {message.follow_up_attempt ? (
                         <p className="message-follow-up-attribution">Follow-up {message.follow_up_attempt} of 2</p>
                       ) : null}
-                      {messageContent(message)}
+                      {message.follow_up_attempt ? (
+                        <p className="message-text">Template content unavailable</p>
+                      ) : messageContent(message)}
                       <div className="message-meta">
                         <time dateTime={message.occurred_at}>{formatTimestamp(message.occurred_at)}</time>
                         {delivery && message.delivery_state !== 'sent' ? (

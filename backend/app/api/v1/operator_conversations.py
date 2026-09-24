@@ -24,6 +24,7 @@ from sqlalchemy import (
     exists,
     func,
     literal,
+    or_,
     select,
     true,
     tuple_,
@@ -59,6 +60,8 @@ from app.models.message import Message
 from app.models.operator_account import OperatorAccount
 from app.models.relance_candidate import RelanceCandidate
 from app.models.relance_delivery import RelanceDelivery
+from app.models.whatsapp_relance_opt_in import WhatsAppRelanceOptIn
+from app.modules.m6_relance.readiness import _configured_template
 from app.modules.m4_conversation.ownership import (
     ConversationNotFound as OwnershipConversationNotFound,
     IdempotencyConflict as OwnershipIdempotencyConflict,
@@ -502,7 +505,7 @@ def _operator_message_item(
     occurred_at: datetime,
     direction: str,
     content_type: str,
-    content: str,
+    content: str | None,
     language: str,
     operator_author_account_id: UUID | None,
     author_display_name: str | None,
@@ -610,6 +613,7 @@ def _operator_follow_up_summary(row: Any) -> OperatorFollowUpSummary | None:
     sent_count = row["follow_up_confirmed_sent_count"] or 0
     latest_inbound_id = row["follow_up_latest_inbound_id"]
     delivery_status = row["follow_up_delivery_status"]
+    currently_ready = row["follow_up_currently_ready"] is True
     status_value: str
     stop_reason = None
     if delivery_status == "uncertain":
@@ -618,19 +622,20 @@ def _operator_follow_up_summary(row: Any) -> OperatorFollowUpSummary | None:
         status_value = "failed"
     elif row["follow_up_cancelled_at"] is not None:
         status_value = "stopped"
-        if latest_inbound_id is not None and latest_inbound_id != row["follow_up_source_message_id"]:
+        if row["follow_up_delivery_reason"] == "new_inbound":
             stop_reason = "customer_replied"
     elif row["follow_up_confirmed_sent_at"] is not None:
         if sent_count < 2 and latest_inbound_id != row["follow_up_source_message_id"]:
             status_value = "stopped"
-            stop_reason = "customer_replied"
         else:
             status_value = "sent"
+    elif latest_inbound_id != row["follow_up_source_message_id"]:
+        status_value = "stopped"
     else:
-        status_value = "planned"
+        status_value = "planned" if currently_ready else "waiting"
 
     next_possible_at = None
-    if status_value == "sent" and row["follow_up_attempt"] == 1:
+    if status_value == "sent" and row["follow_up_attempt"] == 1 and currently_ready:
         next_possible_at = row["follow_up_confirmed_sent_at"] + timedelta(
             hours=get_settings().relance_delay_2_hours
         )
@@ -638,7 +643,8 @@ def _operator_follow_up_summary(row: Any) -> OperatorFollowUpSummary | None:
         status=status_value,
         confirmed_sent_count=sent_count,
         attempt_number=row["follow_up_attempt"],
-        scheduled_at=row["follow_up_scheduled_at"] if status_value == "planned" else None,
+        # Candidate scheduled_at is an earliest allowed time, not a booked dispatch.
+        scheduled_at=None,
         next_possible_at=next_possible_at,
         stop_reason=stop_reason,
     )
@@ -743,12 +749,24 @@ async def list_operator_conversations(
 ) -> OperatorConversationQueueResponse:
     latest_message = (
         select(
-            Message.content.label("latest_content"),
+            case(
+                (RelanceDelivery.candidate_id.is_not(None), literal("Template content unavailable")),
+                else_=Message.content,
+            ).label("latest_content"),
             Message.content_type.label("latest_content_type"),
             Message.direction.label("latest_direction"),
             Message.timestamp.label("latest_occurred_at"),
         )
-        .where(Message.conversation_id == Conversation.conversation_id)
+        .outerjoin(
+            RelanceDelivery, RelanceDelivery.outbound_message_id == Message.message_id,
+        )
+        .where(
+            Message.conversation_id == Conversation.conversation_id,
+            or_(
+                RelanceDelivery.candidate_id.is_(None),
+                RelanceDelivery.status == "sent",
+            ),
+        )
         .order_by(Message.timestamp.desc(), Message.message_id.desc())
         .limit(1)
         .lateral("latest_message")
@@ -1295,6 +1313,7 @@ async def get_operator_timeline(
         )
 
     ai_actor_display_name = _ai_actor_display_name()
+    visible_relance_statuses = ("sent", "failed", "uncertain")
     follow_up_attempt = (
         select(RelanceCandidate.attempt_number)
         .join(
@@ -1312,7 +1331,10 @@ async def get_operator_timeline(
         Message.timestamp.label("occurred_at"),
         Message.direction.label("direction"),
         Message.content_type.label("content_type"),
-        Message.content.label("content"),
+        case(
+            (RelanceDelivery.candidate_id.is_not(None), cast(literal(None), String)),
+            else_=Message.content,
+        ).label("content"),
         Message.language.label("language"),
         Message.operator_author_account_id.label("author_account_id"),
         Message.author_display_name.label("author_display_name"),
@@ -1320,10 +1342,16 @@ async def get_operator_timeline(
         Message.delivery_state_timestamp.label("delivery_state_timestamp"),
         ai_actor_display_name.label("ai_actor_display_name"),
         follow_up_attempt.label("follow_up_attempt"),
+    ).outerjoin(
+        RelanceDelivery, RelanceDelivery.outbound_message_id == Message.message_id,
     ).where(
         Message.conversation_id == conversation_id,
         (Message.operator_author_account_id.is_(None))
         | (Message.delivery_state.is_not(None)),
+        or_(
+            RelanceDelivery.candidate_id.is_(None),
+            RelanceDelivery.status.in_(visible_relance_statuses),
+        ),
     )
     note_items = select(
         literal("internal_note").label("kind"),
@@ -1403,8 +1431,49 @@ async def get_operator_conversation(
     ],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> OperatorConversationDetail:
+    relance_settings = get_settings()
     open_escalation = _open_escalation_exists()
     effective_handoff_reason = _effective_handoff_reason()
+    latest_opt_in_at = (
+        select(WhatsAppRelanceOptIn.granted_at)
+        .where(WhatsAppRelanceOptIn.customer_id == Customer.phone_number)
+        .order_by(
+            WhatsAppRelanceOptIn.granted_at.desc(),
+            WhatsAppRelanceOptIn.opt_in_id.desc(),
+        )
+        .limit(1)
+        .correlate(Customer)
+        .scalar_subquery()
+    )
+    configured_language = Conversation.language_detected.in_(
+        tuple(
+            language for language in ("french", "lingala", "swahili")
+            if _configured_template(relance_settings, language) is not None
+        )
+    )
+    unresolved_relance = exists(
+        select(RelanceDelivery.candidate_id)
+        .join(RelanceCandidate, RelanceDelivery.candidate_id == RelanceCandidate.candidate_id)
+        .join(Lead, Lead.lead_id == RelanceCandidate.lead_id)
+        .where(
+            Lead.conversation_id == Conversation.conversation_id,
+            RelanceDelivery.status == "uncertain",
+        )
+        .correlate(Conversation)
+    )
+    follow_up_currently_ready = and_(
+        relance_settings.relance_enabled,
+        relance_settings.scheduled_tasks_enabled,
+        Customer.opt_out_flag.is_(False),
+        latest_opt_in_at.is_not(None),
+        or_(Customer.opt_out_at.is_(None), latest_opt_in_at > Customer.opt_out_at),
+        Conversation.owner_type == "ai",
+        Conversation.ai_execution_state == "eligible",
+        Conversation.status.in_(("active", "qualifying", "nurturing")),
+        ~open_escalation,
+        ~unresolved_relance,
+        configured_language,
+    )
     follow_up_sent_count = (
         select(func.count())
         .select_from(RelanceCandidate)
@@ -1435,6 +1504,7 @@ async def get_operator_conversation(
             RelanceCandidate.cancelled_at.label("cancelled_at"),
             RelanceCandidate.confirmed_sent_at.label("confirmed_sent_at"),
             RelanceDelivery.status.label("delivery_status"),
+            RelanceDelivery.reason.label("delivery_reason"),
         )
         .join(Lead, Lead.lead_id == RelanceCandidate.lead_id)
         .outerjoin(
@@ -1478,8 +1548,10 @@ async def get_operator_conversation(
             follow_up_state.c.cancelled_at.label("follow_up_cancelled_at"),
             follow_up_state.c.confirmed_sent_at.label("follow_up_confirmed_sent_at"),
             follow_up_state.c.delivery_status.label("follow_up_delivery_status"),
+            follow_up_state.c.delivery_reason.label("follow_up_delivery_reason"),
             follow_up_sent_count.label("follow_up_confirmed_sent_count"),
             follow_up_latest_inbound.label("follow_up_latest_inbound_id"),
+            follow_up_currently_ready.label("follow_up_currently_ready"),
         )
         .join(Customer, Customer.phone_number == Conversation.customer_id)
         .outerjoin(
@@ -1578,7 +1650,10 @@ async def get_operator_message_history(
             Message.timestamp.label("occurred_at"),
             Message.direction,
             Message.content_type,
-            Message.content,
+            case(
+                (RelanceDelivery.candidate_id.is_not(None), cast(literal(None), String)),
+                else_=Message.content,
+            ).label("content"),
             Message.language,
             Message.operator_author_account_id,
             Message.author_display_name,
@@ -1586,11 +1661,18 @@ async def get_operator_message_history(
             Message.delivery_state_timestamp,
             ai_actor_display_name.label("ai_actor_display_name"),
         )
+        .outerjoin(
+            RelanceDelivery, RelanceDelivery.outbound_message_id == Message.message_id,
+        )
         .where(Message.conversation_id == conversation_id)
         .where(
             (Message.operator_author_account_id.is_(None))
             | (Message.delivery_state.is_not(None))
         )
+        .where(or_(
+            RelanceDelivery.candidate_id.is_(None),
+            RelanceDelivery.status.in_(("sent", "failed", "uncertain")),
+        ))
         .order_by(Message.timestamp.desc(), Message.message_id.desc())
         .limit(limit + 1)
     )

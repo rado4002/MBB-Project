@@ -76,7 +76,7 @@ export interface OperatorLeadSummary {
 }
 
 export interface OperatorFollowUpSummary {
-  status: 'planned' | 'sent' | 'stopped' | 'failed' | 'uncertain'
+  status: 'planned' | 'waiting' | 'sent' | 'stopped' | 'failed' | 'uncertain'
   confirmed_sent_count: number
   attempt_number: number
   scheduled_at: string | null
