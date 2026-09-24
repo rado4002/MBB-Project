@@ -240,6 +240,14 @@ async def process_inbound(
         conversation_id=conversation.conversation_id,
         ownership_version=conversation.ownership_version,
     )
+    from app.modules.m6_relance.candidates import cancel_active_candidates
+
+    await cancel_active_candidates(
+        session,
+        conversation_id=conversation.conversation_id,
+        opted_out_customer_id=customer_phone if inbound_is_opted_out else None,
+        now=now,
+    )
 
     # ── 6. Voice-note flag ────────────────────────────────────────────────────
     is_voice = content_type == "voice_note"

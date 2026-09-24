@@ -14,6 +14,7 @@ import app.adapters as adapters
 from app.api.v1 import relances as relance_api
 from app.i18n import messages as i18n
 from app.modules.m6_relance import hooks
+from app.modules.m6_relance import candidates as relance_candidates
 from app.modules.m6_relance import service as relance_service
 from app.schemas.common import Language
 from app.tasks import relance as relance_tasks
@@ -86,7 +87,7 @@ async def test_relance_service_preserves_non_ai_scheduling(monkeypatch: pytest.M
 
 @pytest.mark.parametrize(
     "runtime_module",
-    [relance_api, relance_tasks, relance_service, hooks],
+    [relance_api, relance_tasks, relance_service, hooks, relance_candidates],
 )
 def test_relance_runtime_chain_contains_no_provider_execution(runtime_module) -> None:
     source = inspect.getsource(runtime_module)

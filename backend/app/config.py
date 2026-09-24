@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     crm_send_enabled: bool = False  # safety gate for CRM external writes
     payment_send_enabled: bool = False  # safety gate for payment provider calls
     relance_enabled: bool = False  # safety gate for relance scheduling/sends
+    relance_delay_1_hours: float = Field(
+        default=24, gt=0, allow_inf_nan=False, validation_alias="RELANCE_DELAY_1"
+    )  # hours
     scheduled_tasks_enabled: bool = False  # safety gate for Celery beat schedules
     m1_maps_fanout_enabled: bool = True  # safety gate for M1 MAPS task submission
 

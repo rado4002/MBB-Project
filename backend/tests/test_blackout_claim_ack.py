@@ -296,17 +296,8 @@ class ScheduleAndObsoleteConsumerTests(unittest.TestCase):
         midnight = datetime(2026, 7, 27, tzinfo=ZoneInfo("Africa/Kinshasa"))
         self.assertEqual(midnight.astimezone(timezone.utc).hour, 23)
 
-    def test_relance_scanner_preserves_eta_delivery_flow(self):
-        lead = SimpleNamespace(lead_id=uuid.uuid4(), conversation_id=uuid.uuid4())
-        conversation = SimpleNamespace()
-        scheduled = SimpleNamespace(
-            relance_id=uuid.uuid4(),
-            scheduled_at=datetime(2026, 7, 27, 8, tzinfo=timezone.utc),
-        )
+    def test_relance_scanner_persists_candidates_without_delivery(self):
         session = AsyncMock()
-        session.execute.return_value = SimpleNamespace(
-            scalar_one_or_none=Mock(return_value=conversation)
-        )
         session_context = AsyncMock()
         session_context.__aenter__.return_value = session
 
@@ -314,13 +305,8 @@ class ScheduleAndObsoleteConsumerTests(unittest.TestCase):
             patch.object(relance, "AsyncSessionLocal", return_value=session_context),
             patch.object(
                 relance,
-                "find_eligible_leads",
-                new=AsyncMock(return_value=[lead]),
-            ),
-            patch.object(
-                relance,
-                "create_and_schedule_relance",
-                new=AsyncMock(return_value=scheduled),
+                "create_candidates",
+                new=AsyncMock(return_value=(1, 1)),
             ),
             patch.object(relance.send_relance, "apply_async") as send,
         ):
@@ -328,10 +314,8 @@ class ScheduleAndObsoleteConsumerTests(unittest.TestCase):
 
         self.assertEqual(result["eligible_count"], 1)
         self.assertEqual(result["scheduled_count"], 1)
-        send.assert_called_once_with(
-            args=[str(scheduled.relance_id)],
-            eta=scheduled.scheduled_at,
-        )
+        self.assertEqual(result["candidate_count"], 1)
+        send.assert_not_called()
         session.commit.assert_awaited_once()
 
     def test_obsolete_conversion_consumer_has_no_queue_or_publication_effect(self):
