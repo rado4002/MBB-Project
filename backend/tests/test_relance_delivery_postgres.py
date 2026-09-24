@@ -60,12 +60,16 @@ class FakeTransport:
         return self.result
 
 
-def _settings():
-    return Settings(
-        _env_file=None,
+def _settings(**overrides):
+    values = dict(
+        RELANCE_DELAY_2=48,
         relance_template_french_name="followup_fr", relance_template_french_locale="fr",
         relance_template_lingala_name="followup_ln", relance_template_lingala_locale="ln",
         relance_template_swahili_name="followup_sw", relance_template_swahili_locale="sw",
+    )
+    values.update(overrides)
+    return Settings(
+        _env_file=None, **values,
     )
 
 
@@ -141,7 +145,7 @@ async def test_confirmed_send_repeats_reuse_uuid_and_count_once(factory, monkeyp
         assert await session.scalar(select(func.count()).select_from(RelanceCandidate).where(
             RelanceCandidate.lead_id == lead_id,
             RelanceCandidate.confirmed_sent_at.is_not(None))) == 1
-        # Candidate scanning's later-attempt cadence is outside V2-E.
+        # A confirmed send is the only evidence that can start attempt 2's clock.
 
 
 @pytest.mark.asyncio
@@ -322,3 +326,291 @@ async def test_explicit_locale_and_message_language(factory, language, name, loc
                                     settings=_settings(), now=now))[0] == "sent"
     assert fake.calls[0][1:4] == (name, [], locale)
     assert (await _outbound(factory))[0].language == language
+
+
+async def _scan_at(factory, at, settings=None):
+    settings = settings or _settings()
+    async with factory() as session:
+        result = await create_candidates(
+            session, delay_hours=settings.relance_delay_1_hours,
+            settings=settings, now=at,
+        )
+        await session.commit()
+        return result
+
+
+async def _attempts(factory, lead_id):
+    async with factory() as session:
+        return (await session.scalars(
+            select(RelanceCandidate).where(RelanceCandidate.lead_id == lead_id)
+            .order_by(RelanceCandidate.attempt_number)
+        )).all()
+
+
+@pytest.mark.asyncio
+async def test_second_attempt_waits_from_confirmed_send_and_stops_after_two(factory):
+    now, _, _, _, lead_id, _, first_id = await _seed(factory)
+    fake = FakeTransport()
+    assert (await deliver_candidate(factory, candidate_id=first_id, transport=fake,
+                                    settings=_settings(), now=now))[0] == "sent"
+    assert (await _scan_at(factory, now + timedelta(hours=47)))[1] == 0
+    assert (await _scan_at(factory, now + timedelta(hours=48)))[1] == 1
+    rows = await _attempts(factory, lead_id)
+    assert [row.attempt_number for row in rows] == [1, 2]
+    assert rows[1].source_message_id == rows[0].source_message_id
+    assert (await _scan_at(factory, now + timedelta(hours=72)))[1] == 0
+    second = await deliver_candidate(
+        factory, candidate_id=rows[1].candidate_id, transport=fake,
+        settings=_settings(), now=now + timedelta(hours=48),
+    )
+    assert second[0] == "sent" and len(fake.calls) == 2
+    assert len(await _outbound(factory)) == 2
+    assert (await _scan_at(factory, now + timedelta(days=30)))[1] == 0
+    assert len(await _attempts(factory, lead_id)) == 2
+
+
+@pytest.mark.asyncio
+async def test_second_delay_is_configurable_and_rechecked_before_dispatch(factory):
+    now, _, _, _, lead_id, _, first_id = await _seed(factory)
+    fake = FakeTransport()
+    await deliver_candidate(factory, candidate_id=first_id, transport=fake,
+                            settings=_settings(), now=now)
+    longer = _settings(RELANCE_DELAY_2=72)
+    assert (await _scan_at(factory, now + timedelta(hours=48), longer))[1] == 0
+    assert (await _scan_at(factory, now + timedelta(hours=72), longer))[1] == 1
+    second = (await _attempts(factory, lead_id))[1]
+    # A policy change after selection is applied again at delivery.
+    latest_policy = _settings(RELANCE_DELAY_2=96)
+    assert (await deliver_candidate(
+        factory, candidate_id=second.candidate_id, transport=fake,
+        settings=latest_policy, now=now + timedelta(hours=72),
+    ))[0] == "blocked"
+    assert len(fake.calls) == 1
+    assert (await deliver_candidate(
+        factory, candidate_id=second.candidate_id, transport=fake,
+        settings=latest_policy, now=now + timedelta(hours=96),
+    ))[0] == "sent"
+    assert len(fake.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_customer_reply_after_first_send_stops_sequence(factory):
+    now, phone, _, _, lead_id, _, first_id = await _seed(factory)
+    fake = FakeTransport()
+    await deliver_candidate(factory, candidate_id=first_id, transport=fake,
+                            settings=_settings(), now=now)
+    async with factory() as session:
+        await process_inbound(
+            session=session, customer_phone=phone, content="I am back",
+            content_type="text", timestamp=now + timedelta(hours=1),
+            whatsapp_message_id=f"reply-{uuid.uuid4()}", message_id=uuid.uuid4(),
+        )
+        await session.commit()
+    assert (await _scan_at(factory, now + timedelta(days=5)))[1] == 0
+    assert len(await _attempts(factory, lead_id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_reply_after_second_selection_cancels_before_dispatch(factory):
+    now, phone, _, _, lead_id, _, first_id = await _seed(factory)
+    await deliver_candidate(factory, candidate_id=first_id, transport=FakeTransport(),
+                            settings=_settings(), now=now)
+    due = now + timedelta(hours=48)
+    assert (await _scan_at(factory, due))[1] == 1
+    second = (await _attempts(factory, lead_id))[1]
+    async with factory() as session:
+        await process_inbound(
+            session=session, customer_phone=phone, content="I am back",
+            content_type="text", timestamp=due + timedelta(minutes=1),
+            whatsapp_message_id=f"second-reply-{uuid.uuid4()}", message_id=uuid.uuid4(),
+        )
+        await session.commit()
+    fake = FakeTransport()
+    assert (await deliver_candidate(
+        factory, candidate_id=second.candidate_id, transport=fake,
+        settings=_settings(), now=due + timedelta(minutes=1),
+    ))[0] == "cancelled"
+    assert fake.calls == [] and second.confirmed_sent_at is None
+    assert (await _scan_at(factory, due + timedelta(days=5)))[1] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["human", "ai_paused", "escalation", "opt_out", "dormant"])
+async def test_authority_change_after_first_send_suppresses_second(factory, change):
+    now, phone, conversation_id, _, lead_id, operator_id, first_id = await _seed(factory)
+    await deliver_candidate(factory, candidate_id=first_id, transport=FakeTransport(),
+                            settings=_settings(), now=now)
+    async with factory() as session:
+        conversation = await session.get(Conversation, conversation_id)
+        if change == "human":
+            conversation.owner_type = "human"
+            conversation.human_owner_account_id = operator_id
+            conversation.ai_execution_state = "paused"
+        elif change == "ai_paused":
+            conversation.ai_execution_state = "paused"
+        elif change == "escalation":
+            session.add(EscalationTicket(
+                conversation_id=conversation_id, customer_id=phone,
+                reason="complex_complaint", priority="medium", status="open",
+                transcript_snapshot=[],
+            ))
+        elif change == "opt_out":
+            customer = await session.get(Customer, phone)
+            customer.opt_out_flag = True
+            customer.opt_out_at = now + timedelta(hours=1)
+        else:
+            conversation.status = "dormant"
+        await session.commit()
+    assert (await _scan_at(factory, now + timedelta(days=4)))[1] == 0
+    assert len(await _attempts(factory, lead_id)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["consent", "template"])
+async def test_second_readiness_blocks_selection_and_delivery(factory, change):
+    now, _, _, _, lead_id, _, first_id = await _seed(factory)
+    await deliver_candidate(factory, candidate_id=first_id, transport=FakeTransport(),
+                            settings=_settings(), now=now)
+    due = now + timedelta(hours=48)
+    assert (await _scan_at(factory, due))[1] == 1
+    second = (await _attempts(factory, lead_id))[1]
+    if change == "consent":
+        async with factory() as session:
+            grant = await session.scalar(select(WhatsAppRelanceOptIn))
+            await session.delete(grant)
+            await session.commit()
+        settings = _settings()
+    else:
+        settings = _settings(relance_template_french_name="")
+    fake = FakeTransport()
+    assert (await deliver_candidate(factory, candidate_id=second.candidate_id,
+                                    transport=fake, settings=settings, now=due))[0] == "cancelled"
+    assert fake.calls == []
+    assert len(await _outbound(factory)) == 1
+    assert (await _scan_at(factory, due + timedelta(hours=1), settings))[1] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["consent", "template"])
+async def test_second_candidate_requires_current_readiness(factory, change):
+    now, _, _, _, lead_id, _, first_id = await _seed(factory)
+    await deliver_candidate(factory, candidate_id=first_id, transport=FakeTransport(),
+                            settings=_settings(), now=now)
+    settings = _settings()
+    if change == "consent":
+        async with factory() as session:
+            grant = await session.scalar(select(WhatsAppRelanceOptIn))
+            await session.delete(grant)
+            await session.commit()
+    else:
+        settings = _settings(relance_template_french_name="")
+    assert (await _scan_at(factory, now + timedelta(hours=48), settings))[1] == 0
+    assert len(await _attempts(factory, lead_id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_dormant_after_second_selection_blocks_dispatch(factory):
+    now, _, conversation_id, _, lead_id, _, first_id = await _seed(factory)
+    await deliver_candidate(factory, candidate_id=first_id, transport=FakeTransport(),
+                            settings=_settings(), now=now)
+    due = now + timedelta(hours=48)
+    assert (await _scan_at(factory, due))[1] == 1
+    second = (await _attempts(factory, lead_id))[1]
+    async with factory() as session:
+        conversation = await session.get(Conversation, conversation_id)
+        conversation.status = "dormant"
+        await session.commit()
+    fake = FakeTransport()
+    assert (await deliver_candidate(factory, candidate_id=second.candidate_id,
+                                    transport=fake, settings=_settings(), now=due))[0] == "cancelled"
+    assert fake.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["failed", "cancelled", "uncertain", "prepared"])
+async def test_unconfirmed_first_never_advances_to_second(factory, outcome):
+    now, _, conversation_id, _, lead_id, operator_id, first_id = await _seed(factory)
+    if outcome == "prepared":
+        assert (await prepare_candidate_delivery(
+            factory, candidate_id=first_id, settings=_settings(), now=now,
+        ))[0] == "prepared"
+    elif outcome == "cancelled":
+        _, message_id = await prepare_candidate_delivery(
+            factory, candidate_id=first_id, settings=_settings(), now=now,
+        )
+        async with factory() as session:
+            conversation = await session.get(Conversation, conversation_id)
+            conversation.owner_type = "human"
+            conversation.human_owner_account_id = operator_id
+            conversation.ai_execution_state = "paused"
+            await session.commit()
+        assert await dispatch_prepared_delivery(
+            factory, candidate_id=first_id, outbound_message_id=message_id,
+            transport=FakeTransport(), settings=_settings(), now=now,
+        ) == "cancelled"
+    else:
+        result = (DefiniteDeliveryFailure() if outcome == "failed"
+                  else RuntimeError("ambiguous"))
+        assert (await deliver_candidate(
+            factory, candidate_id=first_id, transport=FakeTransport(result),
+            settings=_settings(), now=now,
+        ))[0] == outcome
+    assert (await _scan_at(factory, now + timedelta(days=7)))[1] == 0
+    assert [row.attempt_number for row in await _attempts(factory, lead_id)] == [1]
+    async with factory() as session:
+        assert (await session.get(RelanceCandidate, first_id)).confirmed_sent_at is None
+        assert (await session.get(RelanceDelivery, first_id)).status == outcome
+
+
+@pytest.mark.asyncio
+async def test_uncertain_first_remains_blocked_even_after_new_inbound(factory):
+    now, phone, _, _, lead_id, _, first_id = await _seed(factory)
+    assert (await deliver_candidate(
+        factory, candidate_id=first_id, transport=FakeTransport(RuntimeError("timeout")),
+        settings=_settings(), now=now,
+    ))[0] == "uncertain"
+    async with factory() as session:
+        await process_inbound(
+            session=session, customer_phone=phone, content="I am back",
+            content_type="text", timestamp=now + timedelta(hours=1),
+            whatsapp_message_id=f"uncertain-reply-{uuid.uuid4()}", message_id=uuid.uuid4(),
+        )
+        await session.commit()
+    assert (await _scan_at(factory, now + timedelta(days=5)))[1] == 0
+    assert len(await _attempts(factory, lead_id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_second_scans_and_delivery_share_one_attempt(factory):
+    now, _, _, _, lead_id, _, first_id = await _seed(factory)
+    fake = FakeTransport()
+    await deliver_candidate(factory, candidate_id=first_id, transport=fake,
+                            settings=_settings(), now=now)
+    due = now + timedelta(hours=48)
+    results = await asyncio.gather(*(_scan_at(factory, due) for _ in range(3)))
+    assert sum(result[1] for result in results) == 1
+    second = (await _attempts(factory, lead_id))[1]
+    deliveries = await asyncio.gather(*(deliver_candidate(
+        factory, candidate_id=second.candidate_id, transport=fake,
+        settings=_settings(), now=due,
+    ) for _ in range(3)))
+    assert len(await _attempts(factory, lead_id)) == 2
+    assert len(await _outbound(factory)) == len(fake.calls) == 2
+    assert len({result[1] for result in deliveries}) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("language,locale", [
+    ("french", "fr"), ("lingala", "ln"), ("swahili", "sw"),
+])
+async def test_second_attempt_uses_existing_localized_delivery(factory, language, locale):
+    now, _, _, _, lead_id, _, first_id = await _seed(factory, language=language)
+    fake = FakeTransport()
+    await deliver_candidate(factory, candidate_id=first_id, transport=fake,
+                            settings=_settings(), now=now)
+    due = now + timedelta(hours=48)
+    assert (await _scan_at(factory, due))[1] == 1
+    second = (await _attempts(factory, lead_id))[1]
+    assert (await deliver_candidate(factory, candidate_id=second.candidate_id,
+                                    transport=fake, settings=_settings(), now=due))[0] == "sent"
+    assert [call[3] for call in fake.calls] == [locale, locale]

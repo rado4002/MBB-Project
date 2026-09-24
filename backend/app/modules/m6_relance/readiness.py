@@ -120,9 +120,19 @@ async def check_delivery_readiness(
     conversation = await session.get(Conversation, lead.conversation_id)
     if customer is None or conversation is None or conversation.customer_id != customer.phone_number:
         return DeliveryReadiness("blocked", "missing_candidate")
+    return await check_customer_delivery_readiness(
+        session, customer=customer, conversation=conversation, settings=settings or get_settings()
+    )
+
+
+async def check_customer_delivery_readiness(
+    session: AsyncSession, *, customer: Customer, conversation: Conversation, settings: Settings,
+) -> DeliveryReadiness:
+    """Shared consent/template authority for selection and final dispatch."""
     if customer.opt_out_flag:
         return DeliveryReadiness("blocked", "opted_out")
-    if conversation.owner_type != "ai" or conversation.ai_execution_state != "eligible":
+    if (conversation.owner_type != "ai" or conversation.ai_execution_state != "eligible"
+            or conversation.status not in ("active", "qualifying", "nurturing")):
         return DeliveryReadiness("blocked", "ineligible_candidate")
     active_escalation = await session.scalar(
         select(EscalationTicket.ticket_id).where(
@@ -144,7 +154,7 @@ async def check_delivery_readiness(
     language = conversation.language_detected
     if language not in ("french", "lingala", "swahili"):
         return DeliveryReadiness("blocked", "unsupported_language", language=language)
-    template = _configured_template(settings or get_settings(), language)
+    template = _configured_template(settings, language)
     if template is None:
         return DeliveryReadiness("blocked", "missing_template", language=language)
     return DeliveryReadiness(

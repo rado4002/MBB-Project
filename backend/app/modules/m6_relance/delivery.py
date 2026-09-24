@@ -91,6 +91,16 @@ async def _current_reason(
     )
     if (sent_count or 0) >= 2 or candidate.attempt_number != (sent_count or 0) + 1:
         return "attempt_limit", None
+    if candidate.attempt_number == 2:
+        first = await session.scalar(select(RelanceCandidate).where(
+            RelanceCandidate.lead_id == lead.lead_id,
+            RelanceCandidate.attempt_number == 1,
+            RelanceCandidate.confirmed_sent_at.is_not(None),
+        ).limit(1))
+        if first is None or first.source_message_id != latest.message_id:
+            return "new_inbound", None
+        if first.confirmed_sent_at + timedelta(hours=settings.relance_delay_2_hours) > now:
+            return "second_attempt_not_due", None
     if candidate.scheduled_at > now or get_next_allowed_time(now) > now:
         return "outside_allowed_hours", None
     return None, readiness
@@ -143,7 +153,7 @@ async def prepare_candidate_delivery(
         )
         if reason is not None:
             # Future scheduled candidates remain pending; changed authority closes them.
-            if reason == "outside_allowed_hours" or reason == "silence_not_due":
+            if reason in ("outside_allowed_hours", "silence_not_due", "second_attempt_not_due"):
                 return "blocked", None
             await _cancel(session, candidate, None, reason, now)
             await session.commit()

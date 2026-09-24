@@ -72,7 +72,7 @@ async def _scan_and_schedule_relances() -> dict:
     """
     async with AsyncSessionLocal() as session:
         eligible_count, created_count = await create_candidates(
-            session, delay_hours=settings.relance_delay_1_hours
+            session, delay_hours=settings.relance_delay_1_hours, settings=settings
         )
         await session.commit()
 

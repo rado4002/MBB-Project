@@ -6,17 +6,21 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import Settings, get_settings
 from app.models.conversation import Conversation
 from app.models.customer import Customer
 from app.models.escalation_ticket import EscalationTicket
 from app.models.lead import Lead
 from app.models.message import Message
 from app.models.relance_candidate import RelanceCandidate
+from app.models.relance_delivery import RelanceDelivery
+from app.modules.m6_relance.readiness import check_customer_delivery_readiness
 from app.modules.m6_relance.scheduler import get_next_allowed_time
 
 
 async def create_candidates(
-    session: AsyncSession, *, delay_hours: float, now: datetime | None = None
+    session: AsyncSession, *, delay_hours: float, now: datetime | None = None,
+    settings: Settings | None = None,
 ) -> tuple[int, int]:
     """Scan Lead-backed conversations and persist eligible candidates.
 
@@ -24,6 +28,7 @@ async def create_candidates(
     Uniqueness indexes protect against concurrent scans and repeat episodes.
     """
     now = now or datetime.now(timezone.utc)
+    settings = settings or get_settings()
     lead_ids = (await session.scalars(select(Lead.lead_id).order_by(Lead.lead_id))).all()
     eligible_count = 0
     created_count = 0
@@ -47,6 +52,7 @@ async def create_candidates(
             or conversation.customer_id != customer.phone_number
             or conversation.owner_type != "ai"
             or conversation.ai_execution_state != "eligible"
+            or conversation.status not in ("active", "qualifying", "nurturing")
         ):
             continue
 
@@ -78,17 +84,43 @@ async def create_candidates(
         if due_at > now:
             continue
 
-        sent_count = await session.scalar(
-            select(func.count())
-            .select_from(RelanceCandidate)
-            .where(
-                RelanceCandidate.lead_id == lead_id,
-                RelanceCandidate.confirmed_sent_at.is_not(None),
-            )
-        )
+        sent_count = await session.scalar(select(func.count()).select_from(RelanceCandidate).where(
+            RelanceCandidate.lead_id == lead_id,
+            RelanceCandidate.confirmed_sent_at.is_not(None),
+        ))
         if (sent_count or 0) >= 2:
             continue
         attempt_number = (sent_count or 0) + 1
+
+        # An unknown provider outcome cannot authorize another logical send,
+        # even when inbound cancellation closed the old candidate.
+        unresolved = await session.scalar(
+            select(RelanceDelivery.candidate_id)
+            .join(RelanceCandidate, RelanceDelivery.candidate_id == RelanceCandidate.candidate_id)
+            .where(
+                RelanceCandidate.lead_id == lead_id,
+                RelanceDelivery.status == "uncertain",
+            ).limit(1)
+        )
+        if unresolved is not None:
+            continue
+
+        if attempt_number == 2:
+            first = await session.scalar(
+                select(RelanceCandidate).where(
+                    RelanceCandidate.lead_id == lead_id,
+                    RelanceCandidate.confirmed_sent_at.is_not(None),
+                ).limit(1)
+            )
+            if (first is None or first.attempt_number != 1
+                    or first.source_message_id != last_inbound.message_id
+                    or first.confirmed_sent_at + timedelta(hours=settings.relance_delay_2_hours) > now):
+                continue
+            readiness = await check_customer_delivery_readiness(
+                session, customer=customer, conversation=conversation, settings=settings
+            )
+            if readiness.status != "ready_for_delivery":
+                continue
 
         active = await session.scalar(
             select(RelanceCandidate.candidate_id)

@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     relance_delay_1_hours: float = Field(
         default=24, gt=0, allow_inf_nan=False, validation_alias="RELANCE_DELAY_1"
     )  # hours
+    relance_delay_2_hours: float = Field(
+        default=48, gt=0, allow_inf_nan=False, validation_alias="RELANCE_DELAY_2"
+    )  # hours since confirmed attempt 1; configurable policy, not an optimized cadence
     # Names and exact Meta locale codes must come from approved template records.
     # Empty by default: a localized fallback text never authorizes delivery.
     relance_template_french_name: str = ""
