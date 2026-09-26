@@ -26,6 +26,7 @@ import { ApiError, errorMessage } from '../../api/errors'
 import { useAuth } from '../../auth/AuthProvider'
 import { InlineAlert } from '../../components/InlineAlert'
 import { ConversationAuthority } from './ConversationAuthority'
+import { ProductLookup } from './ProductLookup'
 import { replyUnavailableReason } from './authorityPolicy'
 import { OwnershipDialog } from './OwnershipDialog'
 import { EscalationForm } from './EscalationForm'
@@ -1098,6 +1099,9 @@ export function ConversationWorkspace({
           ) : null}
         />
         <div className="workspace-toolbar__actions">
+          {auth.session?.capabilities.includes('product_offer.read') ? (
+            <ProductLookup key={conversationId} />
+          ) : null}
           <button
             className="button button--secondary context-trigger"
             type="button"

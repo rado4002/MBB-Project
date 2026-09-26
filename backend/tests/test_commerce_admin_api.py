@@ -21,7 +21,7 @@ from app.api.browser_auth_errors import (
     browser_error_response,
     browser_validation_error_response,
 )
-from app.api.v1 import auth, commerce_admin
+from app.api.v1 import auth, commerce_admin, operator_product_offers
 from app.config import Settings
 from app.database import get_db
 from app.models.catalog import Product, ProductMedia
@@ -129,6 +129,7 @@ async def harness():
     app.add_exception_handler(RequestValidationError, browser_validation_error_response)
     app.include_router(auth.router, prefix="/api/v1")
     app.include_router(commerce_admin.router, prefix="/api/v1")
+    app.include_router(operator_product_offers.router, prefix="/api/v1")
     app.dependency_overrides[get_browser_settings] = _settings
     app.dependency_overrides[get_browser_redis] = lambda: redis_client
     app.dependency_overrides[commerce_admin.get_exchange_rate_api_adapter] = (

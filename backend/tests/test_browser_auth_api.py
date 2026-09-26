@@ -227,6 +227,7 @@ async def test_preauth_csrf_cookie_and_valid_login_are_opaque(harness) -> None:
             "internal_note.read",
             "message.read",
             "message.reply",
+            "product_offer.read",
         ]
     )
     assert body["csrf_token"]

@@ -46,9 +46,11 @@ ROLE_CAPABILITIES = {
         "conversation.ownership.change",
         "operator_account.manage",
         "commerce.manage",
+        "product_offer.read",
     },
     "operator": BASE_CAPABILITIES
     | {
+        "product_offer.read",
         "conversation.read",
         "message.read",
         "message.reply",
