@@ -80,10 +80,45 @@ describe('shared Business Products', () => {
     expect(screen.queryByRole('link', { name: 'Business' })).not.toBeInTheDocument()
   })
 
+  it('discloses long secondary content without hiding current commercial facts', async () => {
+    const description = 'Long fictional product description. '.repeat(20)
+    setup('operator', offer({ attributes: { capacity_l: 6, washable: true, color: 'Blue', material: 'Steel', power: 'Electric' } }))
+    server.use(http.get(`${base}/:id`, () => HttpResponse.json({ ...product, description })))
+    const user = await openVariant()
+    const facts = screen.getByRole('region', { name: 'Current commercial facts' })
+    expect(within(facts).getByText('USD 55.00')).toBeVisible()
+    expect(within(facts).getByText('CDF 154000.00')).toBeVisible()
+    expect(within(facts).getByText('Available')).toBeVisible()
+    expect(within(facts).getByText('Sellable now')).toBeVisible()
+    expect(screen.getByText(description.trim())).not.toBeVisible()
+    expect(screen.getByText('Steel')).not.toBeVisible()
+    await user.click(screen.getByText('Show product description'))
+    expect(screen.getByText(description.trim())).toBeVisible()
+    await user.click(screen.getByText('Show characteristics (5)'))
+    expect(screen.getByText('Steel')).toBeVisible()
+    expect(within(facts).queryByRole('button', { name: /Change price|Set availability/ })).not.toBeInTheDocument()
+  })
+
+  it('selects variants by keyboard and keeps availability distinct from commercial status', async () => {
+    setup('operator', offer({ current_usd_price: null, derived_cdf_quote: null,
+      cdf_quote_status: 'cdf_quote_unavailable', offer_status: 'price_unavailable', reason_code: 'price_unavailable' }))
+    renderApp(`/business/products/${productId}`)
+    const user = userEvent.setup()
+    const choice = await screen.findByRole('button', { name: '6L · FRY-6L' })
+    expect(choice).toHaveAttribute('aria-pressed', 'false')
+    choice.focus()
+    await user.keyboard('{Enter}')
+    expect(await screen.findByRole('heading', { name: '6L' })).toHaveFocus()
+    expect(choice).toHaveAttribute('aria-pressed', 'true')
+    const facts = screen.getByRole('region', { name: 'Current commercial facts' })
+    expect(within(within(facts).getByText('Availability').parentElement!).getByText('Available')).toBeVisible()
+    expect(within(within(facts).getByText('Commercial status').parentElement!).getByText('Price not set')).toBeVisible()
+  })
+
   it.each([
     { label: 'missing price', value: offer({ current_usd_price: null, derived_cdf_quote: null, cdf_quote_status: 'cdf_quote_unavailable', offer_status: 'price_unavailable', reason_code: 'price_unavailable', is_sellable_now: false }), text: 'Price not set' },
     { label: 'unknown', value: offer({ inventory_status: 'unknown', offer_status: 'availability_unconfirmed', reason_code: 'availability_unconfirmed', is_sellable_now: false }), text: 'Availability unconfirmed' },
-    { label: 'unavailable', value: offer({ inventory_status: 'out_of_stock', offer_status: 'out_of_stock', reason_code: 'inventory_out_of_stock', is_sellable_now: false }), text: 'Unavailable' },
+    { label: 'unavailable', value: offer({ inventory_status: 'out_of_stock', offer_status: 'out_of_stock', reason_code: 'inventory_out_of_stock', is_sellable_now: false }), text: 'Out of stock' },
     { label: 'missing FX', value: offer({ derived_cdf_quote: null, cdf_quote_status: 'cdf_quote_unavailable', cdf_quote_unavailable_reason: 'current_fx_unavailable' }), text: 'CDF quote unavailable' },
   ])('shows $label without inventing facts', async ({ value, text }) => {
     setup('operator', value)
@@ -145,6 +180,7 @@ describe('shared Business Products', () => {
       }),
     )
     const user = await openVariant()
+    expect(screen.getByRole('button', { name: 'Change price' }).closest('div')).toHaveTextContent('Current priceUSD 55.00')
     await user.click(screen.getByRole('button', { name: 'Change price' }))
     await user.clear(screen.getByRole('textbox', { name: 'New USD price' }))
     await user.type(screen.getByRole('textbox', { name: 'New USD price' }), '60.25')
@@ -205,12 +241,13 @@ describe('shared Business Products', () => {
       }),
     )
     const user = await openVariant()
+    expect(screen.getByRole('button', { name: 'Set availability' }).closest('div')).toHaveTextContent('AvailabilityAvailable')
     await user.click(screen.getByRole('button', { name: 'Set availability' }))
     await user.selectOptions(screen.getByRole('combobox', { name: 'Availability' }), 'out_of_stock')
     await user.click(screen.getByRole('button', { name: 'Save availability' }))
     await screen.findByText('Marked unavailable')
     expect(screen.getByText('USD 55.00')).toBeInTheDocument()
-    expect(screen.getAllByText('Unavailable')).toHaveLength(2)
+    expect(screen.getAllByText('Out of stock')).toHaveLength(2)
   })
 
   it('rejects invalid decimals locally and preserves input through backend validation errors', async () => {

@@ -6,8 +6,8 @@ import { createProductOfferClient, type ProductOffer } from '../../api/productOf
 import { useAuth } from '../../auth/AuthProvider'
 import { PasswordField } from '../../components/PasswordField'
 
-const availability = { available: 'Available', out_of_stock: 'Unavailable', unknown: 'Availability unconfirmed' }
-const statuses = { sellable_now: 'Sellable now', out_of_stock: 'Unavailable', availability_unconfirmed: 'Availability unconfirmed', price_unavailable: 'Price not set', inactive: 'Inactive' }
+const availability = { available: 'Available', out_of_stock: 'Out of stock', unknown: 'Availability unconfirmed' }
+const statuses = { sellable_now: 'Sellable now', out_of_stock: 'Out of stock', availability_unconfirmed: 'Availability unconfirmed', price_unavailable: 'Price not set', inactive: 'Inactive' }
 const reasons = {
   sellable_now: 'Active, priced and marked available', inventory_out_of_stock: 'Marked unavailable',
   availability_unconfirmed: 'Availability has not been confirmed', price_unavailable: 'Current USD price is not set',
@@ -123,24 +123,36 @@ function ProductDetail({ id }: { id: string }) {
     {loading && <p role="status">Loading product…</p>}
     {error && <div role="alert"><p>{error}</p><button className="button button--secondary" onClick={() => void load()}>Retry</button></div>}
     {product && <>
-      <h1>{product.name}</h1>
-      <p>{product.category_code.replaceAll('_', ' ')}</p>
-      {manager && <p>{product.active ? 'Active product' : 'Inactive product'}</p>}
-      <ProductImage key={product.primary_media?.asset_url ?? 'none'} media={product.primary_media} large />
-      <p className="products-description">{product.description}</p>
+      <header className="products-family">
+        <ProductImage key={product.primary_media?.asset_url ?? 'none'} media={product.primary_media} />
+        <div>
+          <h1>{product.name}</h1>
+          <p className="products-meta">{product.category_code.replaceAll('_', ' ')}</p>
+          {manager && <p className="products-meta">{product.active ? 'Active product' : 'Inactive product'}</p>}
+        </div>
+      </header>
       <h2>Variants</h2>
+      {product.variants.length > 0 && <p className="products-meta">Select a variant to inspect its current price and availability.</p>}
       {!product.variants.length && <p>No variants have been added.</p>}
       {product.has_more_variants && <p role="status">Showing the first 200 variants. Additional variants are not shown.</p>}
       <ul className="products-variants">
         {product.variants.map((variant) => <li key={variant.sellable_item_id}>
-          <button className="button button--secondary" aria-pressed={selected === variant.sellable_item_id}
+          <button className="products-variant-choice" aria-pressed={selected === variant.sellable_item_id}
+            aria-label={`${variant.model_label || 'Standard variant'}${variant.sku ? ` · ${variant.sku}` : ''}`}
             onClick={() => setSelected(variant.sellable_item_id)}>
-            {variant.model_label || 'Standard variant'}{variant.sku ? ` · ${variant.sku}` : ''}
+            <span className="products-variant-name">{variant.model_label || 'Standard variant'}</span>
+            {variant.sku && <span className="products-meta">{` · ${variant.sku}`}</span>}
+            <span className="products-variant-marker" aria-hidden="true">{selected === variant.sellable_item_id ? 'Selected' : 'Select'}</span>
           </button>
-          {manager && <span>{variant.active ? 'Active variant' : 'Inactive variant'}</span>}
+          {manager && <span className="products-meta">{variant.active ? 'Active variant' : 'Inactive variant'}</span>}
         </li>)}
       </ul>
       {selected && <VariantDetail key={selected} id={selected} />}
+      <section className="products-secondary" aria-label="Product description">
+        {product.description.length > 280
+          ? <details><summary>Show product description</summary><p className="products-description">{product.description}</p></details>
+          : <><h2>Product description</h2><p className="products-description">{product.description}</p></>}
+      </section>
     </>}
   </>
 }
@@ -241,28 +253,40 @@ function VariantDetail({ id }: { id: string }) {
     const target = actionTrigger.current
     queueMicrotask(() => { if (target?.isConnected) target.focus() })
   }
+  const characteristics = offer && <dl className="context-details">
+    {Object.entries(offer.attributes).map(([key, value]) => <div key={key}><dt>{key.replaceAll('_', ' ')}</dt><dd>{String(value)}</dd></div>)}
+  </dl>
   return <section className="products-variant-detail" aria-label="Selected variant">
     {loading && <p role="status">Loading current variant facts…</p>}
     {error && <p role="alert">{error}</p>}
     {success && <p role="status">{success}</p>}
-    <button className="button button--secondary" disabled={busy || loading} onClick={() => void load()}>Refresh current facts</button>
-    {offer && <>
-      <h2 ref={heading} tabIndex={-1}>{offer.model_label || 'Standard variant'}</h2>
-      {offer.sku && <p>SKU: {offer.sku}</p>}
-      <ProductImage key={offer.primary_media?.asset_url ?? 'none'} media={offer.primary_media} large />
-      <dl className="context-details">
-        {Object.entries(offer.attributes).map(([key, value]) => <div key={key}><dt>{key.replaceAll('_', ' ')}</dt><dd>{String(value)}</dd></div>)}
-        <div><dt>Current price</dt><dd>{offer.current_usd_price === null ? 'Price not set' : `USD ${offer.current_usd_price}`}</dd></div>
-        <div><dt>CDF quote</dt><dd>{offer.cdf_quote_status === 'available' && offer.derived_cdf_quote ? `CDF ${offer.derived_cdf_quote.cdf_amount}` : 'CDF quote unavailable'}</dd></div>
-        <div><dt>Availability</dt><dd>{availability[offer.inventory_status]}</dd></div>
-        <div><dt>Commercial status</dt><dd>{statuses[offer.offer_status]}</dd></div>
-        <div><dt>Reason</dt><dd>{reasons[offer.reason_code]}</dd></div>
-        <div><dt>Checked</dt><dd>{new Date(offer.read_at).toLocaleString()}</dd></div>
-      </dl>
-      {manager && !denied && <div className="products-actions">
-        <button className="button button--secondary" disabled={busy || needsRefresh} onClick={(event) => { actionTrigger.current = event.currentTarget; setAction('price'); setAmount(offer.current_usd_price ?? ''); setReauth(false); setError(null); setSuccess(null) }}>Change price</button>
-        <button className="button button--secondary" disabled={busy || needsRefresh} onClick={(event) => { actionTrigger.current = event.currentTarget; setAction('availability'); setStatus(offer.inventory_status); setReauth(false); setError(null); setSuccess(null) }}>Set availability</button>
+    <div className="products-detail-heading">
+      {offer && <div><p className="products-meta">Selected variant</p>
+        <h2 ref={heading} tabIndex={-1}>{offer.model_label || 'Standard variant'}</h2>
+        {offer.sku && <p className="products-meta">SKU: {offer.sku}</p>}
       </div>}
+      <button className="button button--secondary" disabled={busy || loading} onClick={() => void load()}>Refresh current facts</button>
+    </div>
+    {offer && <>
+      <div className="products-commercial-layout">
+        <section aria-label="Current commercial facts">
+          <h3>Current commercial facts</h3>
+          <dl className="products-facts">
+            <div><dt>Current price</dt><dd className="products-price">{offer.current_usd_price === null ? 'Price not set' : `USD ${offer.current_usd_price}`}</dd>
+              {manager && !denied && <dd className="products-fact-action"><button className="button button--secondary" disabled={busy || needsRefresh} onClick={(event) => { actionTrigger.current = event.currentTarget; setAction('price'); setAmount(offer.current_usd_price ?? ''); setReauth(false); setError(null); setSuccess(null) }}>Change price</button></dd>}
+            </div>
+            <div><dt>CDF quote</dt><dd>{offer.cdf_quote_status === 'available' && offer.derived_cdf_quote ? `CDF ${offer.derived_cdf_quote.cdf_amount}` : 'CDF quote unavailable'}</dd></div>
+            <div><dt>Availability</dt><dd><span className="products-status">{availability[offer.inventory_status]}</span></dd>
+              {manager && !denied && <dd className="products-fact-action"><button className="button button--secondary" disabled={busy || needsRefresh} onClick={(event) => { actionTrigger.current = event.currentTarget; setAction('availability'); setStatus(offer.inventory_status); setReauth(false); setError(null); setSuccess(null) }}>Set availability</button></dd>}
+            </div>
+            <div><dt>Commercial status</dt><dd><span className="products-status">{statuses[offer.offer_status]}</span></dd>
+              <dd className="products-fact-reason">{reasons[offer.reason_code]}</dd>
+            </div>
+          </dl>
+          <p className="products-meta">Checked: {new Date(offer.read_at).toLocaleString()}</p>
+        </section>
+        <ProductImage key={offer.primary_media?.asset_url ?? 'none'} media={offer.primary_media} large />
+      </div>
     </>}
     {manager && !denied && action && <form className="products-write" onSubmit={(event) => void save(event)}>
       {action === 'price' ? <><label htmlFor={fieldId}>New USD price</label>
@@ -280,5 +304,10 @@ function VariantDetail({ id }: { id: string }) {
         value={password} disabled={busy} required onChange={(event) => setPassword(event.target.value)} />
       <button className="button button--primary" disabled={busy}>Confirm password</button>
     </form>}
+    {offer && Object.keys(offer.attributes).length > 0 && <section className="products-secondary" aria-label="Characteristics">
+      {Object.keys(offer.attributes).length > 4
+        ? <details><summary>Show characteristics ({Object.keys(offer.attributes).length})</summary>{characteristics}</details>
+        : <><h3>Characteristics</h3>{characteristics}</>}
+    </section>}
   </section>
 }
