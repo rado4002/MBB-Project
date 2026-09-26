@@ -11,7 +11,7 @@ import { ApiError, normalizeApiError } from './errors'
 const AUTH_BASE = '/api/v1/auth'
 
 export interface RequestOptions {
-  method?: 'GET' | 'POST'
+  method?: 'GET' | 'POST' | 'PUT'
   body?: object
   csrfToken?: string
   idempotencyKey?: string

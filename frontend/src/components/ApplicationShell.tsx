@@ -14,9 +14,9 @@ export function ApplicationShell() {
   const auth = useAuth()
   const location = useLocation()
   const navigate = useNavigate()
-  const pageName = location.pathname.startsWith('/inbox/')
-    ? 'Inbox'
-    : (pageNames[location.pathname] ?? 'MBB')
+  const pageName = location.pathname.startsWith('/business')
+    ? 'Products'
+    : location.pathname.startsWith('/inbox/') ? 'Inbox' : (pageNames[location.pathname] ?? 'MBB')
   const inboxDestination = location.pathname.startsWith('/inbox')
     ? { pathname: '/inbox', search: location.search }
     : '/inbox'
@@ -46,6 +46,9 @@ export function ApplicationShell() {
           <NavLink to={inboxDestination} className={({ isActive }) => (isActive ? 'active' : undefined)}>
             Inbox
           </NavLink>
+          {auth.session.capabilities.includes('product_offer.read') && (
+            <NavLink to="/business/products" className={({ isActive }) => (isActive ? 'active' : undefined)}>Business</NavLink>
+          )}
           {auth.session.capabilities.includes('operator_account.manage') ? (
             <NavLink to="/operators" className={({ isActive }) => (isActive ? 'active' : undefined)}>
               Operators

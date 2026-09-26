@@ -611,3 +611,26 @@ h2 { font-size: 1.125rem; }
 @media (max-width: 47.99rem) {
   .workspace-toolbar__actions:has(.product-lookup-trigger) { flex-direction: column; align-items: stretch; }
 }
+
+/* Business Products: stacked sections keep exact-variant facts readable on narrow screens. */
+.products-page { max-width: 64rem; margin-inline: auto; padding: var(--space-5); overflow-wrap: anywhere; }
+.products-search, .products-write { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin-block: var(--space-4); }
+.products-search label, .products-write label { flex-basis: 100%; }
+.products-search input, .products-write input, .products-write select { min-width: 0; max-width: 100%; padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); font: inherit; background: var(--color-surface); color: var(--color-text); }
+.products-list, .products-variants { list-style: none; padding: 0; }
+.products-list li { display: flex; align-items: center; gap: var(--space-4); padding-block: var(--space-4); border-bottom: 1px solid var(--color-border); }
+.products-list li > div { min-width: 0; }
+.products-list p { margin-block: var(--space-2) 0; }
+.products-image { display: block; width: 4rem; height: 4rem; flex-shrink: 0; object-fit: contain; border-radius: var(--radius-sm); background: var(--color-surface); }
+.products-image--large { width: min(100%, 15rem); height: 12rem; margin-block: var(--space-4); }
+.products-placeholder { display: grid; place-items: center; color: var(--color-text-muted); border: 1px solid var(--color-border); font-size: .85rem; }
+.products-description { white-space: pre-wrap; }
+.products-variants li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin-block: var(--space-3); }
+.products-variants button { white-space: normal; text-align: left; }
+.products-variant-detail { padding-block: var(--space-5); border-top: 1px solid var(--color-border); }
+.products-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); }
+@media (max-width: 40rem) {
+  .products-search input { flex: 1; width: 100%; }
+  .products-write { align-items: stretch; flex-direction: column; }
+  .products-write > * { max-width: 100%; }
+}

@@ -38,11 +38,28 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def list_products(session: AsyncSession, *, limit: int = 200) -> list[Product]:
+async def list_products(
+    session: AsyncSession, *, limit: int = 200,
+    operational_only: bool = False, query: str | None = None,
+) -> list[Product]:
+    statement = select(Product)
+    if operational_only:
+        statement = statement.where(
+            Product.active.is_(True),
+            select(SellableItem.sellable_item_id).where(
+                SellableItem.product_id == Product.product_id,
+                SellableItem.active.is_(True),
+            ).exists(),
+        )
+    if query:
+        pattern = f"%{query}%"
+        statement = statement.where(
+            Product.name.ilike(pattern) | Product.category_code.ilike(pattern)
+        )
     return list(
         (
             await session.scalars(
-                select(Product).order_by(Product.name, Product.product_id).limit(limit)
+                statement.order_by(Product.name, Product.product_id).limit(limit)
             )
         ).all()
     )
@@ -53,11 +70,16 @@ async def get_product(session: AsyncSession, product_id: uuid.UUID) -> Product |
 
 
 async def list_sellable_items(
-    session: AsyncSession, *, product_id: uuid.UUID | None = None, limit: int = 200
+    session: AsyncSession, *, product_id: uuid.UUID | None = None, limit: int = 200,
+    operational_only: bool = False,
 ) -> list[SellableItem]:
     statement = select(SellableItem)
     if product_id is not None:
         statement = statement.where(SellableItem.product_id == product_id)
+    if operational_only:
+        statement = statement.join(Product).where(
+            Product.active.is_(True), SellableItem.active.is_(True)
+        )
     return list(
         (
             await session.scalars(
@@ -75,6 +97,19 @@ async def get_sellable_item(
     session: AsyncSession, sellable_item_id: uuid.UUID
 ) -> SellableItem | None:
     return await session.get(SellableItem, sellable_item_id)
+
+
+async def get_product_primary_images(
+    session: AsyncSession, product_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, ProductMedia]:
+    """Bounded Product thumbnails; variant overrides remain Product Offer's job."""
+    if not product_ids:
+        return {}
+    media = await session.scalars(select(ProductMedia).where(
+        ProductMedia.product_id.in_(product_ids),
+        ProductMedia.active.is_(True), ProductMedia.is_primary.is_(True),
+    ))
+    return {image.product_id: image for image in media.all()}
 
 
 def _media_owner_filter(

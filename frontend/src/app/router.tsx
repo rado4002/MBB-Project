@@ -11,6 +11,7 @@ import { ConversationQueuePage } from '../features/inbox/ConversationQueuePage'
 import { NotFoundPage } from '../features/NotFoundPage'
 import { OperatorAccountsPage } from '../features/operators/OperatorAccountsPage'
 import { SessionPage } from '../features/session/SessionPage'
+import { ProductsPage } from '../features/products/ProductsPage'
 
 function EntryRoute() {
   const auth = useAuth()
@@ -38,6 +39,12 @@ function OperatorAccountsRoute() {
   return <OperatorAccountsPage />
 }
 
+function ProductsRoute() {
+  const auth = useAuth()
+  return auth.session?.capabilities.includes('product_offer.read')
+    ? <ProductsPage /> : <Navigate to="/inbox" replace />
+}
+
 export function AppRouter() {
   return (
     <Routes>
@@ -63,6 +70,9 @@ export function AppRouter() {
         <Route path="/account" element={<AccountPage />} />
         <Route path="/session" element={<SessionPage />} />
         <Route path="/operators" element={<OperatorAccountsRoute />} />
+        <Route path="/business" element={<Navigate to="/business/products" replace />} />
+        <Route path="/business/products" element={<ProductsRoute />} />
+        <Route path="/business/products/:productId" element={<ProductsRoute />} />
       </Route>
       <Route path="*" element={<NotFoundPage />} />
     </Routes>
