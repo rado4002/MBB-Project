@@ -22,8 +22,23 @@ export interface BusinessProductDetail extends BusinessProduct {
   has_more_variants: boolean
 }
 
+export interface ProductCreateInput {
+  name: string
+  category_code: string
+  description: string
+  active: false
+}
+
+export interface FirstVariantCreateInput {
+  model_label: string | null
+  sku: string | null
+  attributes: Record<string, never>
+  active: false
+}
+
 export function createBusinessProductsClient(onSessionExpired: () => void) {
   const base = '/api/v1/business/products'
+  const products = '/api/v1/operator/commerce/products'
   const commerce = '/api/v1/operator/commerce/sellable-items'
   return {
     list: (query: string, signal: AbortSignal) =>
@@ -32,6 +47,14 @@ export function createBusinessProductsClient(onSessionExpired: () => void) {
       ),
     detail: (id: string, signal: AbortSignal) =>
       requestJson<BusinessProductDetail>(`${base}/${encodeURIComponent(id)}?limit=200`, { signal }, onSessionExpired),
+    createProduct: (body: ProductCreateInput, csrfToken: string) =>
+      requestJson<{ product_id: string }>(products, {
+        method: 'POST', body, csrfToken,
+      }, onSessionExpired),
+    createFirstVariant: (productId: string, body: FirstVariantCreateInput, csrfToken: string) =>
+      requestJson<{ sellable_item_id: string }>(`${products}/${encodeURIComponent(productId)}/sellable-items`, {
+        method: 'POST', body, csrfToken,
+      }, onSessionExpired),
     changePrice: (id: string, amount: string, csrfToken: string, signal: AbortSignal) =>
       requestJson(`${commerce}/${encodeURIComponent(id)}/price`, {
         method: 'PUT', body: { amount, currency: 'USD' }, csrfToken, signal,
