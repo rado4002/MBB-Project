@@ -161,3 +161,33 @@ async def test_exact_inactive_missing_and_service_failure(lookup):
         assert response.status_code == 503
         assert response.json()["error"]["code"] == "SERVICE_UNAVAILABLE"
         assert "private database details" not in response.text
+
+
+async def test_commercial_review_is_administrator_only_and_read_only(lookup, monkeypatch):
+    client, database, account = lookup
+    row = database.rows[0]
+    row.product.active = False
+
+    async def product_by_id(_db, product_id):
+        return row.product if product_id == row.product.product_id else None
+
+    async def review(_db, product_id, *, offset=0):
+        assert product_id == row.product.product_id
+        assert offset == 0
+        offer = service._compose_offer(row, read_at=service._utcnow())
+        return [(offer, row.sellable_item.active)], False, offer.read_at
+
+    monkeypatch.setattr(commerce_admin.catalog_service, "get_product", product_by_id)
+    monkeypatch.setattr(service, "list_product_offers_for_review", review)
+    path = f"/api/v1/operator/commerce/products/{row.product.product_id}/commercial-review"
+
+    account.role = "operator"
+    assert (await client.get(path)).status_code == 403
+    account.role = "administrator"
+    response = await client.get(path)
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["items"][0]["offer_status"] == "inactive"
+    assert response.json()["items"][0]["inventory_status"] == "available"
+    assert "quantity" not in response.json()["items"][0]
+    assert not database.statements

@@ -258,6 +258,36 @@ async def require_product_offer(
     return offer
 
 
+async def list_product_offers_for_review(
+    session: AsyncSession, product_id: uuid.UUID, *, limit: int = 200, offset: int = 0,
+) -> tuple[list[tuple[ProductOfferResponse, bool]], bool, datetime]:
+    """Read a bounded Product family, including inactive variants, in one offer query."""
+    if type(limit) is not int or limit < 1 or limit > 200:
+        raise ValueError("review limit must be between 1 and 200")
+    if type(offset) is not int or offset < 0:
+        raise ValueError("review offset must be non-negative")
+    offer_read_at = _utcnow()
+    exchange_rate = await get_active_usd_cdf_rate(session, at=offer_read_at)
+    statement = (
+        _current_offer_statement(
+            None if exchange_rate is None else exchange_rate.exchange_rate_id
+        )
+        .where(SellableItem.product_id == product_id)
+        .order_by(SellableItem.model_label, SellableItem.sellable_item_id)
+        .offset(offset)
+        .limit(limit + 1)
+    )
+    rows = (await session.execute(statement)).all()
+    return (
+        [
+            (_compose_offer(ProductOfferRow(*row), read_at=offer_read_at), row[1].active)
+            for row in rows[:limit]
+        ],
+        len(rows) > limit,
+        offer_read_at,
+    )
+
+
 async def search_product_offers(
     session: AsyncSession,
     *,

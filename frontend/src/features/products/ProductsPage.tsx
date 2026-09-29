@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { createBusinessProductsClient, type BusinessProductDetail } from '../../api/businessProducts'
+import { createBusinessProductsClient, type BusinessProductDetail, type ProductCommercialReview } from '../../api/businessProducts'
 import { asApiError, errorMessage } from '../../api/errors'
 import { createProductOfferClient, type ProductOffer } from '../../api/productOffers'
 import { useAuth } from '../../auth/AuthProvider'
@@ -309,6 +309,132 @@ function ProductList() {
   </>
 }
 
+function LifecycleAction({ kind, id, active, offer, onChanged }: {
+  kind: 'product' | 'variant'; id: string; active: boolean; offer?: ProductOffer;
+  onChanged: () => Promise<void>
+}) {
+  const auth = useAuth()
+  const client = useMemo(() => createBusinessProductsClient(auth.handleSessionExpired), [auth.handleSessionExpired])
+  const [pending, setPending] = useState(false)
+  const [review, setReview] = useState<ProductCommercialReview | null>(null)
+  const [reauth, setReauth] = useState(false)
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [denied, setDenied] = useState(false)
+  const [uncertain, setUncertain] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const trigger = useRef<HTMLButtonElement>(null)
+  const passwordField = useRef<HTMLInputElement>(null)
+  const confirmButton = useRef<HTMLButtonElement>(null)
+  const fieldId = useId()
+  const label = `${active ? 'Deactivate' : 'Activate'} ${kind}`
+  useEffect(() => {
+    if (reauth) passwordField.current?.focus()
+    else if (pending) confirmButton.current?.focus()
+  }, [pending, reauth, review])
+  const open = async () => {
+    if (busy || uncertain) return
+    setError(null)
+    if (kind === 'product' && !active) {
+      setBusy(true)
+      try {
+        const data = await client.commercialReview(id, 0, new AbortController().signal)
+        setReview(data)
+        setPending(true)
+      } catch (failure) { setError(productError(failure)) }
+      finally { setBusy(false) }
+    } else setPending(true)
+  }
+  const loadMore = async () => {
+    if (!review || !review.has_more || busy) return
+    setBusy(true); setError(null)
+    try {
+      const page = await client.commercialReview(id, review.items.length, new AbortController().signal)
+      setReview({ ...review, items: [...review.items, ...page.items], has_more: page.has_more })
+    } catch (failure) { setError(productError(failure)) }
+    finally { setBusy(false) }
+  }
+  const cancel = () => {
+    setPending(false); setReview(null); setReauth(false); setPassword(''); setError(null)
+    queueMicrotask(() => trigger.current?.focus())
+  }
+  const confirmPassword = async (event: FormEvent) => {
+    event.preventDefault()
+    setBusy(true); setError(null)
+    try {
+      await auth.reauthenticate(password)
+      setReauth(false)
+    } catch (failure) { setError(errorMessage(asApiError(failure))) }
+    finally { setPassword(''); setBusy(false) }
+  }
+  const confirm = async () => {
+    if (!pending || busy || uncertain || (kind === 'product' && !active && (!review || review.has_more))) return
+    const expiry = auth.session?.recent_reauthentication_expires_at_epoch
+    if (expiry == null || expiry < Math.floor(Date.now() / 1000)) { setReauth(true); return }
+    setBusy(true); setError(null)
+    let sent = false
+    try {
+      const csrf = await auth.getCsrfForMutation()
+      sent = true
+      const signal = new AbortController().signal
+      if (kind === 'product') await client.setProductActive(id, !active, csrf, signal)
+      else await client.setVariantActive(id, !active, csrf, signal)
+      await onChanged()
+    } catch (failure) {
+      const apiError = asApiError(failure)
+      if (apiError.code === 'recent_reauthentication_required') setReauth(true)
+      else if (apiError.category === 'forbidden') { setDenied(true); setPending(false); setError('You do not have permission to maintain products.') }
+      else if (sent && uncertainCreate(apiError)) {
+        setUncertain(true); setPending(false)
+        setError('The change could not be confirmed. Refresh Product detail before another change; it may already have been saved.')
+        await onChanged()
+      } else setError(errorMessage(apiError))
+    } finally { setBusy(false) }
+  }
+  if (denied) return <p role="alert">{error}</p>
+  return <section className="products-secondary" aria-label={`${kind} status control`}>
+    {!pending && <button ref={trigger} className="button button--secondary" disabled={busy || uncertain} onClick={() => void open()}>{label}</button>}
+    {error && <p role="alert">{error}</p>}
+    {uncertain && <button className="button button--secondary" onClick={() => void onChanged()}>Refresh Product detail</button>}
+    {pending && <div className="products-lifecycle-confirmation">
+      <h3>{label}</h3>
+      {kind === 'product' && active && <p>This stops the Product and all its variants from being offered. Product, variants, and history are preserved.</p>}
+      {kind === 'variant' && active && <p>This stops only this variant from being offered. Sibling variants may continue. Its history is preserved.</p>}
+      {kind === 'product' && !active && <>
+        <p>Active variants may become offerable. Price and stock still determine each variant’s commercial status.</p>
+        {review && <>
+          <h4>Current variant commercial facts</h4>
+          {!review.items.length && <p>No variants have been added.</p>}
+          <ul className="products-lifecycle-list">{review.items.map((item) => <li key={item.sellable_item_id}>
+            <strong>{item.model_label || 'Standard variant'}{item.sku ? ` · ${item.sku}` : ''}</strong>
+            <span className="products-meta">{item.active ? 'Active variant' : 'Inactive variant'}</span>
+            <dl>
+              <div><dt>Price</dt><dd>{item.current_usd_price === null ? 'Price not set' : `USD ${item.current_usd_price}`}</dd></div>
+              <div><dt>Availability</dt><dd>{availability[item.inventory_status]}</dd></div>
+              <div><dt>Current Product Offer</dt><dd>{statuses[item.offer_status]}</dd></div>
+            </dl>
+          </li>)}</ul>
+          {review.has_more && <button className="button button--secondary" disabled={busy} onClick={() => void loadMore()}>Load more variant facts</button>}
+          <p className="products-meta">Review started: {new Date(review.read_at).toLocaleString()}</p>
+        </>}
+      </>}
+      {kind === 'variant' && offer && <p>Current facts: {offer.current_usd_price === null ? 'Price not set' : `USD ${offer.current_usd_price}`} · {availability[offer.inventory_status]} · {statuses[offer.offer_status]}.</p>}
+      {!reauth && <div className="products-setup-actions">
+        <button ref={confirmButton} className="button button--primary" disabled={busy || (kind === 'product' && !active && (!review || review.has_more))} onClick={() => void confirm()}>Confirm {label.toLowerCase()}</button>
+        <button className="button button--secondary" disabled={busy} onClick={cancel}>Cancel</button>
+      </div>}
+      {reauth && <form onSubmit={(event) => void confirmPassword(event)}>
+        <PasswordField ref={passwordField} id={`${fieldId}-password`} label="Confirm Administrator password" autoComplete="current-password"
+          value={password} disabled={busy} required onChange={(event) => setPassword(event.target.value)} />
+        <div className="products-setup-actions">
+          <button className="button button--primary" disabled={busy}>Confirm password</button>
+          <button className="button button--secondary" type="button" disabled={busy} onClick={cancel}>Cancel</button>
+        </div>
+      </form>}
+    </div>}
+  </section>
+}
+
 function ProductDetail({ id }: { id: string }) {
   const auth = useAuth()
   const manager = auth.session?.capabilities.includes('commerce.manage') ?? false
@@ -319,20 +445,24 @@ function ProductDetail({ id }: { id: string }) {
   const [product, setProduct] = useState<BusinessProductDetail | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const controller = useRef<AbortController | null>(null)
   const load = useCallback(async () => {
     controller.current?.abort()
     const current = new AbortController(); controller.current = current
-    setLoading(true); setError(null); setProduct(null); setSelected(null)
+    setLoading(true); setError(null); setNotice(null); setProduct(null)
     try {
       const data = await client.detail(id, current.signal)
       if (!current.signal.aborted) {
         setProduct(data)
-        setSelected(data.variants.some((variant) => variant.sellable_item_id === preferredVariantId) ? preferredVariantId : null)
+        setSelected((previous) => data.variants.some((variant) => variant.sellable_item_id === previous)
+          ? previous : (data.variants.some((variant) => variant.sellable_item_id === preferredVariantId) ? preferredVariantId : null))
       }
+      return !current.signal.aborted
     } catch (failure) {
       if (!current.signal.aborted) setError(productError(failure))
+      return false
     } finally { if (!current.signal.aborted) setLoading(false) }
   }, [client, id, preferredVariantId])
   useEffect(() => {
@@ -340,8 +470,10 @@ function ProductDetail({ id }: { id: string }) {
     void load()
     return () => controller.current?.abort()
   }, [load])
+  const selectedVariant = product?.variants.find((variant) => variant.sellable_item_id === selected)
   return <>
     <Link to="/business/products">Back to products</Link>
+    {notice && <p role="status">{notice}</p>}
     {loading && <p role="status">Loading product…</p>}
     {error && <div role="alert"><p>{error}</p><button className="button button--secondary" onClick={() => void load()}>Retry</button></div>}
     {product && <>
@@ -353,6 +485,8 @@ function ProductDetail({ id }: { id: string }) {
           {manager && <p className="products-meta">{product.active ? 'Active product' : 'Inactive product'}</p>}
         </div>
       </header>
+      {manager && <LifecycleAction kind="product" id={id} active={product.active}
+        onChanged={async () => { if (await load()) setNotice('Showing refreshed Product detail.') }} />}
       <h2>Variants</h2>
       {product.variants.length > 0 && <p className="products-meta">Select a variant to inspect its current price and availability.</p>}
       {!product.variants.length && <p>No variants have been added.</p>}
@@ -371,7 +505,9 @@ function ProductDetail({ id }: { id: string }) {
           {manager && <span className="products-meta">{variant.active ? 'Active variant' : 'Inactive variant'}</span>}
         </li>)}
       </ul>
-      {selected && <VariantDetail key={selected} id={selected} />}
+      {selectedVariant && <VariantDetail key={`${selectedVariant.sellable_item_id}-${product.active}-${selectedVariant.active}`} id={selectedVariant.sellable_item_id}
+        active={selectedVariant.active}
+        onChanged={async () => { if (await load()) setNotice('Showing refreshed Product detail.') }} />}
       <section className="products-secondary" aria-label="Product description">
         {product.description.length > 280
           ? <details><summary>Show product description</summary><p className="products-description">{product.description}</p></details>
@@ -381,7 +517,7 @@ function ProductDetail({ id }: { id: string }) {
   </>
 }
 
-function VariantDetail({ id }: { id: string }) {
+function VariantDetail({ id, active, onChanged }: { id: string; active: boolean; onChanged: () => Promise<void> }) {
   const auth = useAuth()
   const manager = auth.session?.capabilities.includes('commerce.manage') ?? false
   const offers = useMemo(() => createProductOfferClient(auth.handleSessionExpired), [auth.handleSessionExpired])
@@ -509,6 +645,7 @@ function VariantDetail({ id }: { id: string }) {
       <button className="button button--secondary" disabled={busy || loading} onClick={() => void load()}>Refresh current facts</button>
     </div>
     {offer && <>
+      {manager && !denied && <LifecycleAction kind="variant" id={id} active={active} offer={offer} onChanged={onChanged} />}
       <div className="products-commercial-layout">
         <section aria-label="Current commercial facts">
           <h3>Current commercial facts</h3>

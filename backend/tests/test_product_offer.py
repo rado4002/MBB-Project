@@ -17,6 +17,7 @@ from app.modules.product_offer.service import (
     _compose_offer,
     _normalize_query,
     _validate_budget,
+    list_product_offers_for_review,
 )
 from app.schemas.product_offer import ProductOfferResponse
 
@@ -258,3 +259,46 @@ def test_search_query_rejects_unbounded_text() -> None:
 
 def test_cdf_budget_failure_has_stable_typed_code() -> None:
     assert ProductOfferCdfQuoteUnavailable.code == "CDF_QUOTE_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_product_review_is_bounded_and_includes_inactive_commercial_facts(monkeypatch) -> None:
+    product = _product(active=False)
+    rows = [
+        ProductOfferRow(product, _item(active=True), None, _inventory("unknown"), None),
+        ProductOfferRow(product, _item(active=False), _price(), _inventory("out_of_stock"), None),
+        ProductOfferRow(product, _item(active=True), _price(), _inventory("available"), None),
+    ]
+
+    async def no_rate(_session, *, at):
+        return None
+
+    class Session:
+        def __init__(self, offset=0):
+            self.offset = offset
+
+        async def execute(self, statement):
+            assert statement._limit_clause.value == 3
+            assert statement._offset_clause.value == self.offset
+            assert product.product_id in statement.compile().params.values()
+            return SimpleNamespace(all=lambda: rows[self.offset:])
+
+    monkeypatch.setattr("app.modules.product_offer.service.get_active_usd_cdf_rate", no_rate)
+    offers, has_more, read_at = await list_product_offers_for_review(
+        Session(), product.product_id, limit=2
+    )
+    assert has_more is True
+    assert len(offers) == 2
+    assert offers[0][0].current_usd_price is None
+    assert offers[0][0].inventory_status == "unknown"
+    assert offers[0][0].offer_status == "inactive"
+    assert offers[0][1] is True
+    assert offers[1][0].current_usd_price == Decimal("60.00")
+    assert offers[1][0].inventory_status == "out_of_stock"
+    assert offers[1][1] is False
+    assert read_at == offers[0][0].read_at
+    next_page, has_more, _ = await list_product_offers_for_review(
+        Session(offset=1), product.product_id, limit=2, offset=1
+    )
+    assert len(next_page) == 2
+    assert has_more is False

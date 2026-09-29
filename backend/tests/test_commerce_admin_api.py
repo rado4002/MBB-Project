@@ -24,7 +24,7 @@ from app.api.browser_auth_errors import (
 from app.api.v1 import auth, commerce_admin, operator_product_offers
 from app.config import Settings
 from app.database import get_db
-from app.models.catalog import Product, ProductMedia
+from app.models.catalog import Product, ProductMedia, SellableItem
 from app.models.operator_audit import OperatorAuditEvent
 from app.models.operator_account import OperatorAccount
 from app.operator_identity.browser_auth import SESSION_COOKIE_NAME
@@ -264,6 +264,117 @@ async def test_commerce_writes_preserve_csrf_origin_and_strict_payload_guards(
             json={**body, "current_price": "60.00"},
         )
         assert unknown.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_product_and_variant_lifecycle_preserve_offer_truth_and_audit(harness) -> None:
+    transport, factory, _administrator_id = harness
+    base = "/api/v1/operator/commerce"
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as administrator:
+        csrf = await _login(administrator, "commerce.admin", ADMIN_PASSWORD)
+        created = await administrator.post(
+            f"{base}/products", headers=_headers(csrf),
+            json={"name": "Fictional Lifecycle Fryer", "category_code": "air_fryer",
+                  "description": "Fictional lifecycle test.", "active": False},
+        )
+        assert created.status_code == 201
+        product_id = created.json()["product_id"]
+        first = await administrator.post(
+            f"{base}/products/{product_id}/sellable-items", headers=_headers(csrf),
+            json={"model_label": "6L", "sku": "LIFECYCLE-6L", "active": False},
+        )
+        sibling = await administrator.post(
+            f"{base}/products/{product_id}/sellable-items", headers=_headers(csrf),
+            json={"model_label": "8L", "sku": "LIFECYCLE-8L", "active": True},
+        )
+        assert first.status_code == sibling.status_code == 201
+        first_id = first.json()["sellable_item_id"]
+        sibling_id = sibling.json()["sellable_item_id"]
+        assert (await administrator.put(
+            f"{base}/sellable-items/{sibling_id}/price", headers=_headers(csrf),
+            json={"amount": "70.00", "currency": "USD"},
+        )).status_code == 200
+        assert (await administrator.put(
+            f"{base}/sellable-items/{sibling_id}/inventory", headers=_headers(csrf),
+            json={"quantity": 5},
+        )).status_code == 200
+
+        review = await administrator.get(f"{base}/products/{product_id}/commercial-review")
+        assert review.status_code == 200
+        assert review.headers["cache-control"] == "no-store"
+        assert review.json()["has_more"] is False
+        items = {item["sellable_item_id"]: item for item in review.json()["items"]}
+        assert items[first_id]["current_usd_price"] is None
+        assert items[first_id]["inventory_status"] == "unknown"
+        assert items[first_id]["offer_status"] == "inactive"
+        assert items[sibling_id]["current_usd_price"] == "70.00"
+        assert items[sibling_id]["inventory_status"] == "available"
+        assert "quantity" not in items[sibling_id]
+
+        no_csrf = await administrator.patch(
+            f"{base}/products/{product_id}", headers={"Origin": ORIGIN, "Content-Type": "application/json"},
+            json={"active": True},
+        )
+        assert no_csrf.status_code == 403
+        bad_origin = await administrator.patch(
+            f"{base}/products/{product_id}", headers=_headers(csrf, origin="https://attacker.example"),
+            json={"active": True},
+        )
+        assert bad_origin.status_code == 403
+        assert (await administrator.patch(
+            f"{base}/products/{product_id}", headers=_headers(csrf), json={"active": True},
+        )).status_code == 200
+        async def offer_status(item_id: str) -> str:
+            response = await administrator.get(f"/api/v1/operator/product-offers/{item_id}")
+            assert response.status_code == 200
+            return response.json()["offer_status"]
+
+        assert await offer_status(first_id) == "inactive"
+        assert await offer_status(sibling_id) == "sellable_now"
+        assert (await administrator.patch(
+            f"{base}/sellable-items/{first_id}", headers=_headers(csrf), json={"active": True},
+        )).status_code == 200
+        assert await offer_status(first_id) == "price_unavailable"
+        assert (await administrator.put(
+            f"{base}/sellable-items/{first_id}/price", headers=_headers(csrf),
+            json={"amount": "55.00", "currency": "USD"},
+        )).status_code == 200
+        assert await offer_status(first_id) == "availability_unconfirmed"
+        assert (await administrator.put(
+            f"{base}/sellable-items/{first_id}/inventory", headers=_headers(csrf),
+            json={"quantity": 0},
+        )).status_code == 200
+        assert await offer_status(first_id) == "out_of_stock"
+        assert (await administrator.put(
+            f"{base}/sellable-items/{first_id}/inventory", headers=_headers(csrf),
+            json={"quantity": 5},
+        )).status_code == 200
+        assert await offer_status(first_id) == "sellable_now"
+        assert (await administrator.patch(
+            f"{base}/sellable-items/{first_id}", headers=_headers(csrf), json={"active": False},
+        )).status_code == 200
+        assert await offer_status(first_id) == "inactive"
+        assert await offer_status(sibling_id) == "sellable_now"
+        assert (await administrator.patch(
+            f"{base}/products/{product_id}", headers=_headers(csrf), json={"active": False},
+        )).status_code == 200
+        assert await offer_status(sibling_id) == "inactive"
+
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as operator:
+        operator_csrf = await _login(operator, "commerce.operator", OPERATOR_PASSWORD)
+        assert (await operator.get(f"{base}/products/{product_id}/commercial-review")).status_code == 403
+        for path in (f"{base}/products/{product_id}", f"{base}/sellable-items/{first_id}"):
+            assert (await operator.patch(path, headers=_headers(operator_csrf), json={"active": True})).status_code == 403
+
+    async with factory() as session:
+        assert (await session.get(Product, uuid.UUID(product_id))).active is False
+        assert await session.get(SellableItem, uuid.UUID(first_id)) is not None
+        assert await session.get(SellableItem, uuid.UUID(sibling_id)) is not None
+        actions = (await session.scalars(select(OperatorAuditEvent.action).where(
+            OperatorAuditEvent.target_id.in_([product_id, first_id]),
+        ))).all()
+        assert actions.count("commerce.product.updated") == 2
+        assert actions.count("commerce.sellable_item.updated") == 2
 
 
 @pytest.mark.asyncio

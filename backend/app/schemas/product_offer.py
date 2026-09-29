@@ -87,3 +87,20 @@ class ProductOfferResponse(StrictProductOfferModel):
 
 class ProductOfferSearchResponse(StrictProductOfferModel):
     items: list[ProductOfferResponse]
+
+
+class ProductCommercialReviewItem(StrictProductOfferModel):
+    sellable_item_id: UUID
+    model_label: str | None
+    sku: str | None
+    active: bool
+    current_usd_price: Decimal | None
+    inventory_status: InventoryAvailabilityStatus
+    offer_status: OfferStatus
+
+
+class ProductCommercialReviewResponse(StrictProductOfferModel):
+    product_id: UUID
+    items: list[ProductCommercialReviewItem]
+    has_more: bool
+    read_at: datetime

@@ -22,6 +22,21 @@ export interface BusinessProductDetail extends BusinessProduct {
   has_more_variants: boolean
 }
 
+export interface ProductCommercialReview {
+  product_id: string
+  items: Array<{
+    sellable_item_id: string
+    model_label: string | null
+    sku: string | null
+    active: boolean
+    current_usd_price: string | null
+    inventory_status: ProductOffer['inventory_status']
+    offer_status: ProductOffer['offer_status']
+  }>
+  has_more: boolean
+  read_at: string
+}
+
 export interface ProductCreateInput {
   name: string
   category_code: string
@@ -47,6 +62,16 @@ export function createBusinessProductsClient(onSessionExpired: () => void) {
       ),
     detail: (id: string, signal: AbortSignal) =>
       requestJson<BusinessProductDetail>(`${base}/${encodeURIComponent(id)}?limit=200`, { signal }, onSessionExpired),
+    commercialReview: (id: string, offset: number, signal: AbortSignal) =>
+      requestJson<ProductCommercialReview>(`${products}/${encodeURIComponent(id)}/commercial-review?${new URLSearchParams({ offset: String(offset) })}`, { signal }, onSessionExpired),
+    setProductActive: (id: string, active: boolean, csrfToken: string, signal: AbortSignal) =>
+      requestJson(`${products}/${encodeURIComponent(id)}`, {
+        method: 'PATCH', body: { active }, csrfToken, signal,
+      }, onSessionExpired),
+    setVariantActive: (id: string, active: boolean, csrfToken: string, signal: AbortSignal) =>
+      requestJson(`${commerce}/${encodeURIComponent(id)}`, {
+        method: 'PATCH', body: { active }, csrfToken, signal,
+      }, onSessionExpired),
     createProduct: (body: ProductCreateInput, csrfToken: string) =>
       requestJson<{ product_id: string }>(products, {
         method: 'POST', body, csrfToken,

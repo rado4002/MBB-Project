@@ -659,6 +659,15 @@ h2 { font-size: 1.125rem; }
 .products-facts .products-fact-action { margin-top: var(--space-3); }
 .products-fact-action .button { width: 100%; padding-inline: var(--space-2); }
 .products-secondary { margin-top: var(--space-5); padding-top: var(--space-4); border-top: 1px solid var(--color-border); }
+.products-lifecycle-confirmation { display: grid; gap: var(--space-3); margin-top: var(--space-4); }
+.products-lifecycle-confirmation h3, .products-lifecycle-confirmation h4, .products-lifecycle-confirmation p { margin: 0; }
+.products-lifecycle-confirmation form { display: grid; gap: var(--space-3); max-width: 36rem; }
+.products-lifecycle-list { display: grid; gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
+.products-lifecycle-list li { min-width: 0; padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
+.products-lifecycle-list .products-meta { display: block; }
+.products-lifecycle-list dl { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-5); margin: var(--space-2) 0 0; }
+.products-lifecycle-list dt { color: var(--color-text-muted); font-size: .875rem; }
+.products-lifecycle-list dd { margin: 0; font-weight: 650; }
 .products-secondary summary { min-height: 2.75rem; padding-block: var(--space-3); cursor: pointer; font-weight: 650; }
 .products-secondary .context-details { margin-bottom: 0; }
 @media (max-width: 40rem) {

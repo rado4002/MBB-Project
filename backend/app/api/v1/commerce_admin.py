@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +31,7 @@ from app.modules.commerce_admin import (
 )
 from app.modules.inventory import service as inventory_service
 from app.modules.pricing import service as pricing_service
+from app.modules.product_offer import service as product_offer_service
 from app.request_ids import normalize_or_generate_request_id
 from app.schemas.commerce_admin import (
     CurrentUsdPriceSet,
@@ -57,6 +58,7 @@ from app.schemas.commerce_admin import (
     SellableItemResponse,
     SellableItemUpdate,
 )
+from app.schemas.product_offer import ProductCommercialReviewItem, ProductCommercialReviewResponse
 
 router = APIRouter(prefix="/operator/commerce", tags=["operator-commerce"])
 _MANAGE_CAPABILITY = "commerce.manage"
@@ -257,6 +259,40 @@ async def update_product(
     )
     _no_store(response)
     return ProductResponse.model_validate(product)
+
+
+@router.get("/products/{product_id}/commercial-review", response_model=ProductCommercialReviewResponse)
+async def get_product_commercial_review(
+    product_id: UUID,
+    response: Response,
+    _principal: Annotated[BrowserPrincipal, Depends(_require_commerce_manager)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> ProductCommercialReviewResponse:
+    product = await _read_or_raise(catalog_service.get_product(db, product_id))
+    if product is None:
+        raise _map_error(catalog_service.CatalogNotFound())
+    offers, has_more, read_at = await _read_or_raise(
+        product_offer_service.list_product_offers_for_review(db, product_id, offset=offset)
+    )
+    _no_store(response)
+    return ProductCommercialReviewResponse(
+        product_id=product_id,
+        items=[
+            ProductCommercialReviewItem(
+                sellable_item_id=offer.sellable_item_id,
+                model_label=offer.model_label,
+                sku=offer.sku,
+                active=active,
+                current_usd_price=offer.current_usd_price,
+                inventory_status=offer.inventory_status,
+                offer_status=offer.offer_status,
+            )
+            for offer, active in offers
+        ],
+        has_more=has_more,
+        read_at=read_at,
+    )
 
 
 @router.get("/sellable-items", response_model=SellableItemListResponse)
