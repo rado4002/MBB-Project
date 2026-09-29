@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.catalog import SellableItem
+from app.models.catalog import Product, SellableItem
 from app.models.inventory import InventoryRecord
 from app.models.stock_movement import StockMovement
 from app.modules.commerce_admin import (
@@ -309,3 +309,34 @@ async def list_stock_movements(
         .order_by(StockMovement.occurred_at.desc(), StockMovement.movement_id.desc())
         .limit(limit)
     )).all())
+
+
+async def search_stock_items(
+    session: AsyncSession, *, query: str | None, sellable_item_id: uuid.UUID | None,
+    operational_only: bool, limit: int,
+) -> tuple[list[tuple[Product, SellableItem, InventoryRecord | None]], bool]:
+    """One bounded database read for exact variant identity and stock state."""
+    if not 1 <= limit <= 50:
+        raise ValueError("limit must be between 1 and 50")
+    statement = (
+        select(Product, SellableItem, InventoryRecord)
+        .join(SellableItem, SellableItem.product_id == Product.product_id)
+        .outerjoin(InventoryRecord, InventoryRecord.sellable_item_id == SellableItem.sellable_item_id)
+    )
+    if operational_only:
+        statement = statement.where(Product.active.is_(True), SellableItem.active.is_(True))
+    if sellable_item_id is not None:
+        statement = statement.where(SellableItem.sellable_item_id == sellable_item_id)
+    elif query:
+        escaped = query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        statement = statement.where(or_(
+            Product.name.ilike(pattern, escape="\\"),
+            SellableItem.model_label.ilike(pattern, escape="\\"),
+            SellableItem.sku.ilike(pattern, escape="\\"),
+        ))
+    rows = (await session.execute(
+        statement.order_by(Product.name, SellableItem.model_label, SellableItem.sellable_item_id)
+        .limit(limit + 1)
+    )).all()
+    return [(row[0], row[1], row[2]) for row in rows[:limit]], len(rows) > limit

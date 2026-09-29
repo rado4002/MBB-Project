@@ -1,0 +1,90 @@
+"""Role-shaped, bounded stock inspection for the Business workspace."""
+
+from __future__ import annotations
+
+from typing import Annotated, Literal
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, Query, Response
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.browser_auth_deps import BrowserPrincipal, require_capability
+from app.api.browser_auth_errors import BrowserAuthError
+from app.database import get_db
+from app.modules.inventory.service import availability_from_quantity, search_stock_items
+
+router = APIRouter(prefix="/business/stock", tags=["business-stock"])
+_require_reader = require_capability("product_offer.read")
+
+
+class StockSearchQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    query: str | None = Field(default=None, max_length=120)
+    item_id: UUID | None = None
+    limit: int = Field(default=50, ge=1, le=50)
+
+
+class StockItemPublic(BaseModel):
+    model_config = ConfigDict(extra="forbid", protected_namespaces=())
+    product_id: UUID
+    sellable_item_id: UUID
+    product_name: str
+    model_label: str | None
+    sku: str | None
+    product_active: bool
+    variant_active: bool
+    availability: Literal["available", "out_of_stock", "unknown"]
+
+
+class StockItemAdmin(StockItemPublic):
+    quantity: int | None
+    inventory_updated_at: str | None
+
+
+class StockSearchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    items: list[StockItemPublic | StockItemAdmin]
+    has_more: bool
+
+
+@router.get("", response_model=StockSearchResponse)
+async def search_stock(
+    params: Annotated[StockSearchQuery, Query()], response: Response,
+    principal: Annotated[BrowserPrincipal, Depends(_require_reader)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StockSearchResponse:
+    manager = "commerce.manage" in principal.capabilities
+    try:
+        rows, has_more = await search_stock_items(
+            db, query=params.query, sellable_item_id=params.item_id,
+            operational_only=not manager, limit=params.limit,
+        )
+    except (SQLAlchemyError, OSError) as exc:
+        raise BrowserAuthError(
+            status_code=503, code="SERVICE_UNAVAILABLE",
+            message="Stock is temporarily unavailable.",
+        ) from exc
+    items: list[StockItemPublic | StockItemAdmin] = []
+    for product, item, inventory in rows:
+        facts = dict(
+            product_id=product.product_id,
+            sellable_item_id=item.sellable_item_id,
+            product_name=product.name,
+            model_label=item.model_label,
+            sku=item.sku,
+            product_active=product.active,
+            variant_active=item.active,
+            availability=availability_from_quantity(None if inventory is None else inventory.quantity),
+        )
+        if manager:
+            items.append(StockItemAdmin(
+                **facts,
+                quantity=None if inventory is None else inventory.quantity,
+                inventory_updated_at=(None if inventory is None else inventory.updated_at.isoformat()),
+            ))
+        else:
+            items.append(StockItemPublic(**facts))
+    response.headers["Cache-Control"] = "no-store"
+    return StockSearchResponse(items=items, has_more=has_more)

@@ -612,6 +612,12 @@ h2 { font-size: 1.125rem; }
   .workspace-toolbar__actions:has(.product-lookup-trigger) { flex-direction: column; align-items: stretch; }
 }
 
+/* Business modules share one small navigation without changing the global shell. */
+.business-workspace { min-width: 0; }
+.business-navigation { display: flex; flex-wrap: wrap; gap: var(--space-2); max-width: 64rem; margin-inline: auto; padding: var(--space-4) var(--space-5) 0; }
+.business-navigation a { display: inline-flex; align-items: center; min-height: 2.75rem; padding: var(--space-2) var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-text); text-decoration: none; }
+.business-navigation a.active { border-color: var(--color-primary-hover); background: var(--color-surface-subtle); font-weight: 700; }
+
 /* Business Products: stacked sections keep exact-variant facts readable on narrow screens. */
 .products-page { max-width: 64rem; margin-inline: auto; padding: var(--space-5); overflow-wrap: anywhere; }
 .products-search, .products-write { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin-block: var(--space-4); }
@@ -670,8 +676,35 @@ h2 { font-size: 1.125rem; }
 .products-lifecycle-list dd { margin: 0; font-weight: 650; }
 .products-secondary summary { min-height: 2.75rem; padding-block: var(--space-3); cursor: pointer; font-weight: 650; }
 .products-secondary .context-details { margin-bottom: 0; }
+.stock-page { max-width: 64rem; margin-inline: auto; padding: var(--space-5); overflow-wrap: anywhere; }
+.stock-search, .stock-actions, .stock-links { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin-block: var(--space-4); }
+.stock-search label { flex-basis: 100%; }
+.stock-search input, .stock-operation input, .stock-operation textarea { min-width: 0; padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); font: inherit; background: var(--color-surface); color: var(--color-text); }
+.stock-search input { flex: 1; }
+.stock-results, .stock-activity ol { list-style: none; padding: 0; }
+.stock-results li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-3); padding-block: var(--space-4); border-bottom: 1px solid var(--color-border); }
+.stock-results li > div { min-width: 0; }
+.stock-results p { margin-block: var(--space-2) 0; color: var(--color-text-muted); }
+.stock-result-facts { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); }
+.stock-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr)); gap: var(--space-3); }
+.stock-facts > div, .stock-operation, .stock-activity li { min-width: 0; padding: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); }
+.stock-facts dt { color: var(--color-text-muted); }
+.stock-facts dd { margin: var(--space-2) 0 0; font-weight: 700; }
+.stock-operation { display: grid; gap: var(--space-3); max-width: 38rem; margin-block: var(--space-5); }
+.stock-operation h2, .stock-operation p { margin: 0; }
+.stock-operation textarea { min-height: 6rem; resize: vertical; }
+.stock-operation .stock-actions { margin: 0; }
+.stock-activity { margin-top: var(--space-6); }
+.stock-activity ol { display: grid; gap: var(--space-3); }
+.stock-activity li { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); }
+.stock-activity time { color: var(--color-text-muted); }
 @media (max-width: 40rem) {
+  .business-navigation { padding: var(--space-3) var(--space-4) 0; }
   .products-page { padding: var(--space-4); }
+  .stock-page { padding: var(--space-4); }
+  .stock-search, .stock-actions { align-items: stretch; flex-direction: column; }
+  .stock-search input, .stock-actions > .button { width: 100%; }
+  .stock-results li { display: grid; }
   .products-commercial-layout, .products-facts { grid-template-columns: minmax(0, 1fr); }
   .products-commercial-layout .products-image--large { width: min(100%, 12rem); }
   .products-search input { flex: 1; width: 100%; }

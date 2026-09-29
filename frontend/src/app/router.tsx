@@ -12,6 +12,8 @@ import { NotFoundPage } from '../features/NotFoundPage'
 import { OperatorAccountsPage } from '../features/operators/OperatorAccountsPage'
 import { SessionPage } from '../features/session/SessionPage'
 import { ProductsPage } from '../features/products/ProductsPage'
+import { BusinessWorkspace } from '../features/business/BusinessWorkspace'
+import { StockPage } from '../features/stock/StockPage'
 
 function EntryRoute() {
   const auth = useAuth()
@@ -39,10 +41,10 @@ function OperatorAccountsRoute() {
   return <OperatorAccountsPage />
 }
 
-function ProductsRoute() {
+function BusinessRoute() {
   const auth = useAuth()
   return auth.session?.capabilities.includes('product_offer.read')
-    ? <ProductsPage /> : <Navigate to="/inbox" replace />
+    ? <BusinessWorkspace /> : <Navigate to="/inbox" replace />
 }
 
 export function AppRouter() {
@@ -70,9 +72,12 @@ export function AppRouter() {
         <Route path="/account" element={<AccountPage />} />
         <Route path="/session" element={<SessionPage />} />
         <Route path="/operators" element={<OperatorAccountsRoute />} />
-        <Route path="/business" element={<Navigate to="/business/products" replace />} />
-        <Route path="/business/products" element={<ProductsRoute />} />
-        <Route path="/business/products/:productId" element={<ProductsRoute />} />
+        <Route path="/business" element={<BusinessRoute />}>
+          <Route index element={<Navigate to="products" replace />} />
+          <Route path="products" element={<ProductsPage />} />
+          <Route path="products/:productId" element={<ProductsPage />} />
+          <Route path="stock" element={<StockPage />} />
+        </Route>
       </Route>
       <Route path="*" element={<NotFoundPage />} />
     </Routes>

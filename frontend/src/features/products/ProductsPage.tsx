@@ -526,9 +526,8 @@ function VariantDetail({ id, active, onChanged }: { id: string; active: boolean;
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
-  const [action, setAction] = useState<'price' | 'stock' | null>(null)
+  const [action, setAction] = useState<'price' | null>(null)
   const [amount, setAmount] = useState('')
-  const [quantity, setQuantity] = useState('')
   const [busy, setBusy] = useState(false)
   const [needsRefresh, setNeedsRefresh] = useState(false)
   const [denied, setDenied] = useState(false)
@@ -537,7 +536,7 @@ function VariantDetail({ id, active, onChanged }: { id: string; active: boolean;
   const controller = useRef<AbortController | null>(null)
   const operation = useRef<AbortController | null>(null)
   const heading = useRef<HTMLHeadingElement>(null)
-  const formField = useRef<HTMLInputElement | HTMLSelectElement | null>(null)
+  const formField = useRef<HTMLInputElement | null>(null)
   const passwordField = useRef<HTMLInputElement>(null)
   const actionTrigger = useRef<HTMLButtonElement | null>(null)
   const fieldId = useId()
@@ -567,12 +566,9 @@ function VariantDetail({ id, active, onChanged }: { id: string; active: boolean;
   const save = async (event: FormEvent) => {
     event.preventDefault()
     if (!manager || busy || needsRefresh || denied || !action || !offer) return
-    const value = (action === 'price' ? amount : quantity).trim()
-    if (action === 'price' && (!/^\d{1,10}(?:\.\d{1,2})?$/.test(value) || /^0+(?:\.0+)?$/.test(value))) {
+    const value = amount.trim()
+    if (!/^\d{1,10}(?:\.\d{1,2})?$/.test(value) || /^0+(?:\.0+)?$/.test(value)) {
       setError('Enter a positive USD price with at most two decimal places.'); return
-    }
-    if (action === 'stock' && value !== '' && (!/^\d+$/.test(value) || Number(value) > 2147483647)) {
-      setError('Enter a whole stock quantity from 0 to 2147483647, or leave it blank for unknown.'); return
     }
     const expiry = auth.session?.recent_reauthentication_expires_at_epoch
     if (expiry == null || expiry < Math.floor(Date.now() / 1000)) { setReauth(true); return }
@@ -582,8 +578,7 @@ function VariantDetail({ id, active, onChanged }: { id: string; active: boolean;
     try {
       const csrf = await auth.getCsrfForMutation()
       if (current.signal.aborted) return
-      if (action === 'price') await commerce.changePrice(id, value, csrf, current.signal)
-      else await commerce.updateStockQuantity(id, value === '' ? null : Number(value), csrf, current.signal)
+      await commerce.changePrice(id, value, csrf, current.signal)
       saved = true
       if (current.signal.aborted) return
       setAction(null)
@@ -600,20 +595,6 @@ function VariantDetail({ id, active, onChanged }: { id: string; active: boolean;
         setNeedsRefresh(true); setOffer(null)
         setError('The change could not be confirmed. Refresh current facts before retrying; the change may already have been saved.')
       } else setError(errorMessage(apiError))
-    } finally { if (!current.signal.aborted) setBusy(false) }
-  }
-  const editStock = async (trigger: HTMLButtonElement) => {
-    actionTrigger.current = trigger
-    const current = new AbortController(); operation.current = current
-    setBusy(true); setError(null); setSuccess(null)
-    try {
-      const inventory = await commerce.getInventory(id, current.signal)
-      if (!current.signal.aborted) {
-        setQuantity(inventory.quantity === null ? '' : String(inventory.quantity))
-        setAction('stock'); setReauth(false)
-      }
-    } catch (failure) {
-      if (!current.signal.aborted) setError(errorMessage(asApiError(failure)))
     } finally { if (!current.signal.aborted) setBusy(false) }
   }
   const confirmPassword = async (event: FormEvent) => {
@@ -655,7 +636,7 @@ function VariantDetail({ id, active, onChanged }: { id: string; active: boolean;
             </div>
             <div><dt>CDF quote</dt><dd>{offer.cdf_quote_status === 'available' && offer.derived_cdf_quote ? `CDF ${offer.derived_cdf_quote.cdf_amount}` : 'CDF quote unavailable'}</dd></div>
             <div><dt>Availability</dt><dd><span className="products-status">{availability[offer.inventory_status]}</span></dd>
-              {manager && !denied && <dd className="products-fact-action"><button className="button button--secondary" disabled={busy || needsRefresh} onClick={(event) => void editStock(event.currentTarget)}>Update stock quantity</button></dd>}
+              <dd className="products-fact-action"><Link className="button button--secondary" to={`/business/stock?item=${encodeURIComponent(id)}`}>View stock</Link></dd>
             </div>
             <div><dt>Commercial status</dt><dd><span className="products-status">{statuses[offer.offer_status]}</span></dd>
               <dd className="products-fact-reason">{reasons[offer.reason_code]}</dd>
@@ -667,12 +648,10 @@ function VariantDetail({ id, active, onChanged }: { id: string; active: boolean;
       </div>
     </>}
     {manager && !denied && action && <form className="products-write" onSubmit={(event) => void save(event)}>
-      {action === 'price' ? <><label htmlFor={fieldId}>New USD price</label>
-        <input id={fieldId} ref={(element) => { formField.current = element }} inputMode="decimal" value={amount} maxLength={13} required disabled={busy}
-          onChange={(event) => setAmount(event.target.value)} /></>
-        : <><label htmlFor={fieldId}>Stock quantity</label><input id={fieldId} ref={(element) => { formField.current = element }} inputMode="numeric" type="number" min="0" max="2147483647" step="1" value={quantity} disabled={busy}
-          onChange={(event) => setQuantity(event.target.value)} /><p className="products-meta">Leave blank when stock is unconfirmed.</p></>}
-      <button className="button button--primary" disabled={busy || loading || needsRefresh || reauth}>Save {action === 'price' ? 'price' : 'stock quantity'}</button>
+      <label htmlFor={fieldId}>New USD price</label>
+      <input id={fieldId} ref={(element) => { formField.current = element }} inputMode="decimal" value={amount} maxLength={13} required disabled={busy}
+        onChange={(event) => setAmount(event.target.value)} />
+      <button className="button button--primary" disabled={busy || loading || needsRefresh || reauth}>Save price</button>
       <button className="button button--secondary" type="button" disabled={busy} onClick={cancelAction}>Cancel</button>
     </form>}
     {manager && !denied && reauth && <form className="products-write" onSubmit={(event) => void confirmPassword(event)}>

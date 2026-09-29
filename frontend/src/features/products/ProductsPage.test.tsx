@@ -42,7 +42,6 @@ function setup(role: 'operator' | 'administrator' | 'analyst' = 'operator', valu
     http.get(base, () => HttpResponse.json({ items: [product], has_more: false })),
     http.get(`${base}/:id`, () => HttpResponse.json(product)),
     http.get(offerPath, () => HttpResponse.json(value)),
-    http.get(`${commerce}/inventory`, () => HttpResponse.json({ quantity: 5 })),
   )
 }
 async function openVariant() {
@@ -218,66 +217,18 @@ describe('shared Business Products', () => {
     expect(writes).toBe(1)
   })
 
-  it('returns keyboard focus to the action after cancelling without writes', async () => {
+  it('keeps price editing on Product detail and links exact stock work to Stock', async () => {
     setup('administrator')
     const user = await openVariant()
-    const trigger = screen.getByRole('button', { name: 'Update stock quantity' })
+    const stock = screen.getByRole('link', { name: 'View stock' })
+    expect(stock).toHaveAttribute('href', `/business/stock?item=${itemId}`)
+    expect(screen.queryByRole('button', { name: 'Update stock quantity' })).not.toBeInTheDocument()
+    const trigger = screen.getByRole('button', { name: 'Change price' })
     await user.click(trigger)
-    expect(await screen.findByRole('spinbutton', { name: 'Stock quantity' })).toHaveFocus()
+    expect(screen.getByRole('textbox', { name: 'New USD price' })).toHaveFocus()
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
     await waitFor(() => expect(trigger).toHaveFocus())
-    expect(screen.queryByRole('spinbutton', { name: 'Stock quantity' })).not.toBeInTheDocument()
-  })
-
-  it('updates stock quantity and rereads derived commercial interpretation', async () => {
-    setup('administrator')
-    let current = offer()
-    server.use(
-      http.get(offerPath, () => HttpResponse.json(current)),
-      http.put(`${commerce}/inventory`, async ({ request }) => {
-        expect(await request.json()).toEqual({ quantity: 0 })
-        expect(request.headers.get('X-CSRF-Token')).toBe('commerce-csrf')
-        current = offer({ inventory_status: 'out_of_stock', offer_status: 'out_of_stock', reason_code: 'inventory_out_of_stock', is_sellable_now: false })
-        return HttpResponse.json({ quantity: 0, status: 'out_of_stock' })
-      }),
-    )
-    const user = await openVariant()
-    expect(screen.getByRole('button', { name: 'Update stock quantity' }).closest('div')).toHaveTextContent('AvailabilityAvailable')
-    await user.click(screen.getByRole('button', { name: 'Update stock quantity' }))
-    const quantityInput = await screen.findByRole('spinbutton', { name: 'Stock quantity' })
-    expect(quantityInput).toHaveValue(5)
-    await user.clear(quantityInput)
-    await user.type(quantityInput, '0')
-    await user.click(screen.getByRole('button', { name: 'Save stock quantity' }))
-    await screen.findByText('Marked unavailable')
-    expect(screen.getByText('USD 55.00')).toBeInTheDocument()
-    expect(screen.getAllByText('Out of stock')).toHaveLength(2)
-  })
-
-  it('can clear an unverified count and rejects invalid stock input before writing', async () => {
-    setup('administrator')
-    let writes = 0
-    let current = offer()
-    server.use(
-      http.get(offerPath, () => HttpResponse.json(current)),
-      http.put(`${commerce}/inventory`, async ({ request }) => {
-        writes++
-        expect(await request.json()).toEqual({ quantity: null })
-        current = offer({ inventory_status: 'unknown', inventory_configured: false,
-          offer_status: 'availability_unconfirmed', reason_code: 'availability_unconfirmed', is_sellable_now: false })
-        return HttpResponse.json({ quantity: null, status: 'unknown', configured: false })
-      }),
-    )
-    const user = await openVariant()
-    await user.click(screen.getByRole('button', { name: 'Update stock quantity' }))
-    const input = await screen.findByRole('spinbutton', { name: 'Stock quantity' })
-    fireEvent.change(input, { target: { value: '-1' } })
-    await user.click(screen.getByRole('button', { name: 'Save stock quantity' }))
-    expect(writes).toBe(0)
-    fireEvent.change(input, { target: { value: '' } })
-    await user.click(screen.getByRole('button', { name: 'Save stock quantity' }))
-    expect(await screen.findAllByText('Availability unconfirmed')).toHaveLength(2)
-    expect(writes).toBe(1)
+    expect(screen.queryByRole('textbox', { name: 'New USD price' })).not.toBeInTheDocument()
   })
 
   it('rejects invalid decimals locally and preserves input through backend validation errors', async () => {
@@ -320,13 +271,13 @@ describe('shared Business Products', () => {
 
   it('removes maintenance actions when the server denies permission', async () => {
     setup('administrator')
-    server.use(http.put(`${commerce}/inventory`, () => HttpResponse.json({ error: { code: 'capability_required' } }, { status: 403 })))
+    server.use(http.put(`${commerce}/price`, () => HttpResponse.json({ error: { code: 'capability_required' } }, { status: 403 })))
     const user = await openVariant()
-    await user.click(screen.getByRole('button', { name: 'Update stock quantity' }))
-    await user.click(await screen.findByRole('button', { name: 'Save stock quantity' }))
+    await user.click(screen.getByRole('button', { name: 'Change price' }))
+    await user.click(await screen.findByRole('button', { name: 'Save price' }))
     await screen.findByText('You do not have permission to maintain products.')
     expect(screen.queryByRole('button', { name: 'Change price' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Update stock quantity' })).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'View stock' })).toBeInTheDocument()
   })
 
   it('requires authoritative refresh after an ambiguous write failure', async () => {
