@@ -281,9 +281,11 @@ function ProductList() {
     return () => controller.current?.abort()
   }, [load])
   return <>
-    <h1>Products</h1>
+    <header className="business-page-heading">
+      <div><h1>Products</h1></div>
+      {manager && !adding && <button className="button button--primary" onClick={() => setAdding(true)}>Add product</button>}
+    </header>
     {fromStock && manager && <p>Create the Product and first variant here. Both remain inactive. Stock setup follows.</p>}
-    {manager && !adding && <button className="button button--primary" onClick={() => setAdding(true)}>Add product</button>}
     {manager && adding && !createdProduct && <ProductCreateForm
       onCreated={(id, name) => setCreatedProduct({ id, name })}
       onCancel={() => { setAdding(false); void load('') }} onReview={() => void load('')} />}

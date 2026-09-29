@@ -48,16 +48,22 @@ function stockError(failure: unknown): string {
 }
 
 export function StockPage() {
+  const auth = useAuth()
+  const manager = auth.session?.capabilities.includes('commerce.manage') ?? false
   const [params, setParams] = useSearchParams()
   const itemId = params.get('item')
   const query = params.get('q') ?? ''
   const setup = params.get('setup') === '1'
   return <section className="stock-page">
-    <p className="eyebrow">Business · Stock</p>
+    <header className="business-page-heading">
+      <div><p className="eyebrow">Business · Stock</p><h1>Stock</h1></div>
+      {manager && <Link className="button button--primary" to="/business/products?from=stock">Add new product</Link>}
+    </header>
     <div className={`stock-workspace${itemId ? ' stock-workspace--selected' : ''}`}>
       <div className="stock-workspace-list"><StockList key={query} query={query} selectedId={itemId}
         onSearch={(value) => setParams(value ? { q: value } : {})} /></div>
       {itemId && <div className="stock-workspace-detail"><StockDetail key={itemId} id={itemId} query={query} setup={setup} /></div>}
+      {!itemId && <div className="stock-empty-detail">Select a stock item to see its current facts and actions.</div>}
     </div>
   </section>
 }
@@ -90,35 +96,38 @@ function StockList({ query, selectedId, onSearch }: { query: string; selectedId:
     return () => controller.current?.abort()
   }, [load])
   return <>
-    {selectedId ? <h2>Stock</h2> : <h1>Stock</h1>}
-    {manager && <Link className="button button--primary" to="/business/products?from=stock">Add new product</Link>}
     <form className="stock-search" onSubmit={(event) => { event.preventDefault(); onSearch(input.trim()) }}>
       <label htmlFor={searchId}>Product, variant, or SKU</label>
-      <input id={searchId} value={input} maxLength={120} onChange={(event) => setInput(event.target.value)} />
+      <input id={searchId} value={input} maxLength={120} placeholder="Search product, variant, or SKU" onChange={(event) => setInput(event.target.value)} />
       <button className="button button--primary">Search</button>
     </form>
-    {loading && <p role="status">Loading stock…</p>}
-    {error && <div role="alert"><p>{error}</p><button className="button button--secondary" onClick={() => void load()}>Retry</button></div>}
-    {items && <>
+    <div className="stock-results-card">
+      <div className="stock-results-heading"><strong>Stock items</strong>{items && <span>{items.length} {items.length === 1 ? 'result' : 'results'}{hasMore ? ' shown' : ''} · Sorted by product name</span>}</div>
+      {loading && <p role="status">Loading stock…</p>}
+      {error && <div className="stock-results-error" role="alert"><p>{error}</p><button className="button button--secondary" onClick={() => void load()}>Retry</button></div>}
+      {items && <>
       {!items.length && <p role="status">No matching variants.</p>}
       {hasMore && <p role="status">Showing the first 50 variants. Refine your search to find more.</p>}
       <ul className="stock-results">
         {items.map((item) => <li key={item.sellable_item_id} className={selectedId === item.sellable_item_id ? 'stock-result--selected' : undefined}>
-          <div>
+          <span className="stock-image stock-image--small" aria-hidden="true">No image</span>
+          <div className="stock-result-main">
             <Link to={`/business/stock?${new URLSearchParams({ ...(query ? { q: query } : {}), item: item.sellable_item_id })}`}>
               {item.product_name} · {item.model_label || 'Standard variant'}
             </Link>
             {item.sku && <p>SKU: {item.sku}</p>}
-            {manager && <p>{item.product_active && item.variant_active ? 'Active' : 'Inactive'}</p>}
+            {manager && <span className={`stock-state ${item.product_active && item.variant_active ? 'stock-state--active' : 'stock-state--inactive'}`}>
+              {item.product_active && item.variant_active ? 'Active' : 'Inactive'}</span>}
           </div>
           <div className="stock-result-facts">
-            <span>{availability[item.availability]}</span>
+            <span className={`stock-availability stock-availability--${item.availability}`}>{availability[item.availability]}</span>
             {manager && item.quantity !== undefined && <span>Quantity: {item.quantity === null ? 'Unknown' : item.quantity}</span>}
             {manager && item.inventory_updated_at !== undefined && <span>Updated: {item.inventory_updated_at ? new Date(item.inventory_updated_at).toLocaleString() : 'Never'}</span>}
           </div>
         </li>)}
       </ul>
-    </>}
+      </>}
+    </div>
   </>
 }
 
@@ -298,13 +307,17 @@ function StockDetail({ id, query, setup }: { id: string; query: string; setup: b
     {notice && <p role="status">{notice}</p>}
     {!item && !loading && <button className="button button--secondary" onClick={() => void load()}>Retry</button>}
     {item && <>
-      <h1>{item.product_name} · {item.model_label || 'Standard variant'}</h1>
-      {item.sku && <p>SKU: {item.sku}</p>}
-      {manager && <p>{item.product_active && item.variant_active ? 'Active' : 'Inactive'}</p>}
+      <header className="stock-detail-heading">
+        <span className="stock-image" aria-hidden="true">No image</span>
+        <div><h2>{item.product_name} · {item.model_label || 'Standard variant'}</h2>
+          {item.sku && <p>SKU: {item.sku}</p>}
+          {manager && <span className={`stock-state ${item.product_active && item.variant_active ? 'stock-state--active' : 'stock-state--inactive'}`}>
+            {item.product_active && item.variant_active ? 'Active' : 'Inactive'}</span>}</div>
+      </header>
       {setup && manager && <p role="status">Product and first variant were created inactive. Set price and establish a verified stock count separately, then review the current facts.</p>}
       <dl className="stock-facts">
         {adminItem && <div><dt>Current USD price</dt><dd>{adminItem.current_usd_price == null ? 'Not set' : `USD ${adminItem.current_usd_price}`}</dd></div>}
-        <div><dt>Availability</dt><dd>{availability[item.availability]}</dd></div>
+        <div><dt>Availability</dt><dd><span className={`stock-availability stock-availability--${item.availability}`}>{availability[item.availability]}</span></dd></div>
         {adminItem && <div><dt>Current quantity</dt><dd>{adminItem.quantity === null ? 'Unknown' : adminItem.quantity}</dd></div>}
         {adminItem && <div><dt>Last stock update</dt><dd>{adminItem.inventory_updated_at ? new Date(adminItem.inventory_updated_at).toLocaleString() : 'Never'}</dd></div>}
       </dl>
@@ -359,8 +372,8 @@ function StockDetail({ id, query, setup }: { id: string; query: string; setup: b
         <h2>Recent stock activity</h2>
         {activityError && <p role="alert">{activityError}</p>}
         {!activityError && !activity.length && <p>No stock movements recorded yet.</p>}
-        <ol>{activity.map((movement) => <li key={movement.movement_id}>
-          <strong>{movement.operation_kind === 'receive' ? 'Receive' : 'Adjust'}</strong>
+        <ol>{activity.map((movement) => <li key={movement.movement_id} className={`stock-activity-${movement.operation_kind}`}>
+          <strong className="stock-activity-kind">{movement.operation_kind === 'receive' ? 'Receive' : 'Adjust'}</strong>
           <span>{movement.before_quantity === null ? 'Unknown' : movement.before_quantity} → {movement.after_quantity === null ? 'Unknown' : movement.after_quantity}</span>
           {movement.received_amount !== null && <span>+{movement.received_amount}</span>}
           {movement.reason && <span>{movement.reason}</span>}

@@ -77,8 +77,12 @@ describe('Business Stock', () => {
     setup()
     const user = userEvent.setup()
     const { container } = renderApp('/business/products')
-    await user.click(await screen.findByRole('link', { name: 'Stock' }))
+    await screen.findByRole('link', { name: 'Stock' })
+    expect(within(container.querySelector('.business-sidebar') as HTMLElement).getByRole('link', { name: 'Products' })).toHaveClass('active')
+    await user.click(screen.getByRole('link', { name: 'Stock' }))
     expect(await screen.findByRole('heading', { name: 'Stock' })).toBeInTheDocument()
+    expect(within(container.querySelector('.business-sidebar') as HTMLElement).getByRole('link', { name: 'Stock' })).toHaveClass('active')
+    expect(screen.getByRole('combobox', { name: 'Business' })).toHaveValue('stock')
     for (const query of ['Fictional Air Fryer', '6L', 'FRY-6L']) {
       await user.clear(screen.getByRole('textbox', { name: 'Product, variant, or SKU' }))
       await user.type(screen.getByRole('textbox', { name: 'Product, variant, or SKU' }), query)
@@ -86,6 +90,11 @@ describe('Business Stock', () => {
       expect(await screen.findByRole('link', { name: 'Fictional Air Fryer · 6L' })).toBeInTheDocument()
     }
     await user.click(screen.getByRole('link', { name: 'Fictional Air Fryer · 6L' }))
+    expect(screen.getByRole('link', { name: 'Fictional Air Fryer · 6L' }).closest('li')).toHaveClass('stock-result--selected')
+    await screen.findByText('Current USD price')
+    const detail = container.querySelector('.stock-detail') as HTMLElement
+    expect(within(detail).getByText('Current USD price')).toBeInTheDocument()
+    expect(within(detail).getByText('Current quantity')).toBeInTheDocument()
     expect(await screen.findByRole('heading', { name: 'Recent stock activity' })).toBeInTheDocument()
     expect(screen.getByText('10 → 15')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'View product' })).toHaveAttribute('href', `/business/products/${productId}?variant=${itemId}`)
