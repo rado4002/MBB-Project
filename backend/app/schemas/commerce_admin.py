@@ -8,6 +8,7 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import (
+    AwareDatetime,
     BaseModel,
     ConfigDict,
     Field,
@@ -357,3 +358,45 @@ class InventoryStatusResponse(StrictCommerceModel):
     quantity: int | None
     inventory_id: UUID | None
     updated_at: datetime | None
+
+
+class StockReceive(StrictCommerceModel):
+    operation_key: UUID
+    received_amount: StrictInt = Field(ge=1, le=2147483647)
+    expected_quantity: StrictInt = Field(ge=0, le=2147483647)
+    expected_updated_at: AwareDatetime | None
+
+
+class StockAdjust(StrictCommerceModel):
+    operation_key: UUID
+    corrected_quantity: StrictInt = Field(ge=0, le=2147483647)
+    expected_quantity: StrictInt | None = Field(ge=0, le=2147483647)
+    expected_updated_at: AwareDatetime | None
+    reason: StrictStr = Field(min_length=1, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_reason(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("a correction reason is required")
+        return normalized
+
+
+class StockMovementResponse(StrictCommerceModel):
+    movement_id: UUID
+    sellable_item_id: UUID
+    operation_kind: Literal["receive", "adjust"]
+    before_quantity: int | None
+    before_updated_at: datetime | None
+    received_amount: int | None
+    corrected_quantity: int | None
+    after_quantity: int | None
+    reason: str | None
+    actor_account_id: UUID
+    operation_key: UUID | None
+    occurred_at: datetime
+
+
+class StockMovementListResponse(StrictCommerceModel):
+    items: list[StockMovementResponse]

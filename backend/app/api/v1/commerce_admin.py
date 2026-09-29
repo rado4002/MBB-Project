@@ -42,6 +42,10 @@ from app.schemas.commerce_admin import (
     ExchangeRateSet,
     InventoryStatusResponse,
     InventoryStatusSet,
+    StockAdjust,
+    StockMovementListResponse,
+    StockMovementResponse,
+    StockReceive,
     PriceHistoryResponse,
     PriceResponse,
     ProductCreate,
@@ -90,6 +94,10 @@ def _map_error(exc: Exception) -> BrowserAuthError:
         return _error(
             409, "COMMERCE_CONFLICT", "The commerce data conflicts with current state."
         )
+    if isinstance(exc, inventory_service.InventoryQuantityUnknown):
+        return _error(409, "STOCK_QUANTITY_UNKNOWN", "Establish a verified stock count first.")
+    if isinstance(exc, inventory_service.InventoryConflict):
+        return _error(409, "STOCK_CONFLICT", "Stock changed. Refresh before retrying.")
     if isinstance(exc, pricing_service.ExchangeRateAuthorityUnavailable):
         return _error(
             409,
@@ -155,6 +163,8 @@ async def _commit_or_raise(db: AsyncSession, operation: Any) -> Any:
         pricing_service.AutomaticExchangeRateRejected,
         ExchangeRateAPIError,
         inventory_service.InventoryNotFound,
+        inventory_service.InventoryConflict,
+        inventory_service.InventoryQuantityUnknown,
         CommerceAuthorizationDenied,
     ) as exc:
         await db.rollback()
@@ -164,7 +174,7 @@ async def _commit_or_raise(db: AsyncSession, operation: Any) -> Any:
 async def _read_or_raise(operation: Any) -> Any:
     try:
         return await operation
-    except (SQLAlchemyError, OSError) as exc:
+    except (SQLAlchemyError, OSError, inventory_service.InventoryNotFound) as exc:
         raise _map_error(exc) from exc
 
 
@@ -603,6 +613,87 @@ async def set_inventory_status(
     )
     _no_store(response)
     return InventoryStatusResponse.model_validate(result, from_attributes=True)
+
+
+@router.post(
+    "/sellable-items/{sellable_item_id}/inventory/receive",
+    response_model=StockMovementResponse,
+)
+async def receive_stock(
+    sellable_item_id: UUID,
+    body: StockReceive,
+    request: Request,
+    response: Response,
+    principal: Annotated[BrowserPrincipal, Depends(_require_commerce_manager)],
+    _csrf: Annotated[BrowserPrincipal, Depends(require_csrf)],
+    _recent: Annotated[BrowserPrincipal, Depends(require_recent_reauthentication)],
+    settings: Annotated[Settings, Depends(get_browser_settings)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StockMovementResponse:
+    _write_guard(request, settings)
+    movement = await _commit_or_raise(
+        db, inventory_service.receive_stock(
+            db, sellable_item_id=sellable_item_id,
+            received_amount=body.received_amount,
+            expected_quantity=body.expected_quantity,
+            expected_updated_at=body.expected_updated_at,
+            operation_key=body.operation_key,
+            administrator=_administrator(request, principal),
+        ),
+    )
+    _no_store(response)
+    return StockMovementResponse.model_validate(movement, from_attributes=True)
+
+
+@router.post(
+    "/sellable-items/{sellable_item_id}/inventory/adjust",
+    response_model=StockMovementResponse,
+)
+async def adjust_stock(
+    sellable_item_id: UUID,
+    body: StockAdjust,
+    request: Request,
+    response: Response,
+    principal: Annotated[BrowserPrincipal, Depends(_require_commerce_manager)],
+    _csrf: Annotated[BrowserPrincipal, Depends(require_csrf)],
+    _recent: Annotated[BrowserPrincipal, Depends(require_recent_reauthentication)],
+    settings: Annotated[Settings, Depends(get_browser_settings)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StockMovementResponse:
+    _write_guard(request, settings)
+    movement = await _commit_or_raise(
+        db, inventory_service.adjust_stock(
+            db, sellable_item_id=sellable_item_id,
+            corrected_quantity=body.corrected_quantity,
+            reason=body.reason,
+            expected_quantity=body.expected_quantity,
+            expected_updated_at=body.expected_updated_at,
+            operation_key=body.operation_key,
+            administrator=_administrator(request, principal),
+        ),
+    )
+    _no_store(response)
+    return StockMovementResponse.model_validate(movement, from_attributes=True)
+
+
+@router.get(
+    "/sellable-items/{sellable_item_id}/inventory/activity",
+    response_model=StockMovementListResponse,
+)
+async def list_stock_activity(
+    sellable_item_id: UUID,
+    response: Response,
+    _principal: Annotated[BrowserPrincipal, Depends(_require_commerce_manager)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+) -> StockMovementListResponse:
+    items = await _read_or_raise(
+        inventory_service.list_stock_movements(db, sellable_item_id=sellable_item_id, limit=limit)
+    )
+    _no_store(response)
+    return StockMovementListResponse(
+        items=[StockMovementResponse.model_validate(item, from_attributes=True) for item in items]
+    )
 
 
 @router.get("/exchange-rates/usd-cdf", response_model=ExchangeRateHistoryResponse)
