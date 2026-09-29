@@ -16,6 +16,7 @@ const stockItem = {
   product_id: productId, sellable_item_id: itemId, product_name: 'Fictional Air Fryer',
   model_label: '6L', sku: 'FRY-6L', product_active: true, variant_active: true,
   availability: 'available', quantity: 10, inventory_updated_at: '2026-09-28T12:00:00Z',
+  current_usd_price: null as string | null,
 }
 const movement: StockMovement = {
   movement_id: '22222222-2222-4222-8222-222222222222', sellable_item_id: itemId,
@@ -23,8 +24,10 @@ const movement: StockMovement = {
   received_amount: 5, corrected_quantity: null, after_quantity: 15, reason: null,
   actor_account_id: 'account-test-only', operation_key: 'key-test', occurred_at: '2026-09-29T12:00:00Z',
 }
-function setup(role: 'administrator' | 'operator' = 'administrator', quantity: number | null = 10) {
+function setup(role: 'administrator' | 'operator' = 'administrator', quantity: number | null = 10, initialPrice: string | null = null) {
   let current = quantity
+  let price = initialPrice
+  const writes: string[] = []
   let updatedAt: string | null = quantity === null ? null : stockItem.inventory_updated_at
   let movements = quantity === null ? [] : [movement]
   server.use(
@@ -35,13 +38,14 @@ function setup(role: 'administrator' | 'operator' = 'administrator', quantity: n
       const query = url.searchParams.get('query')?.toLowerCase()
       const found = !query || ['fictional air fryer', '6l', 'fry-6l'].some((text) => text.includes(query))
       const exact = !url.searchParams.get('item_id') || url.searchParams.get('item_id') === itemId
-      const item = { ...stockItem, quantity: current, inventory_updated_at: updatedAt,
+      const item = { ...stockItem, quantity: current, inventory_updated_at: updatedAt, current_usd_price: price,
         availability: current === null ? 'unknown' : current === 0 ? 'out_of_stock' : 'available' }
-      if (role === 'operator') { delete (item as Partial<typeof item>).quantity; delete (item as Partial<typeof item>).inventory_updated_at }
+      if (role === 'operator') { delete (item as Partial<typeof item>).quantity; delete (item as Partial<typeof item>).inventory_updated_at; delete (item as Partial<typeof item>).current_usd_price }
       return HttpResponse.json({ items: found && exact ? [item] : [], has_more: false })
     }),
     http.get(`${inventory}/activity`, () => HttpResponse.json({ items: movements })),
     http.post(`${inventory}/receive`, async ({ request }) => {
+      writes.push('receive')
       const body = await request.json() as { received_amount: number }
       const before = current
       current = (current ?? 0) + body.received_amount
@@ -50,6 +54,7 @@ function setup(role: 'administrator' | 'operator' = 'administrator', quantity: n
       return HttpResponse.json(movements[0])
     }),
     http.post(`${inventory}/adjust`, async ({ request }) => {
+      writes.push('adjust')
       const body = await request.json() as { corrected_quantity: number; reason: string }
       const before = current
       current = body.corrected_quantity
@@ -58,7 +63,13 @@ function setup(role: 'administrator' | 'operator' = 'administrator', quantity: n
         corrected_quantity: current, after_quantity: current, reason: body.reason }]
       return HttpResponse.json(movements[0])
     }),
+    http.put(`/api/v1/operator/commerce/sellable-items/${itemId}/price`, async ({ request }) => {
+      writes.push('price')
+      price = (await request.json() as { amount: string }).amount
+      return HttpResponse.json({ amount: price, currency: 'USD' })
+    }),
   )
+  return writes
 }
 
 describe('Business Stock', () => {
@@ -186,8 +197,106 @@ describe('Business Stock', () => {
     await user.click(result)
     expect(await screen.findByText('Availability')).toBeInTheDocument()
     expect(screen.queryByText('Current quantity')).not.toBeInTheDocument()
+    expect(screen.queryByText('Current USD price')).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Recent stock activity' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Receive stock|Adjust stock/ })).not.toBeInTheDocument()
+    await expectAccessible(container)
+  })
+
+  it('mirrors current price and saves price independently of stock', async () => {
+    const writes = setup('administrator', 10, '55.00')
+    const user = userEvent.setup()
+    const { container } = renderApp(`/business/stock?item=${itemId}`)
+    expect(await screen.findByText('USD 55.00')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Change price' }))
+    expect(screen.getByRole('textbox', { name: 'New USD price' })).toHaveValue('55.00')
+    await user.clear(screen.getByRole('textbox', { name: 'New USD price' }))
+    await user.type(screen.getByRole('textbox', { name: 'New USD price' }), '60.00')
+    await user.click(screen.getByRole('button', { name: 'Save price' }))
+    await waitFor(() => expect(writes).toEqual(['price']))
+    expect(await screen.findByText('USD 60.00')).toBeInTheDocument()
+    expect(screen.getByText(/Price saved/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Adjust stock' }))
+    await user.type(screen.getByRole('textbox', { name: 'Corrected quantity' }), '8')
+    await user.type(screen.getByRole('textbox', { name: 'Reason for correction' }), 'Verified count')
+    await user.click(screen.getByRole('button', { name: 'Review change' }))
+    await user.click(screen.getByRole('button', { name: 'Confirm stock change' }))
+    await waitFor(() => expect(writes).toEqual(['price', 'adjust']))
+    await expectAccessible(container)
+  })
+
+  it('keeps the price form through reauthentication and blocks a retry until uncertain price is reread', async () => {
+    setup()
+    let writes = 0
+    server.use(
+      http.get('/api/v1/auth/session', () => HttpResponse.json(sessionFixture('administrator'))),
+      http.post('/api/v1/auth/reauthenticate', () => HttpResponse.json({ ...sessionFixture('administrator'),
+        recent_reauthentication_expires_at_epoch: 2_000_000_000, csrf_token: 'rotated-csrf' })),
+      http.put(`/api/v1/operator/commerce/sellable-items/${itemId}/price`, ({ request }) => {
+        expect(request.headers.get('X-CSRF-Token')).toBe('rotated-csrf')
+        writes++
+        return HttpResponse.json({ error: { code: 'SERVICE_UNAVAILABLE', message: 'unavailable' } }, { status: 503 })
+      }),
+    )
+    const user = userEvent.setup()
+    renderApp(`/business/stock?item=${itemId}`)
+    await user.click(await screen.findByRole('button', { name: 'Set price' }))
+    await user.type(screen.getByRole('textbox', { name: 'New USD price' }), '42.00')
+    await user.click(screen.getByRole('button', { name: 'Save price' }))
+    expect(writes).toBe(0)
+    await user.type(await screen.findByLabelText('Confirm Administrator password'), 'Administrator-Access-42!')
+    await user.click(screen.getByRole('button', { name: 'Confirm password' }))
+    expect(screen.getByRole('textbox', { name: 'New USD price' })).toHaveValue('42.00')
+    await user.click(screen.getByRole('button', { name: 'Save price' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('price change could not be confirmed')
+    expect(writes).toBe(1)
+    expect(screen.getByRole('button', { name: 'Adjust stock' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Refresh current facts' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Adjust stock' })).toBeEnabled())
+  })
+
+  it('starts existing Product creation from Stock and hands the first variant back to Stock setup', async () => {
+    setup('administrator', null)
+    const writes: string[] = []
+    server.use(
+      http.get('/api/v1/business/products', () => HttpResponse.json({ items: [], has_more: false })),
+      http.post('/api/v1/operator/commerce/products', async ({ request }) => {
+        expect(await request.json()).toMatchObject({ active: false, name: 'Fictional Air Fryer' })
+        writes.push('product')
+        return HttpResponse.json({ product_id: productId }, { status: 201 })
+      }),
+      http.post(`/api/v1/operator/commerce/products/${productId}/sellable-items`, async ({ request }) => {
+        expect(await request.json()).toMatchObject({ active: false, sku: 'FRY-6L' })
+        writes.push('variant')
+        return HttpResponse.json({ sellable_item_id: itemId }, { status: 201 })
+      }),
+    )
+    const user = userEvent.setup()
+    const { container } = renderApp('/business/stock')
+    await user.click(await screen.findByRole('link', { name: 'Add new product' }))
+    expect(await screen.findByRole('heading', { name: 'Add product' })).toBeInTheDocument()
+    await user.type(screen.getByRole('textbox', { name: 'Product name' }), 'Fictional Air Fryer')
+    await user.type(screen.getByRole('textbox', { name: 'Category code' }), 'appliance')
+    await user.type(screen.getByRole('textbox', { name: 'Description' }), 'Fictional review product')
+    await user.click(screen.getByRole('button', { name: 'Save product' }))
+    await user.type(await screen.findByRole('textbox', { name: 'Variant name (optional)' }), '6L')
+    await user.type(screen.getByRole('textbox', { name: 'SKU (optional)' }), 'FRY-6L')
+    await user.click(screen.getByRole('button', { name: 'Save first variant' }))
+    expect(await screen.findByText(/Product and first variant were created inactive/)).toBeInTheDocument()
+    expect(writes).toEqual(['product', 'variant'])
+    expect(screen.getByRole('button', { name: 'Set price' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Adjust stock' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Set price' }))
+    await user.type(screen.getByRole('textbox', { name: 'New USD price' }), '25.00')
+    await user.click(screen.getByRole('button', { name: 'Save price' }))
+    expect(await screen.findByRole('heading', { name: 'Adjust stock' })).toBeInTheDocument()
+    expect(screen.getByText('USD 25.00')).toBeInTheDocument()
+    await user.type(screen.getByRole('textbox', { name: 'Corrected quantity' }), '5')
+    await user.type(screen.getByRole('textbox', { name: 'Reason for correction' }), 'Initial verified count')
+    await user.click(screen.getByRole('button', { name: 'Review change' }))
+    expect(screen.getByText('Unknown → 5')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Confirm stock change' }))
+    expect(await screen.findByText('Available')).toBeInTheDocument()
     await expectAccessible(container)
   })
 })

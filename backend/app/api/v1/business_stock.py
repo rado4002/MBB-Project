@@ -14,6 +14,7 @@ from app.api.browser_auth_deps import BrowserPrincipal, require_capability
 from app.api.browser_auth_errors import BrowserAuthError
 from app.database import get_db
 from app.modules.inventory.service import availability_from_quantity, search_stock_items
+from app.modules.pricing.service import get_current_usd_prices
 
 router = APIRouter(prefix="/business/stock", tags=["business-stock"])
 _require_reader = require_capability("product_offer.read")
@@ -41,6 +42,7 @@ class StockItemPublic(BaseModel):
 class StockItemAdmin(StockItemPublic):
     quantity: int | None
     inventory_updated_at: str | None
+    current_usd_price: str | None
 
 
 class StockSearchResponse(BaseModel):
@@ -61,6 +63,9 @@ async def search_stock(
             db, query=params.query, sellable_item_id=params.item_id,
             operational_only=not manager, limit=params.limit,
         )
+        prices = await get_current_usd_prices(
+            db, [item.sellable_item_id for _, item, _ in rows]
+        ) if manager else {}
     except (SQLAlchemyError, OSError) as exc:
         raise BrowserAuthError(
             status_code=503, code="SERVICE_UNAVAILABLE",
@@ -83,6 +88,10 @@ async def search_stock(
                 **facts,
                 quantity=None if inventory is None else inventory.quantity,
                 inventory_updated_at=(None if inventory is None else inventory.updated_at.isoformat()),
+                current_usd_price=(
+                    None if item.sellable_item_id not in prices
+                    else str(prices[item.sellable_item_id].amount)
+                ),
             ))
         else:
             items.append(StockItemPublic(**facts))

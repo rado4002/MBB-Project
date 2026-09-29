@@ -107,6 +107,22 @@ async def get_current_price(
     )
 
 
+async def get_current_usd_prices(
+    session: AsyncSession, sellable_item_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, SellableItemPrice]:
+    """Read current prices for a bounded page of sellable items in one query."""
+    if not sellable_item_ids:
+        return {}
+    prices = (await session.scalars(
+        select(SellableItemPrice).where(
+            SellableItemPrice.sellable_item_id.in_(sellable_item_ids),
+            SellableItemPrice.currency == USD,
+            SellableItemPrice.ended_at.is_(None),
+        )
+    )).all()
+    return {price.sellable_item_id: price for price in prices}
+
+
 async def list_price_history(
     session: AsyncSession,
     sellable_item_id: uuid.UUID,

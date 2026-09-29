@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -13,6 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.api.v1 import business_stock
 from app.models.catalog import Product, SellableItem
 from app.models.inventory import InventoryRecord
+from app.models.pricing import SellableItemPrice
 from test_commerce_admin_api import (
     ADMIN_PASSWORD, OPERATOR_PASSWORD, ORIGIN, _login,
     harness,  # noqa: F401 -- disposable PostgreSQL/browser-session fixture
@@ -53,6 +55,10 @@ async def stock_catalog(harness):  # noqa: F811 -- imported shared fixture
             InventoryRecord(sellable_item_id=variants[1].sellable_item_id, status="out_of_stock", quantity=0),
             InventoryRecord(sellable_item_id=variants[2].sellable_item_id, status="available", quantity=9),
         ])
+        session.add(SellableItemPrice(
+            sellable_item_id=variants[0].sellable_item_id,
+            amount=Decimal("45.00"), currency="USD",
+        ))
         await session.commit()
     return transport, variants
 
@@ -69,6 +75,8 @@ async def test_administrator_searches_product_variant_sku_and_exact_item(stock_c
         assert len(all_items.json()["items"]) == 4
         by_id = {entry["sellable_item_id"]: entry for entry in all_items.json()["items"]}
         assert by_id[str(variants[0].sellable_item_id)]["quantity"] == 5
+        assert by_id[str(variants[0].sellable_item_id)]["current_usd_price"] == "45.00"
+        assert by_id[str(variants[1].sellable_item_id)]["current_usd_price"] is None
         assert by_id[str(variants[1].sellable_item_id)]["availability"] == "out_of_stock"
         assert by_id[str(variants[2].sellable_item_id)]["variant_active"] is False
         assert by_id[str(variants[3].sellable_item_id)]["product_active"] is False
@@ -99,7 +107,8 @@ async def test_operator_sees_only_operational_items_and_no_exact_quantity(stock_
             str(variants[0].sellable_item_id), str(variants[1].sellable_item_id),
         }
         assert {entry["availability"] for entry in items} == {"available", "out_of_stock"}
-        assert all("quantity" not in entry and "inventory_updated_at" not in entry for entry in items)
+        assert all("quantity" not in entry and "inventory_updated_at" not in entry
+                   and "current_usd_price" not in entry for entry in items)
         for hidden in variants[2:]:
             exact = await client.get(base, params={"item_id": str(hidden.sellable_item_id)})
             assert exact.status_code == 200 and exact.json()["items"] == []

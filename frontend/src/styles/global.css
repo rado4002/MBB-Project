@@ -676,7 +676,13 @@ h2 { font-size: 1.125rem; }
 .products-lifecycle-list dd { margin: 0; font-weight: 650; }
 .products-secondary summary { min-height: 2.75rem; padding-block: var(--space-3); cursor: pointer; font-weight: 650; }
 .products-secondary .context-details { margin-bottom: 0; }
-.stock-page { max-width: 64rem; margin-inline: auto; padding: var(--space-5); overflow-wrap: anywhere; }
+.stock-page { max-width: 88rem; margin-inline: auto; padding: var(--space-5); overflow-wrap: anywhere; }
+.stock-workspace { display: grid; grid-template-columns: minmax(18rem, 2fr) minmax(0, 3fr); gap: var(--space-5); align-items: start; }
+.stock-workspace:not(.stock-workspace--selected) { display: block; max-width: 64rem; }
+.stock-workspace-list, .stock-workspace-detail { min-width: 0; }
+.stock-workspace--selected .stock-workspace-detail { border-left: 1px solid var(--color-border); padding-left: var(--space-5); }
+.stock-result--selected { background: var(--color-surface-subtle); box-shadow: inset 3px 0 var(--color-primary-hover); padding-inline: var(--space-3); }
+.stock-back { display: none; }
 .stock-search, .stock-actions, .stock-links { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin-block: var(--space-4); }
 .stock-search label { flex-basis: 100%; }
 .stock-search input, .stock-operation input, .stock-operation textarea { min-width: 0; padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); font: inherit; background: var(--color-surface); color: var(--color-text); }
@@ -698,10 +704,22 @@ h2 { font-size: 1.125rem; }
 .stock-activity ol { display: grid; gap: var(--space-3); }
 .stock-activity li { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); }
 .stock-activity time { color: var(--color-text-muted); }
+@media (min-width: 40.001rem) and (max-width: 64rem) {
+  .stock-workspace { grid-template-columns: minmax(14rem, 2fr) minmax(0, 3fr); gap: var(--space-3); }
+  .stock-workspace--selected .stock-workspace-detail { padding-left: var(--space-3); }
+  .stock-results li { display: grid; }
+  .stock-result-facts { display: grid; gap: var(--space-1); }
+}
 @media (max-width: 40rem) {
   .business-navigation { padding: var(--space-3) var(--space-4) 0; }
   .products-page { padding: var(--space-4); }
   .stock-page { padding: var(--space-4); }
+  .stock-workspace { display: block; }
+  .stock-workspace--selected .stock-workspace-list { display: none; }
+  .stock-workspace--selected .stock-workspace-detail { border: 0; padding: 0; }
+  .stock-back { display: inline-block; margin-bottom: var(--space-4); }
+  .stock-detail--focused .stock-facts, .stock-detail--focused .stock-activity, .stock-detail--focused .stock-links, .stock-detail--focused > .stock-actions { display: none; }
+  .stock-detail--focused .stock-operation { max-width: none; }
   .stock-search, .stock-actions { align-items: stretch; flex-direction: column; }
   .stock-search input, .stock-actions > .button { width: 100%; }
   .stock-results li { display: grid; }

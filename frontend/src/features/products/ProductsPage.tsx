@@ -154,7 +154,7 @@ function ProductCreateForm({ onCreated, onCancel, onReview }: {
   </section>
 }
 
-function FirstVariantForm({ productId, onCreated }: { productId: string; onCreated: (id: string) => void }) {
+function FirstVariantForm({ productId, onCreated, stockSetup = false }: { productId: string; onCreated: (id: string) => void; stockSetup?: boolean }) {
   const auth = useAuth()
   const client = useMemo(() => createBusinessProductsClient(auth.handleSessionExpired), [auth.handleSessionExpired])
   const [label, setLabel] = useState('')
@@ -209,7 +209,9 @@ function FirstVariantForm({ productId, onCreated }: { productId: string; onCreat
   }
   return <section className="products-secondary" aria-label="Add first variant">
     <h2>Add first variant</h2>
-    <p>This variant will remain inactive. Price and availability can be set on Product detail afterward.</p>
+    <p>{stockSetup
+      ? 'This variant will remain inactive. Continue to Stock to set price and establish a verified stock count.'
+      : 'This variant will remain inactive. Price can be set on Product detail; stock quantity is managed in Stock.'}</p>
     {error && <p role="alert">{error}</p>}
     {uncertain && <button className="button button--secondary" onClick={() => void refresh()}>Refresh Product detail</button>}
     {review && <div role="status">
@@ -246,6 +248,8 @@ function ProductList() {
   const auth = useAuth()
   const manager = auth.session?.capabilities.includes('commerce.manage') ?? false
   const navigate = useNavigate()
+  const [params] = useSearchParams()
+  const fromStock = params.get('from') === 'stock'
   const client = useMemo(() => createBusinessProductsClient(auth.handleSessionExpired), [auth.handleSessionExpired])
   const [query, setQuery] = useState('')
   const [submitted, setSubmitted] = useState('')
@@ -254,7 +258,7 @@ function ProductList() {
   const [error, setError] = useState<string | null>(null)
   const controller = useRef<AbortController | null>(null)
   const inputId = useId()
-  const [adding, setAdding] = useState(false)
+  const [adding, setAdding] = useState(fromStock)
   const [createdProduct, setCreatedProduct] = useState<{ id: string; name: string } | null>(null)
   const load = useCallback(async (value: string) => {
     controller.current?.abort()
@@ -278,13 +282,16 @@ function ProductList() {
   }, [load])
   return <>
     <h1>Products</h1>
+    {fromStock && manager && <p>Create the Product and first variant here. Both remain inactive. Stock setup follows.</p>}
     {manager && !adding && <button className="button button--primary" onClick={() => setAdding(true)}>Add product</button>}
     {manager && adding && !createdProduct && <ProductCreateForm
       onCreated={(id, name) => setCreatedProduct({ id, name })}
       onCancel={() => { setAdding(false); void load('') }} onReview={() => void load('')} />}
     {manager && adding && createdProduct && <>
       <p role="status">{createdProduct.name} was saved inactive. Add its first variant or return to Product detail.</p>
-      <FirstVariantForm productId={createdProduct.id} onCreated={(id) => navigate(`/business/products/${createdProduct.id}?variant=${encodeURIComponent(id)}`)} />
+      <FirstVariantForm productId={createdProduct.id} stockSetup={fromStock} onCreated={(id) => navigate(fromStock
+        ? `/business/stock?item=${encodeURIComponent(id)}&setup=1`
+        : `/business/products/${createdProduct.id}?variant=${encodeURIComponent(id)}`)} />
     </>}
     <form className="products-search" onSubmit={(event) => { event.preventDefault(); void load(query.trim()) }}>
       <label htmlFor={inputId}>Product name or category</label>

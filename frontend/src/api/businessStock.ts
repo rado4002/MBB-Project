@@ -11,6 +11,7 @@ export interface StockItem {
   availability: 'available' | 'out_of_stock' | 'unknown'
   quantity?: number | null
   inventory_updated_at?: string | null
+  current_usd_price?: string | null
 }
 
 export interface StockMovement {

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
+import { createBusinessProductsClient } from '../../api/businessProducts'
 import { createBusinessStockClient, type StockItem, type StockMovement } from '../../api/businessStock'
 import { asApiError, errorMessage } from '../../api/errors'
 import { useAuth } from '../../auth/AuthProvider'
@@ -50,15 +51,18 @@ export function StockPage() {
   const [params, setParams] = useSearchParams()
   const itemId = params.get('item')
   const query = params.get('q') ?? ''
+  const setup = params.get('setup') === '1'
   return <section className="stock-page">
     <p className="eyebrow">Business · Stock</p>
-    {itemId
-      ? <StockDetail key={itemId} id={itemId} query={query} />
-      : <StockList key={query} query={query} onSearch={(value) => setParams(value ? { q: value } : {})} />}
+    <div className={`stock-workspace${itemId ? ' stock-workspace--selected' : ''}`}>
+      <div className="stock-workspace-list"><StockList key={query} query={query} selectedId={itemId}
+        onSearch={(value) => setParams(value ? { q: value } : {})} /></div>
+      {itemId && <div className="stock-workspace-detail"><StockDetail key={itemId} id={itemId} query={query} setup={setup} /></div>}
+    </div>
   </section>
 }
 
-function StockList({ query, onSearch }: { query: string; onSearch: (value: string) => void }) {
+function StockList({ query, selectedId, onSearch }: { query: string; selectedId: string | null; onSearch: (value: string) => void }) {
   const auth = useAuth()
   const manager = auth.session?.capabilities.includes('commerce.manage') ?? false
   const client = useMemo(() => createBusinessStockClient(auth.handleSessionExpired), [auth.handleSessionExpired])
@@ -86,7 +90,8 @@ function StockList({ query, onSearch }: { query: string; onSearch: (value: strin
     return () => controller.current?.abort()
   }, [load])
   return <>
-    <h1>Stock</h1>
+    {selectedId ? <h2>Stock</h2> : <h1>Stock</h1>}
+    {manager && <Link className="button button--primary" to="/business/products?from=stock">Add new product</Link>}
     <form className="stock-search" onSubmit={(event) => { event.preventDefault(); onSearch(input.trim()) }}>
       <label htmlFor={searchId}>Product, variant, or SKU</label>
       <input id={searchId} value={input} maxLength={120} onChange={(event) => setInput(event.target.value)} />
@@ -98,7 +103,7 @@ function StockList({ query, onSearch }: { query: string; onSearch: (value: strin
       {!items.length && <p role="status">No matching variants.</p>}
       {hasMore && <p role="status">Showing the first 50 variants. Refine your search to find more.</p>}
       <ul className="stock-results">
-        {items.map((item) => <li key={item.sellable_item_id}>
+        {items.map((item) => <li key={item.sellable_item_id} className={selectedId === item.sellable_item_id ? 'stock-result--selected' : undefined}>
           <div>
             <Link to={`/business/stock?${new URLSearchParams({ ...(query ? { q: query } : {}), item: item.sellable_item_id })}`}>
               {item.product_name} · {item.model_label || 'Standard variant'}
@@ -117,18 +122,21 @@ function StockList({ query, onSearch }: { query: string; onSearch: (value: strin
   </>
 }
 
-function StockDetail({ id, query }: { id: string; query: string }) {
+function StockDetail({ id, query, setup }: { id: string; query: string; setup: boolean }) {
   const auth = useAuth()
   const manager = auth.session?.capabilities.includes('commerce.manage') ?? false
   const client = useMemo(() => createBusinessStockClient(auth.handleSessionExpired), [auth.handleSessionExpired])
+  const pricing = useMemo(() => createBusinessProductsClient(auth.handleSessionExpired), [auth.handleSessionExpired])
   const [item, setItem] = useState<StockItem | null>(null)
   const [activity, setActivity] = useState<StockMovement[]>([])
   const [activityError, setActivityError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
-  const [action, setAction] = useState<'receive' | 'adjust' | null>(() => readPending(id)?.kind ?? null)
+  const [action, setAction] = useState<'receive' | 'adjust' | 'price' | null>(() => readPending(id)?.kind ?? null)
   const [value, setValue] = useState('')
+  const [priceAmount, setPriceAmount] = useState('')
+  const [priceNeedsRefresh, setPriceNeedsRefresh] = useState(false)
   const [reason, setReason] = useState('')
   const [review, setReview] = useState<Review | null>(() => readPending(id))
   const [uncertain, setUncertain] = useState(() => readPending(id) !== null)
@@ -150,6 +158,7 @@ function StockDetail({ id, query }: { id: string; query: string }) {
       if (current.signal.aborted) return false
       if (result.items.length !== 1) { setItem(null); setError('This variant is not available to inspect.'); return false }
       setItem(result.items[0])
+      setPriceNeedsRefresh(false)
       if (manager) {
         try {
           const history = await client.activity(id, current.signal)
@@ -181,7 +190,7 @@ function StockDetail({ id, query }: { id: string; query: string }) {
 
   const prepare = (event: FormEvent) => {
     event.preventDefault(); setError(null)
-    if (!item || !action || item.quantity === undefined || item.inventory_updated_at === undefined) return
+    if (!item || (action !== 'receive' && action !== 'adjust') || item.quantity === undefined || item.inventory_updated_at === undefined) return
     const entered = value.trim()
     if (!/^\d+$/.test(entered) || Number(entered) > maxQuantity || (action === 'receive' && Number(entered) === 0)) {
       setError(action === 'receive' ? 'Enter a positive whole amount to receive.' : 'Enter a whole corrected quantity from 0 to 2147483647.'); return
@@ -198,6 +207,39 @@ function StockDetail({ id, query }: { id: string; query: string }) {
     setReview({ kind: action, value: number, reason: normalizedReason,
       expected_quantity: item.quantity, expected_updated_at: item.inventory_updated_at,
       operation_key: crypto.randomUUID() })
+  }
+  const savePrice = async (event: FormEvent) => {
+    event.preventDefault()
+    if (!manager || !item || action !== 'price' || busy || denied || priceNeedsRefresh) return
+    const amount = priceAmount.trim()
+    if (!/^\d{1,10}(?:\.\d{1,2})?$/.test(amount) || /^0+(?:\.0+)?$/.test(amount)) {
+      setError('Enter a positive USD price with at most two decimal places.'); return
+    }
+    const expiry = auth.session?.recent_reauthentication_expires_at_epoch
+    if (expiry == null || expiry < Math.floor(Date.now() / 1000)) { setReauth(true); return }
+    const current = new AbortController(); operation.current = current
+    setBusy(true); setError(null); setNotice(null)
+    try {
+      const csrf = await auth.getCsrfForMutation()
+      if (current.signal.aborted) return
+      await pricing.changePrice(id, amount, csrf, current.signal)
+      if (current.signal.aborted) return
+      setAction(null)
+      const refreshed = await load()
+      if (!current.signal.aborted) {
+        setNotice(refreshed ? 'Price saved. Showing current facts.' : 'Price saved, but current facts could not be loaded. Refresh before another change.')
+        if (refreshed && setup && item.quantity === null) setAction('adjust')
+      }
+    } catch (failure) {
+      if (current.signal.aborted) return
+      const apiError = asApiError(failure)
+      if (apiError.code === 'recent_reauthentication_required') setReauth(true)
+      else if (apiError.category === 'forbidden') { setDenied(true); setAction(null); setError('You do not have permission to change price.') }
+      else if (apiError.status === 0 || apiError.status >= 500) {
+        setPriceNeedsRefresh(true); setAction(null)
+        setError('The price change could not be confirmed. Refresh current facts before another change; it may already have been saved.')
+      } else setError(errorMessage(apiError))
+    } finally { if (!current.signal.aborted) setBusy(false) }
   }
   const confirm = async () => {
     if (!review || busy || denied) return
@@ -242,15 +284,15 @@ function StockDetail({ id, query }: { id: string; query: string }) {
     event.preventDefault(); setBusy(true); setError(null)
     try {
       await auth.reauthenticate(password)
-      setReauth(false); setNotice('Password confirmed. Review and confirm your stock change.')
+      setReauth(false); setNotice(action === 'price' ? 'Password confirmed. Review and save the price.' : 'Password confirmed. Review and confirm your stock change.')
     } catch (failure) { setError(errorMessage(asApiError(failure))) }
     finally { setPassword(''); setBusy(false) }
   }
   const cancel = () => { setAction(null); setReview(null); setReauth(false); setReason(''); setValue(''); setError(null) }
   const adminItem = manager && item && item.quantity !== undefined && item.inventory_updated_at !== undefined ? item : null
   const back = `/business/stock${query ? `?${new URLSearchParams({ q: query })}` : ''}`
-  return <>
-    <Link to={back}>Back to stock results</Link>
+  return <div className={`stock-detail${action ? ' stock-detail--focused' : ''}`}>
+    <Link className="stock-back" to={back}>Back to stock results</Link>
     {loading && <p role="status">Loading current stock…</p>}
     {error && <p role="alert">{error}</p>}
     {notice && <p role="status">{notice}</p>}
@@ -259,21 +301,33 @@ function StockDetail({ id, query }: { id: string; query: string }) {
       <h1>{item.product_name} · {item.model_label || 'Standard variant'}</h1>
       {item.sku && <p>SKU: {item.sku}</p>}
       {manager && <p>{item.product_active && item.variant_active ? 'Active' : 'Inactive'}</p>}
+      {setup && manager && <p role="status">Product and first variant were created inactive. Set price and establish a verified stock count separately, then review the current facts.</p>}
       <dl className="stock-facts">
+        {adminItem && <div><dt>Current USD price</dt><dd>{adminItem.current_usd_price == null ? 'Not set' : `USD ${adminItem.current_usd_price}`}</dd></div>}
         <div><dt>Availability</dt><dd>{availability[item.availability]}</dd></div>
         {adminItem && <div><dt>Current quantity</dt><dd>{adminItem.quantity === null ? 'Unknown' : adminItem.quantity}</dd></div>}
         {adminItem && <div><dt>Last stock update</dt><dd>{adminItem.inventory_updated_at ? new Date(adminItem.inventory_updated_at).toLocaleString() : 'Never'}</dd></div>}
       </dl>
       <div className="stock-links">
         <Link to={`/business/products/${encodeURIComponent(item.product_id)}?variant=${encodeURIComponent(item.sellable_item_id)}`}>View product</Link>
-        <button className="button button--secondary" disabled={busy || loading} onClick={() => void load()}>Refresh stock</button>
+        <button className="button button--secondary" disabled={busy || loading} onClick={() => void load()}>Refresh current facts</button>
       </div>
       {adminItem && !denied && !action && <div className="stock-actions">
-        <button className="button button--primary" onClick={() => { setAction('receive'); setValue(''); setError(null) }} disabled={adminItem.quantity === null}>Receive stock</button>
-        <button className="button button--secondary" onClick={() => { setAction('adjust'); setValue(''); setReason(''); setError(null) }}>Adjust stock</button>
+        <button className="button button--primary" onClick={() => { setAction('receive'); setValue(''); setError(null) }} disabled={adminItem.quantity === null || priceNeedsRefresh}>Receive stock</button>
+        <button className="button button--secondary" disabled={priceNeedsRefresh} onClick={() => { setAction('adjust'); setValue(''); setReason(''); setError(null) }}>Adjust stock</button>
+        <button className="button button--secondary" disabled={priceNeedsRefresh} onClick={() => { setAction('price'); setPriceAmount(adminItem.current_usd_price ?? ''); setError(null) }}>{adminItem.current_usd_price == null ? 'Set price' : 'Change price'}</button>
         {adminItem.quantity === null && <p>Set a verified count with Adjust before receiving stock.</p>}
       </div>}
-      {adminItem && !denied && action && !review && <form className="stock-operation" onSubmit={prepare}>
+      {adminItem && !denied && action === 'price' && <form className="stock-operation" onSubmit={(event) => void savePrice(event)}>
+        <h2>{adminItem.current_usd_price == null ? 'Set price' : 'Change price'}</h2>
+        <p>Current price: {adminItem.current_usd_price == null ? 'Not set' : `USD ${adminItem.current_usd_price}`}</p>
+        <label htmlFor={`${fieldId}-price`}>New USD price</label>
+        <input id={`${fieldId}-price`} inputMode="decimal" value={priceAmount} maxLength={13} required disabled={busy}
+          onChange={(event) => setPriceAmount(event.target.value)} />
+        <div className="stock-actions"><button className="button button--primary" disabled={busy || reauth}>Save price</button>
+          <button className="button button--secondary" type="button" disabled={busy} onClick={cancel}>Cancel</button></div>
+      </form>}
+      {adminItem && !denied && (action === 'receive' || action === 'adjust') && !review && <form className="stock-operation" onSubmit={prepare}>
         <h2>{action === 'receive' ? 'Receive stock' : 'Adjust stock'}</h2>
         <label htmlFor={`${fieldId}-quantity`}>{action === 'receive' ? 'Amount received' : 'Corrected quantity'}</label>
         <input id={`${fieldId}-quantity`} inputMode="numeric" value={value} maxLength={10} required disabled={busy}
@@ -315,5 +369,5 @@ function StockDetail({ id, query }: { id: string; query: string }) {
         </li>)}</ol>
       </section>}
     </>}
-  </>
+  </div>
 }
