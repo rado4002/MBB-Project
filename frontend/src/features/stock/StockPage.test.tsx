@@ -36,7 +36,9 @@ function setup(role: 'administrator' | 'operator' = 'administrator', quantity: n
     http.get(base, ({ request }) => {
       const url = new URL(request.url)
       const query = url.searchParams.get('query')?.toLowerCase()
-      const found = !query || ['fictional air fryer', '6l', 'fry-6l'].some((text) => text.includes(query))
+      const normalizedQuery = query?.replace(/^sku:\s*/i, '').trim()
+      const terms = normalizedQuery?.split(/[\s·/]+/).filter(Boolean) ?? []
+      const found = !terms.length || terms.every((term) => ['fictional air fryer', '6l', 'fry-6l'].some((text) => text.includes(term)))
       const exact = !url.searchParams.get('item_id') || url.searchParams.get('item_id') === itemId
       const item = { ...stockItem, quantity: current, inventory_updated_at: updatedAt, current_usd_price: price,
         availability: current === null ? 'unknown' : current === 0 ? 'out_of_stock' : 'available' }
@@ -87,7 +89,7 @@ describe('Business Stock', () => {
     expect(container.querySelector('.stock-results-card')).toBeInTheDocument()
     expect(within(container.querySelector('.business-sidebar') as HTMLElement).getByRole('link', { name: 'Stock' })).toHaveClass('active')
     expect(screen.getByRole('combobox', { name: 'Business' })).toHaveValue('stock')
-    for (const query of ['Fictional Air Fryer', '6L', 'FRY-6L']) {
+    for (const query of ['Fictional Air Fryer', '6L', 'FRY-6L', 'Fictional Air Fryer · 6L', 'SKU: FRY-6L']) {
       await user.clear(screen.getByRole('textbox', { name: 'Product, variant, or SKU' }))
       await user.type(screen.getByRole('textbox', { name: 'Product, variant, or SKU' }), query)
       await user.click(screen.getByRole('button', { name: 'Search' }))

@@ -80,10 +80,20 @@ async def test_administrator_searches_product_variant_sku_and_exact_item(stock_c
         assert by_id[str(variants[1].sellable_item_id)]["availability"] == "out_of_stock"
         assert by_id[str(variants[2].sellable_item_id)]["variant_active"] is False
         assert by_id[str(variants[3].sellable_item_id)]["product_active"] is False
-        for query, count in [("Solar Kit", 3), ("Large panel", 1), ("SOLAR-SMALL", 1)]:
+        for query, count in [
+            ("Solar Kit", 3),
+            ("Large panel", 1),
+            ("SOLAR-SMALL", 1),
+            ("Fictional Solar Kit · Large panel", 1),
+            ("SKU: SOLAR-SMALL", 1),
+        ]:
             response = await client.get(base, params={"query": query})
             assert response.status_code == 200
             assert len(response.json()["items"]) == count
+        combined = await client.get(base, params={"query": "Fictional Solar Kit · Large panel"})
+        assert combined.json()["items"][0]["sellable_item_id"] == str(variants[1].sellable_item_id)
+        sku_label = await client.get(base, params={"query": "SKU: SOLAR-SMALL"})
+        assert sku_label.json()["items"][0]["sellable_item_id"] == str(variants[0].sellable_item_id)
         exact = await client.get(base, params={"item_id": str(variants[2].sellable_item_id)})
         assert [entry["sellable_item_id"] for entry in exact.json()["items"]] == [str(variants[2].sellable_item_id)]
         limited = await client.get(base, params={"limit": 1})

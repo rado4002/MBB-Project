@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -328,13 +329,16 @@ async def search_stock_items(
     if sellable_item_id is not None:
         statement = statement.where(SellableItem.sellable_item_id == sellable_item_id)
     elif query:
-        escaped = query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        pattern = f"%{escaped}%"
-        statement = statement.where(or_(
-            Product.name.ilike(pattern, escape="\\"),
-            SellableItem.model_label.ilike(pattern, escape="\\"),
-            SellableItem.sku.ilike(pattern, escape="\\"),
-        ))
+        normalized_query = re.sub(r"^\s*SKU\s*:\s*", "", query.strip(), flags=re.IGNORECASE)
+        terms = [term for term in re.split(r"[\s·/]+", normalized_query) if term]
+        for term in terms:
+            escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped}%"
+            statement = statement.where(or_(
+                Product.name.ilike(pattern, escape="\\"),
+                SellableItem.model_label.ilike(pattern, escape="\\"),
+                SellableItem.sku.ilike(pattern, escape="\\"),
+            ))
     rows = (await session.execute(
         statement.order_by(Product.name, SellableItem.model_label, SellableItem.sellable_item_id)
         .limit(limit + 1)
