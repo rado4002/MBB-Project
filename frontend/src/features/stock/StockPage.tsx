@@ -63,7 +63,6 @@ export function StockPage() {
       <div className="stock-workspace-list"><StockList key={query} query={query} selectedId={itemId}
         onSearch={(value) => setParams(value ? { q: value } : {})} /></div>
       {itemId && <div className="stock-workspace-detail"><StockDetail key={itemId} id={itemId} query={query} setup={setup} /></div>}
-      {!itemId && <div className="stock-empty-detail">Select a stock item to see its current facts and actions.</div>}
     </div>
   </section>
 }

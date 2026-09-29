@@ -81,6 +81,10 @@ describe('Business Stock', () => {
     expect(within(container.querySelector('.business-sidebar') as HTMLElement).getByRole('link', { name: 'Products' })).toHaveClass('active')
     await user.click(screen.getByRole('link', { name: 'Stock' }))
     expect(await screen.findByRole('heading', { name: 'Stock' })).toBeInTheDocument()
+    expect(container.querySelector('.stock-workspace')).not.toHaveClass('stock-workspace--selected')
+    expect(container.querySelector('.stock-workspace-detail')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Select a stock item to see/)).not.toBeInTheDocument()
+    expect(container.querySelector('.stock-results-card')).toBeInTheDocument()
     expect(within(container.querySelector('.business-sidebar') as HTMLElement).getByRole('link', { name: 'Stock' })).toHaveClass('active')
     expect(screen.getByRole('combobox', { name: 'Business' })).toHaveValue('stock')
     for (const query of ['Fictional Air Fryer', '6L', 'FRY-6L']) {
@@ -89,7 +93,10 @@ describe('Business Stock', () => {
       await user.click(screen.getByRole('button', { name: 'Search' }))
       expect(await screen.findByRole('link', { name: 'Fictional Air Fryer · 6L' })).toBeInTheDocument()
     }
+    await expectAccessible(container)
     await user.click(screen.getByRole('link', { name: 'Fictional Air Fryer · 6L' }))
+    expect(container.querySelector('.stock-workspace')).toHaveClass('stock-workspace--selected')
+    expect(container.querySelector('.stock-workspace-detail')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Fictional Air Fryer · 6L' }).closest('li')).toHaveClass('stock-result--selected')
     await screen.findByText('Current USD price')
     const detail = container.querySelector('.stock-detail') as HTMLElement
