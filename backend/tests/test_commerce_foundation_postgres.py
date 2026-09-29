@@ -30,7 +30,7 @@ from app.modules.commerce_admin import (
     CommerceAdminContext,
     CommerceAuthorizationDenied,
 )
-from app.modules.inventory.service import get_inventory_status, set_inventory_status
+from app.modules.inventory.service import get_inventory_status, set_inventory_quantity
 from app.modules.pricing.service import (
     UnsupportedCurrency,
     get_current_cdf_quote,
@@ -152,10 +152,10 @@ async def test_business_acceptance_scenario_proves_domain_ownership(engine: Asyn
             amount=Decimal("60.00"),
             administrator=_admin(admin, "price-60"),
         )
-        await set_inventory_status(
+        await set_inventory_quantity(
             session,
             sellable_item_id=item.sellable_item_id,
-            status="available",
+            quantity=5,
             administrator=_admin(admin, "inventory-available"),
         )
         rate_2800 = await set_current_exchange_rate(
@@ -177,6 +177,12 @@ async def test_business_acceptance_scenario_proves_domain_ownership(engine: Asyn
         assert persisted_item is not None and persisted_item.model_label == "Model 8L"
         assert current_price is not None and current_price.amount == Decimal("60.00")
         assert inventory.configured is True and inventory.status == "available"
+        assert inventory.quantity == 5
+        audit = await session.scalar(select(OperatorAuditEvent).where(
+            OperatorAuditEvent.action == "commerce.inventory_quantity.changed"
+        ))
+        assert audit is not None and audit.actor_account_id == admin.account_id
+        assert audit.event_metadata["new_quantity"] == 5
         assert quote is not None and quote.cdf_amount == Decimal("168000.00")
 
     async with factory() as session:
@@ -203,10 +209,10 @@ async def test_business_acceptance_scenario_proves_domain_ownership(engine: Asyn
         assert (await get_inventory_status(session, item.sellable_item_id)).status == "available"
 
     async with factory() as session:
-        await set_inventory_status(
+        await set_inventory_quantity(
             session,
             sellable_item_id=item.sellable_item_id,
-            status="out_of_stock",
+            quantity=0,
             administrator=_admin(admin, "inventory-out"),
         )
         await session.commit()
@@ -361,17 +367,21 @@ async def test_constraints_missing_semantics_and_authorization_fail_closed(
         assert quote_with_retired_rate is not None
         assert quote_with_retired_rate.usd_amount == Decimal("60.00")
         assert quote_with_retired_rate.cdf_amount is None
-        await set_inventory_status(
+        await set_inventory_quantity(
             session,
             sellable_item_id=item.sellable_item_id,
-            status="unknown",
+            quantity=None,
             administrator=_admin(admin, "configured-unknown"),
         )
         await session.commit()
     async with factory() as session:
         configured_unknown = await get_inventory_status(session, item.sellable_item_id)
-        assert configured_unknown.configured is True
+        assert configured_unknown.configured is False
         assert configured_unknown.status == "unknown"
+    await invalid(
+        "UPDATE mbb.inventory_statuses SET quantity = -1 WHERE sellable_item_id = :id",
+        {"id": item.sellable_item_id},
+    )
     await invalid(
         "INSERT INTO mbb.inventory_statuses (sellable_item_id, status) "
         "VALUES (:id, 'available')",
@@ -418,7 +428,7 @@ async def test_constraints_missing_semantics_and_authorization_fail_closed(
                 SellableItemPrice.sellable_item_id == item.sellable_item_id
             )
         ) == 2
-        assert (await get_inventory_status(session, item.sellable_item_id)).configured
+        assert (await get_inventory_status(session, item.sellable_item_id)).configured is False
 
 
 async def _prepare_concurrency_database(

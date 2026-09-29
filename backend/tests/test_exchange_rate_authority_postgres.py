@@ -184,6 +184,7 @@ async def _seed(factory):
     inventory = InventoryRecord(
         sellable_item_id=item.sellable_item_id,
         status="available",
+        quantity=5,
         updated_at=now,
     )
     inbound = Message(

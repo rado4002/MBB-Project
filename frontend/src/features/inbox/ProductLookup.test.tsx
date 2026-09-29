@@ -90,7 +90,7 @@ describe('Inbox authoritative product lookup', () => {
     expect(within(dialog).getByText('Family cooking appliance.')).toBeInTheDocument()
     expect(within(dialog).getByText('capacity l')).toBeInTheDocument()
     expect(within(dialog).getByRole('heading', { name: 'Air Fryer — 6L' })).toHaveFocus()
-    expect(within(dialog).queryByRole('button', { name: /Change price|Set availability|Activate|Edit/ })).not.toBeInTheDocument()
+    expect(within(dialog).queryByRole('button', { name: /Change price|Update stock quantity|Activate|Edit/ })).not.toBeInTheDocument()
     await expectAccessible(dialog)
     await user.click(within(dialog).getByRole('button', { name: 'Refresh' }))
     await within(dialog).findByText('CDF 154000.00')

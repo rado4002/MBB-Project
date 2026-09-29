@@ -15,7 +15,7 @@ from app.models.operator_account import OperatorAccount
 from app.models.pricing import ExchangeRate, SellableItemPrice
 from app.modules.catalog.service import create_product, create_sellable_item
 from app.modules.commerce_admin import CommerceAdminContext
-from app.modules.inventory.service import set_inventory_status
+from app.modules.inventory.service import set_inventory_quantity
 from app.modules.pricing.service import set_current_exchange_rate, set_current_usd_price
 from app.modules.product_offer.service import (
     ProductOfferCdfQuoteUnavailable,
@@ -139,10 +139,10 @@ async def _set_price_inventory(
             administrator=_admin(admin),
         )
         if status is not None:
-            await set_inventory_status(
+            await set_inventory_quantity(
                 session,
                 sellable_item_id=item.sellable_item_id,
-                status=status,
+                quantity={"available": 5, "out_of_stock": 0, "unknown": None}[status],
                 administrator=_admin(admin),
             )
         await session.commit()
@@ -302,6 +302,19 @@ async def test_product_offer_exact_read_preserves_truthful_states(
         row.ended_at = datetime.now(timezone.utc)
         await session.commit()
 
+    # Compatibility column can disagree with quantity; offer and search still use quantity.
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE mbb.inventory_statuses SET status = 'out_of_stock' "
+                 "WHERE sellable_item_id = :id"),
+            {"id": sellable.sellable_item_id},
+        )
+        await connection.execute(
+            text("UPDATE mbb.inventory_statuses SET status = 'available' "
+                 "WHERE sellable_item_id = :id"),
+            {"id": out_of_stock.sellable_item_id},
+        )
+
     async with factory() as session:
         sellable_offer = await get_product_offer(session, sellable.sellable_item_id)
         out_offer = await get_product_offer(session, out_of_stock.sellable_item_id)
@@ -332,7 +345,7 @@ async def test_product_offer_exact_read_preserves_truthful_states(
     assert (
         unknown_offer is not None
         and unknown_offer.offer_status == "availability_unconfirmed"
-        and unknown_offer.inventory_configured is True
+        and unknown_offer.inventory_configured is False
     )
     assert (
         missing_offer is not None
@@ -499,6 +512,17 @@ async def test_product_offer_search_modes_budgets_and_determinism(
         )
         await session.commit()
 
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE mbb.inventory_statuses SET status = 'out_of_stock' "
+                 "WHERE sellable_item_id = :id"),
+            {"id": sellable.sellable_item_id},
+        )
+        await connection.execute(
+            text("UPDATE mbb.inventory_statuses SET status = 'available' "
+                 "WHERE sellable_item_id = :id"),
+            {"id": out_of_stock.sellable_item_id},
+        )
     async with factory() as session:
         sellable_only = await search_product_offers(
             session, query="search fryer", search_mode="sellable_only"

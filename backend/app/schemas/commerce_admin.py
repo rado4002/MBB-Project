@@ -347,12 +347,13 @@ class ExchangeRateAuthorityResponse(StrictCommerceModel):
 
 
 class InventoryStatusSet(StrictCommerceModel):
-    status: Literal["available", "out_of_stock", "unknown"]
+    quantity: StrictInt | None = Field(ge=0, le=2147483647)
 
 
 class InventoryStatusResponse(StrictCommerceModel):
     sellable_item_id: UUID
     configured: bool
     status: Literal["available", "out_of_stock", "unknown"]
+    quantity: int | None
     inventory_id: UUID | None
     updated_at: datetime | None

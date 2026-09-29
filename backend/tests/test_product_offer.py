@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+from app.modules.inventory.service import availability_from_quantity, set_inventory_quantity
+
 from app.modules.product_offer.service import (
     ProductOfferCdfQuoteUnavailable,
     ProductOfferRow,
@@ -51,9 +53,24 @@ def _price() -> SimpleNamespace:
 def _inventory(status: str) -> SimpleNamespace:
     return SimpleNamespace(
         inventory_id=uuid.uuid4(),
-        status=status,
+        quantity={"available": 5, "out_of_stock": 0, "unknown": None}[status],
         updated_at=datetime(2026, 8, 13, tzinfo=timezone.utc),
     )
+
+
+def test_availability_is_derived_only_from_quantity() -> None:
+    assert availability_from_quantity(None) == "unknown"
+    assert availability_from_quantity(0) == "out_of_stock"
+    assert availability_from_quantity(1) == "available"
+    assert availability_from_quantity(250) == "available"
+
+
+@pytest.mark.asyncio
+async def test_negative_quantity_is_rejected_before_inventory_write() -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        await set_inventory_quantity(
+            None, sellable_item_id=uuid.uuid4(), quantity=-1, administrator=None
+        )
 
 
 def _rate() -> SimpleNamespace:

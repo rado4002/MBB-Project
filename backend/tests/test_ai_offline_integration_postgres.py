@@ -38,7 +38,7 @@ from app.models.order import Order
 from app.models.payment import Payment
 from app.modules.catalog.service import create_product, create_sellable_item
 from app.modules.commerce_admin import CommerceAdminContext
-from app.modules.inventory.service import set_inventory_status
+from app.modules.inventory.service import set_inventory_quantity
 from app.modules.m4_conversation.ownership import transition_ownership
 from app.modules.pricing.service import (
     set_current_exchange_rate,
@@ -219,16 +219,16 @@ async def _seed_business_truth(
             amount=Decimal("70.00"),
             administrator=_admin(account.account_id),
         )
-        await set_inventory_status(
+        await set_inventory_quantity(
             session,
             sellable_item_id=available.sellable_item_id,
-            status="available",
+            quantity=5,
             administrator=_admin(account.account_id),
         )
-        await set_inventory_status(
+        await set_inventory_quantity(
             session,
             sellable_item_id=unavailable.sellable_item_id,
-            status="out_of_stock",
+            quantity=0,
             administrator=_admin(account.account_id),
         )
         await set_current_exchange_rate(

@@ -1,11 +1,11 @@
-"""Authoritative status-first inventory persistence for one MBB stock pool."""
+"""Sellable item stock quantity for one MBB stock pool."""
 
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
 
-from sqlalchemy import TIMESTAMP, CheckConstraint, ForeignKey, String, UniqueConstraint, text
+from sqlalchemy import TIMESTAMP, CheckConstraint, ForeignKey, Integer, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -22,6 +22,7 @@ class InventoryRecord(Base):
             "status IN ('available', 'out_of_stock', 'unknown')",
             name="chk_inventory_statuses_status",
         ),
+        CheckConstraint("quantity IS NULL OR quantity >= 0", name="chk_inventory_statuses_quantity"),
         {"schema": "mbb"},
     )
 
@@ -38,6 +39,7 @@ class InventoryRecord(Base):
         nullable=False,
     )
     status: Mapped[str] = mapped_column(String(20), nullable=False)
+    quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
     )

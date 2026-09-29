@@ -25,7 +25,7 @@ from app.modules.catalog.service import (
     update_product_media,
 )
 from app.modules.commerce_admin import CommerceAdminContext
-from app.modules.inventory.service import set_inventory_status
+from app.modules.inventory.service import set_inventory_quantity
 from app.modules.pricing.service import (
     set_current_exchange_rate,
     set_current_usd_price,
@@ -306,10 +306,10 @@ async def test_primary_replacement_fallback_and_offer_projection(engine: AsyncEn
                 amount=amount,
                 administrator=_admin(account),
             )
-            await set_inventory_status(
+            await set_inventory_quantity(
                 session,
                 sellable_item_id=item.sellable_item_id,
-                status="available",
+                quantity=5,
                 administrator=_admin(account),
             )
         await set_current_exchange_rate(

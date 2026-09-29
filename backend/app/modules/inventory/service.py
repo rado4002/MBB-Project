@@ -1,4 +1,4 @@
-"""Inventory-owned status reads and Administrator mutation."""
+"""Inventory-owned quantity reads and Administrator mutation."""
 
 from __future__ import annotations
 
@@ -19,7 +19,12 @@ from app.modules.commerce_admin import (
 from app.operator_identity.audit import append_operator_audit_event
 
 InventoryStatus = Literal["available", "out_of_stock", "unknown"]
-ALLOWED_STATUSES = frozenset({"available", "out_of_stock", "unknown"})
+
+
+def availability_from_quantity(quantity: int | None) -> InventoryStatus:
+    if quantity is None:
+        return "unknown"
+    return "out_of_stock" if quantity == 0 else "available"
 
 
 class InventoryNotFound(Exception):
@@ -31,6 +36,7 @@ class InventoryStatusResult:
     sellable_item_id: uuid.UUID
     configured: bool
     status: InventoryStatus
+    quantity: int | None
     inventory_id: uuid.UUID | None
     updated_at: datetime | None
 
@@ -52,28 +58,30 @@ async def get_inventory_status(
             sellable_item_id=sellable_item_id,
             configured=False,
             status="unknown",
+            quantity=None,
             inventory_id=None,
             updated_at=None,
         )
     return InventoryStatusResult(
         sellable_item_id=sellable_item_id,
-        configured=True,
-        status=record.status,  # type: ignore[arg-type]
+        configured=record.quantity is not None,
+        status=availability_from_quantity(record.quantity),
+        quantity=record.quantity,
         inventory_id=record.inventory_id,
         updated_at=record.updated_at,
     )
 
 
-async def set_inventory_status(
+async def set_inventory_quantity(
     session: AsyncSession,
     *,
     sellable_item_id: uuid.UUID,
-    status: InventoryStatus,
+    quantity: int | None,
     administrator: CommerceAdminContext,
     now: datetime | None = None,
 ) -> InventoryRecord:
-    if status not in ALLOWED_STATUSES:
-        raise ValueError("unsupported inventory status")
+    if quantity is not None and (type(quantity) is not int or not 0 <= quantity <= 2147483647):
+        raise ValueError("quantity must be a non-negative integer or null")
     actor = await require_commerce_administrator(session, administrator)
     item = await session.scalar(
         select(SellableItem)
@@ -88,16 +96,20 @@ async def set_inventory_status(
         .where(InventoryRecord.sellable_item_id == sellable_item_id)
         .with_for_update()
     )
-    previous_status = "not_configured" if record is None else record.status
+    previous_quantity = None if record is None else record.quantity
+    previous_status = "not_configured" if record is None else availability_from_quantity(record.quantity)
+    status = availability_from_quantity(quantity)
     if record is None:
         record = InventoryRecord(
             sellable_item_id=sellable_item_id,
             status=status,
+            quantity=quantity,
             updated_at=event_time,
         )
         session.add(record)
     else:
         record.status = status
+        record.quantity = quantity
         record.updated_at = event_time
     await session.flush()
     await append_operator_audit_event(
@@ -108,7 +120,7 @@ async def set_inventory_status(
         actor_display_name=actor.display_name,
         effective_role=actor.role,
         request_id=administrator.request_id,
-        action="commerce.inventory_status.changed",
+        action="commerce.inventory_quantity.changed",
         target_type="inventory_status",
         target_id=str(record.inventory_id),
         reason_code="commerce_administrator",
@@ -116,7 +128,9 @@ async def set_inventory_status(
         metadata={
             "sellable_item_id": str(sellable_item_id),
             "previous_status": previous_status,
-            "new_status": record.status,
+            "new_status": status,
+            "previous_quantity": previous_quantity,
+            "new_quantity": quantity,
         },
         source_network_fingerprint=administrator.source_network_fingerprint,
         user_agent_fingerprint=administrator.user_agent_fingerprint,

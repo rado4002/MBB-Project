@@ -40,16 +40,16 @@ async def test_browser_offer_reads_preserve_all_commerce_records(harness):  # no
         assert created.status_code == 201
         product_id = created.json()["product_id"]
         ids = []
-        for index, status in enumerate(["available", "out_of_stock", "unknown", None]):
+        for index, quantity in enumerate([5, 0, None, "missing"]):
             item = await admin.post(f"{prefix}/products/{product_id}/sellable-items", headers=_headers(csrf), json={
                 "model_label": f"{index + 1}L", "sku": f"C1-{index}",
             })
             assert item.status_code == 201
             item_id = item.json()["sellable_item_id"]
             ids.append(item_id)
-            if status is not None:
+            if quantity != "missing":
                 assert (await admin.put(f"{prefix}/sellable-items/{item_id}/price", headers=_headers(csrf), json={"amount": "55.00"})).status_code == 200
-                assert (await admin.put(f"{prefix}/sellable-items/{item_id}/inventory", headers=_headers(csrf), json={"status": status})).status_code == 200
+                assert (await admin.put(f"{prefix}/sellable-items/{item_id}/inventory", headers=_headers(csrf), json={"quantity": quantity})).status_code == 200
         assert (await admin.post(f"{prefix}/product-media", headers=_headers(csrf), json={
             "product_id": product_id, "asset_url": "https://example.invalid/c1.jpg", "is_primary": True,
         })).status_code == 201
@@ -72,5 +72,5 @@ async def test_browser_offer_reads_preserve_all_commerce_records(harness):  # no
                 assert detail.json()["derived_cdf_quote"] is None
                 assert detail.json()["cdf_quote_status"] == "cdf_quote_unavailable"
         assert (await operator.get(f"{prefix}/products")).status_code == 403
-        assert (await operator.put(f"{prefix}/sellable-items/{ids[0]}/inventory", headers=_headers(operator_csrf), json={"status": "out_of_stock"})).status_code == 403
+        assert (await operator.put(f"{prefix}/sellable-items/{ids[0]}/inventory", headers=_headers(operator_csrf), json={"quantity": 0})).status_code == 403
         assert await _snapshot(factory) == before

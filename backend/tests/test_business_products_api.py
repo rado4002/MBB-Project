@@ -113,7 +113,10 @@ async def test_read_authorization_strict_inputs_and_maintenance_denial(workspace
         assert (await client.get("/api/v1/business/products/not-a-uuid")).status_code == 422
         assert (await client.get("/api/v1/business/products?query=Empty")).json()["items"] == []
         assert (await client.get("/api/v1/operator/commerce/products")).status_code == 403
-        for suffix, body in [("price", {"amount": "20.00"}), ("inventory", {"status": "available"})]:
+        assert (await client.get(
+            f"/api/v1/operator/commerce/sellable-items/{variants[1].sellable_item_id}/inventory"
+        )).status_code == 403
+        for suffix, body in [("price", {"amount": "20.00"}), ("inventory", {"quantity": 5})]:
             response = await client.put(
                 f"/api/v1/operator/commerce/sellable-items/{variants[1].sellable_item_id}/{suffix}",
                 headers=_headers(csrf), json=body,
@@ -178,14 +181,21 @@ async def test_separate_commands_preserve_history_and_reread_authoritative_offer
         priced = await snapshot(factory)
         assert priced[:2] == initial[:2] and priced[3] == initial[3]
         assert priced[4] == initial[4]
-        for status, offer_status in [("available", "sellable_now"), ("out_of_stock", "out_of_stock"), ("unknown", "availability_unconfirmed")]:
-            assert (await client.put(base + "/inventory", headers=_headers(csrf), json={"status": status})).status_code == 200
+        for quantity, status, offer_status in [(5, "available", "sellable_now"), (0, "out_of_stock", "out_of_stock"), (None, "unknown", "availability_unconfirmed")]:
+            inventory_response = await client.put(base + "/inventory", headers=_headers(csrf), json={"quantity": quantity})
+            assert inventory_response.status_code == 200
+            assert inventory_response.json()["quantity"] == quantity
+            assert inventory_response.json()["configured"] is (quantity is not None)
+            current_inventory = await client.get(base + "/inventory")
+            assert current_inventory.status_code == 200
+            assert current_inventory.json()["quantity"] == quantity
             after = await snapshot(factory)
             assert after[:3] == priced[:3]
             assert after[4] == priced[4]
             response = await client.get(f"/api/v1/operator/product-offers/{item_id}")
             assert response.json()["current_usd_price"] == "60.25"
             assert response.json()["inventory_status"] == status
+            assert "quantity" not in response.json()
             assert response.json()["offer_status"] == offer_status
             assert response.json()["cdf_quote_status"] == "cdf_quote_unavailable"
 
@@ -196,14 +206,14 @@ async def test_both_commands_keep_csrf_origin_reauthentication_and_validation(wo
         csrf = await _login(client, "commerce.admin", ADMIN_PASSWORD)
         before = await snapshot(factory)
         base = f"/api/v1/operator/commerce/sellable-items/{variants[1].sellable_item_id}"
-        for suffix, body in [("price", {"amount": "20.00"}), ("inventory", {"status": "available"})]:
+        for suffix, body in [("price", {"amount": "20.00"}), ("inventory", {"quantity": 5})]:
             assert (await client.put(base + "/" + suffix, json=body)).status_code == 403
             assert (await client.put(base + "/" + suffix, headers=_headers(csrf, origin="https://attacker.example"), json=body)).status_code == 403
-        for suffix, body in [("price", {"amount": 20.25}), ("price", {"amount": "0.00"}), ("inventory", {"status": "restocking"})]:
+        for suffix, body in [("price", {"amount": 20.25}), ("price", {"amount": "0.00"}), ("inventory", {"quantity": -1}), ("inventory", {"quantity": 1.5}), ("inventory", {"quantity": "5"})]:
             assert (await client.put(base + "/" + suffix, headers=_headers(csrf), json=body)).status_code == 422
         future = time.time() + 1000
         monkeypatch.setattr("app.api.browser_auth_deps.time.time", lambda: future)
-        for suffix, body in [("price", {"amount": "20.00"}), ("inventory", {"status": "available"})]:
+        for suffix, body in [("price", {"amount": "20.00"}), ("inventory", {"quantity": 5})]:
             result = await client.put(base + "/" + suffix, headers=_headers(csrf), json=body)
             assert result.status_code == 403
             assert result.json()["error"]["code"] == "recent_reauthentication_required"

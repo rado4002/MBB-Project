@@ -141,6 +141,7 @@ async def _seed(factory) -> SeededJourney:
         inventory_id=uuid.uuid4(),
         sellable_item_id=item.sellable_item_id,
         status="available",
+        quantity=5,
         updated_at=now,
     )
     source = Message(
@@ -486,7 +487,7 @@ async def test_real_ai_turn_terminal_draft_uses_authoritative_offer(
         assert quote is not None
         assert quote.usd_to_cdf_rate == Decimal("2800")
         assert quote.cdf_amount == Decimal("154000.00")
-        inventory_before = (inventory.status, inventory.updated_at)
+        inventory_before = (inventory.quantity, inventory.status, inventory.updated_at)
 
     class DraftAdapter:
         def __init__(self) -> None:
@@ -589,7 +590,7 @@ async def test_real_ai_turn_terminal_draft_uses_authoritative_offer(
         assert stored.status == "pending" and stored.total_amount == draft.total_cdf
         assert stored.confirmed_at is None and stored.delivered_at is None
         assert stored.hub_crm_synced is False and stored.hub_crm_order_id is None
-        assert (inventory.status, inventory.updated_at) == inventory_before
+        assert (inventory.quantity, inventory.status, inventory.updated_at) == inventory_before
         item = stored.items[0]
         assert item["product_id"] == str(offer.product_id)
         assert item["sellable_item_id"] == str(offer.sellable_item_id)
@@ -775,7 +776,7 @@ async def test_m1_exact_confirmation_creates_and_replays_one_pending_order(
         inventory = await session.get(InventoryRecord, seeded.inventory_id)
         assert draft is not None and inventory is not None
         confirmation = f"OUI {draft.confirmation_code}"
-        inventory_before = (inventory.status, inventory.updated_at)
+        inventory_before = (inventory.quantity, inventory.status, inventory.updated_at)
 
     external_calls = _block_m1_external_effects(
         monkeypatch,
@@ -807,7 +808,7 @@ async def test_m1_exact_confirmation_creates_and_replays_one_pending_order(
         assert orders[0].hub_crm_synced is False
         assert orders[0].hub_crm_order_id is None
         assert inventory is not None
-        assert (inventory.status, inventory.updated_at) == inventory_before
+        assert (inventory.quantity, inventory.status, inventory.updated_at) == inventory_before
     await _assert_state_counts(factory, orders=1)
 
 
@@ -856,7 +857,7 @@ async def test_m1_changed_terms_require_reconfirmation_without_order(
         inventory = await session.get(InventoryRecord, seeded.inventory_id)
         assert draft is not None and old_price is not None and inventory is not None
         confirmation = f"OUI {draft.confirmation_code}"
-        inventory_before = (inventory.status, inventory.updated_at)
+        inventory_before = (inventory.quantity, inventory.status, inventory.updated_at)
         changed_at = datetime.now(timezone.utc)
         old_price.ended_at = changed_at
         session.add(
@@ -902,7 +903,7 @@ async def test_m1_changed_terms_require_reconfirmation_without_order(
         assert versions[1].unit_price_usd == Decimal("60.00")
         assert versions[1].confirmation_code not in confirmation
         assert inventory is not None
-        assert (inventory.status, inventory.updated_at) == inventory_before
+        assert (inventory.quantity, inventory.status, inventory.updated_at) == inventory_before
     await _assert_state_counts(factory)
 
 
@@ -1258,6 +1259,7 @@ async def test_unavailable_offer_blocks_confirmation(engine: AsyncEngine) -> Non
         inventory = await session.get(InventoryRecord, seeded.inventory_id)
         assert draft is not None and inventory is not None
         code = draft.confirmation_code
+        inventory.quantity = 0
         inventory.status = "out_of_stock"
         inventory.updated_at = datetime.now(timezone.utc)
         await session.commit()

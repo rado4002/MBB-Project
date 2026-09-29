@@ -353,7 +353,7 @@ def test_product_capability_handlers_have_no_write_or_external_io_path():
         "create_product",
         "set_current_usd_price",
         "set_current_exchange_rate",
-        "set_inventory_status",
+        "set_inventory_quantity",
         "create_product_media",
         "httpx",
         "requests",

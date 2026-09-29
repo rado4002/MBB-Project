@@ -26,7 +26,7 @@ from app.modules.catalog.service import (
     create_sellable_item,
 )
 from app.modules.commerce_admin import CommerceAdminContext
-from app.modules.inventory.service import set_inventory_status
+from app.modules.inventory.service import set_inventory_quantity
 from app.modules.pricing.service import (
     set_current_exchange_rate,
     set_current_usd_price,
@@ -184,16 +184,16 @@ async def test_executor_reads_authoritative_product_offers_without_business_writ
             amount=Decimal("70.00"),
             administrator=_admin(account),
         )
-        await set_inventory_status(
+        await set_inventory_quantity(
             session,
             sellable_item_id=item_6l.sellable_item_id,
-            status="available",
+            quantity=5,
             administrator=_admin(account),
         )
-        await set_inventory_status(
+        await set_inventory_quantity(
             session,
             sellable_item_id=item_8l.sellable_item_id,
-            status="out_of_stock",
+            quantity=0,
             administrator=_admin(account),
         )
         await set_current_exchange_rate(

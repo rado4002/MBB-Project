@@ -200,6 +200,7 @@ async def _seed(
             inventory_id=uuid.uuid4(),
             sellable_item_id=item.sellable_item_id,
             status=inventory_status,
+            quantity={"available": 5, "out_of_stock": 0, "unknown": None}[inventory_status],
             updated_at=now,
         )
     )

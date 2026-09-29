@@ -555,10 +555,10 @@ async def set_inventory_status(
     _write_guard(request, settings)
     await _commit_or_raise(
         db,
-        inventory_service.set_inventory_status(
+        inventory_service.set_inventory_quantity(
             db,
             sellable_item_id=sellable_item_id,
-            status=body.status,
+            quantity=body.quantity,
             administrator=_administrator(request, principal),
         ),
     )

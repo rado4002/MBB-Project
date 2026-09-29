@@ -59,9 +59,11 @@ export function createBusinessProductsClient(onSessionExpired: () => void) {
       requestJson(`${commerce}/${encodeURIComponent(id)}/price`, {
         method: 'PUT', body: { amount, currency: 'USD' }, csrfToken, signal,
       }, onSessionExpired),
-    setAvailability: (id: string, status: ProductOffer['inventory_status'], csrfToken: string, signal: AbortSignal) =>
+    getInventory: (id: string, signal: AbortSignal) =>
+      requestJson<{ quantity: number | null }>(`${commerce}/${encodeURIComponent(id)}/inventory`, { signal }, onSessionExpired),
+    updateStockQuantity: (id: string, quantity: number | null, csrfToken: string, signal: AbortSignal) =>
       requestJson(`${commerce}/${encodeURIComponent(id)}/inventory`, {
-        method: 'PUT', body: { status }, csrfToken, signal,
+        method: 'PUT', body: { quantity }, csrfToken, signal,
       }, onSessionExpired),
   }
 }

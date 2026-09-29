@@ -120,7 +120,7 @@ def test_order_draft_domain_uses_no_payment_inventory_or_external_call():
         "Payment(",
         "initiate_payment(",
         "sync_order_to_crm(",
-        "set_inventory_status(",
+        "set_inventory_quantity(",
     ):
         assert forbidden not in source
     assert "Order(" in source
