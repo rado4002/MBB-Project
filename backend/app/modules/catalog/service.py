@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -110,6 +110,28 @@ async def get_product_primary_images(
         ProductMedia.active.is_(True), ProductMedia.is_primary.is_(True),
     ))
     return {image.product_id: image for image in media.all()}
+
+
+async def get_effective_primary_images(
+    session: AsyncSession, owners: list[tuple[uuid.UUID, uuid.UUID]],
+) -> dict[uuid.UUID, ProductMedia]:
+    """Resolve bounded SellableItem overrides and Product fallbacks in one read."""
+    if not owners:
+        return {}
+    product_ids = {product_id for product_id, _ in owners}
+    item_ids = {item_id for _, item_id in owners}
+    media = (await session.scalars(select(ProductMedia).where(
+        ProductMedia.active.is_(True),
+        ProductMedia.is_primary.is_(True),
+        or_(ProductMedia.product_id.in_(product_ids),
+            ProductMedia.sellable_item_id.in_(item_ids)),
+    ))).all()
+    product_media = {image.product_id: image for image in media if image.product_id is not None}
+    item_media = {image.sellable_item_id: image for image in media if image.sellable_item_id is not None}
+    return {
+        item_id: image for product_id, item_id in owners
+        if (image := item_media.get(item_id) or product_media.get(product_id)) is not None
+    }
 
 
 def _media_owner_filter(

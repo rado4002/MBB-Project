@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
@@ -13,6 +15,7 @@ from app.models.catalog import (
     normalize_media_asset_url,
 )
 from app.schemas.commerce_admin import ProductMediaCreate, ProductMediaUpdate
+from app.modules.catalog.service import get_effective_primary_images
 
 
 @pytest.mark.parametrize(
@@ -95,3 +98,25 @@ def test_product_media_model_applies_url_alt_and_order_validation() -> None:
     assert media.alt_text == "Fictional product image"
     with pytest.raises(ValueError):
         media.display_order = -1
+
+
+@pytest.mark.asyncio
+async def test_bounded_effective_image_read_prefers_variant_then_product() -> None:
+    product_id = uuid.uuid4()
+    first_id, second_id, third_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    product_media = ProductMedia(
+        product_id=product_id, asset_url="https://example.invalid/product.png",
+        active=True, is_primary=True,
+    )
+    variant_media = ProductMedia(
+        sellable_item_id=second_id, asset_url="https://example.invalid/variant.png",
+        active=True, is_primary=True,
+    )
+    session = SimpleNamespace(scalars=AsyncMock(return_value=SimpleNamespace(
+        all=lambda: [product_media, variant_media],
+    )))
+    images = await get_effective_primary_images(session, [
+        (product_id, first_id), (product_id, second_id), (uuid.uuid4(), third_id),
+    ])
+    assert images == {first_id: product_media, second_id: variant_media}
+    session.scalars.assert_awaited_once()

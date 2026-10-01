@@ -19,6 +19,15 @@ interface Review {
 }
 
 function pendingKey(id: string) { return `mbb.stock.pending.${id}` }
+
+function StockImage({ media, small = false }: { media: StockItem['primary_media']; small?: boolean }) {
+  const [failed, setFailed] = useState(false)
+  const size = small ? ' stock-image--small' : ''
+  return media && !failed
+    ? <img className={`stock-image${size}`} src={media.asset_url} alt={media.alt_text ?? ''}
+      loading="lazy" onError={() => setFailed(true)} />
+    : <span className={`stock-image${size}`} aria-label="No image">No image</span>
+}
 function readPending(id: string): Review | null {
   try {
     const saved = sessionStorage.getItem(pendingKey(id))
@@ -109,7 +118,7 @@ function StockList({ query, selectedId, onSearch }: { query: string; selectedId:
       {hasMore && <p role="status">Showing the first 50 variants. Refine your search to find more.</p>}
       <ul className="stock-results">
         {items.map((item) => <li key={item.sellable_item_id} className={selectedId === item.sellable_item_id ? 'stock-result--selected' : undefined}>
-          <span className="stock-image stock-image--small" aria-hidden="true">No image</span>
+          <StockImage key={item.primary_media?.asset_url ?? 'none'} media={item.primary_media} small />
           <div className="stock-result-main">
             <Link to={`/business/stock?${new URLSearchParams({ ...(query ? { q: query } : {}), item: item.sellable_item_id })}`}>
               {item.product_name} · {item.model_label || 'Standard variant'}
@@ -307,7 +316,7 @@ function StockDetail({ id, query, setup }: { id: string; query: string; setup: b
     {!item && !loading && <button className="button button--secondary" onClick={() => void load()}>Retry</button>}
     {item && <>
       <header className="stock-detail-heading">
-        <span className="stock-image" aria-hidden="true">No image</span>
+        <StockImage key={item.primary_media?.asset_url ?? 'none'} media={item.primary_media} />
         <div><h2>{item.product_name} · {item.model_label || 'Standard variant'}</h2>
           {item.sku && <p>SKU: {item.sku}</p>}
           {manager && <span className={`stock-state ${item.product_active && item.variant_active ? 'stock-state--active' : 'stock-state--inactive'}`}>

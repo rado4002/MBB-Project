@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.browser_auth_deps import BrowserPrincipal, require_capability
 from app.api.browser_auth_errors import BrowserAuthError
 from app.database import get_db
+from app.modules.catalog.service import get_effective_primary_images
 from app.modules.inventory.service import availability_from_quantity, search_stock_items
 from app.modules.pricing.service import get_current_usd_prices
 
@@ -27,6 +28,11 @@ class StockSearchQuery(BaseModel):
     limit: int = Field(default=50, ge=1, le=50)
 
 
+class StockPrimaryMedia(BaseModel):
+    asset_url: str
+    alt_text: str | None
+
+
 class StockItemPublic(BaseModel):
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
     product_id: UUID
@@ -37,6 +43,7 @@ class StockItemPublic(BaseModel):
     product_active: bool
     variant_active: bool
     availability: Literal["available", "out_of_stock", "unknown"]
+    primary_media: StockPrimaryMedia | None
 
 
 class StockItemAdmin(StockItemPublic):
@@ -66,6 +73,9 @@ async def search_stock(
         prices = await get_current_usd_prices(
             db, [item.sellable_item_id for _, item, _ in rows]
         ) if manager else {}
+        images = await get_effective_primary_images(
+            db, [(product.product_id, item.sellable_item_id) for product, item, _ in rows]
+        )
     except (SQLAlchemyError, OSError) as exc:
         raise BrowserAuthError(
             status_code=503, code="SERVICE_UNAVAILABLE",
@@ -82,6 +92,9 @@ async def search_stock(
             product_active=product.active,
             variant_active=item.active,
             availability=availability_from_quantity(None if inventory is None else inventory.quantity),
+            primary_media=(None if (image := images.get(item.sellable_item_id)) is None else {
+                "asset_url": image.asset_url, "alt_text": image.alt_text,
+            }),
         )
         if manager:
             items.append(StockItemAdmin(

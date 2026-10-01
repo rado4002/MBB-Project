@@ -51,10 +51,21 @@ export interface FirstVariantCreateInput {
   active: false
 }
 
+export interface CatalogMedia {
+  media_id: string
+  product_id: string | null
+  sellable_item_id: string | null
+  asset_url: string
+  alt_text: string | null
+  is_primary: boolean
+  active: boolean
+}
+
 export function createBusinessProductsClient(onSessionExpired: () => void) {
   const base = '/api/v1/business/products'
   const products = '/api/v1/operator/commerce/products'
   const commerce = '/api/v1/operator/commerce/sellable-items'
+  const media = '/api/v1/operator/commerce/product-media'
   return {
     list: (query: string, signal: AbortSignal) =>
       requestJson<{ items: BusinessProduct[]; has_more: boolean }>(
@@ -83,6 +94,23 @@ export function createBusinessProductsClient(onSessionExpired: () => void) {
     changePrice: (id: string, amount: string, csrfToken: string, signal: AbortSignal) =>
       requestJson(`${commerce}/${encodeURIComponent(id)}/price`, {
         method: 'PUT', body: { amount, currency: 'USD' }, csrfToken, signal,
+      }, onSessionExpired),
+    listMedia: (scope: 'product' | 'sellable_item', id: string, signal: AbortSignal) =>
+      requestJson<{ items: CatalogMedia[] }>(scope === 'product'
+        ? `${products}/${encodeURIComponent(id)}/media`
+        : `${commerce}/${encodeURIComponent(id)}/media`, { signal }, onSessionExpired),
+    addMedia: (scope: 'product' | 'sellable_item', id: string, assetUrl: string, altText: string | null,
+      csrfToken: string, signal: AbortSignal) => requestJson<CatalogMedia>(media, {
+        method: 'POST', body: { [scope === 'product' ? 'product_id' : 'sellable_item_id']: id,
+          asset_url: assetUrl, alt_text: altText, is_primary: true }, csrfToken, signal,
+      }, onSessionExpired),
+    replaceMedia: (id: string, assetUrl: string, altText: string | null, csrfToken: string, signal: AbortSignal) =>
+      requestJson<CatalogMedia>(`${media}/${encodeURIComponent(id)}`, {
+        method: 'PATCH', body: { asset_url: assetUrl, alt_text: altText }, csrfToken, signal,
+      }, onSessionExpired),
+    removeMedia: (id: string, csrfToken: string, signal: AbortSignal) =>
+      requestJson<CatalogMedia>(`${media}/${encodeURIComponent(id)}`, {
+        method: 'PATCH', body: { active: false }, csrfToken, signal,
       }, onSessionExpired),
   }
 }

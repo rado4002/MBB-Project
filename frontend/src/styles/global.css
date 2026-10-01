@@ -653,6 +653,9 @@ h2 { font-size: 1.125rem; }
 .products-list a { font-weight: 700; text-decoration-thickness: 1px; text-underline-offset: .2em; }
 .products-image { display: block; width: 4rem; height: 4rem; flex-shrink: 0; object-fit: contain; border-radius: var(--radius-sm); background: var(--color-surface); }
 .products-image--large { width: min(100%, 15rem); height: 12rem; margin-block: var(--space-4); }
+.products-image-form { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-3); margin-block: var(--space-4); }
+.products-image-form input { width: min(100%, 32rem); padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); font: inherit; background: var(--color-surface); color: var(--color-text); }
+.products-image-form .products-image { border: 1px solid var(--color-border); }
 .products-placeholder { display: grid; place-items: center; color: var(--color-text-muted); border: 1px solid var(--color-border); font-size: .85rem; }
 .products-family { display: flex; align-items: start; gap: var(--space-4); margin-block: var(--space-5) var(--space-6); padding: var(--space-5); border: 1px solid #dce3ee; border-radius: .5rem; background: #fff; }
 .products-family > div { min-width: 0; }
@@ -722,6 +725,7 @@ h2 { font-size: 1.125rem; }
 .stock-results p, .stock-detail-heading p { margin: var(--space-1) 0; color: #64748b; font-size: .85rem; }
 .stock-image { display: grid; place-items: center; width: 4.5rem; height: 4.5rem; flex-shrink: 0; border: 1px solid #dce3ee; border-radius: .5rem; background: #f6f8fa; color: #64748b; font-size: .7rem; text-align: center; }
 .stock-image--small { width: 3.25rem; height: 3.25rem; }
+.stock-image:is(img) { object-fit: contain; }
 .stock-result-facts { display: grid; justify-items: end; gap: var(--space-2); color: #64748b; font-size: .8rem; text-align: right; }
 .stock-state, .stock-availability { display: inline-flex; align-items: center; width: fit-content; padding: .2rem .55rem; border-radius: 999px; font-size: .75rem; font-weight: 700; line-height: 1.4; }
 .stock-state--active, .stock-availability--available { background: #dcfce7; color: #15803d; }

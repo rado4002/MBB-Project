@@ -12,7 +12,7 @@ import pytest_asyncio
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.v1 import business_stock
-from app.models.catalog import Product, SellableItem
+from app.models.catalog import Product, ProductMedia, SellableItem
 from app.models.inventory import InventoryRecord
 from app.models.pricing import SellableItemPrice
 from test_commerce_admin_api import (
@@ -122,6 +122,49 @@ async def test_operator_sees_only_operational_items_and_no_exact_quantity(stock_
         for hidden in variants[2:]:
             exact = await client.get(base, params={"item_id": str(hidden.sellable_item_id)})
             assert exact.status_code == 200 and exact.json()["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_stock_image_uses_variant_then_product_and_falls_back_after_removal(
+    stock_catalog, harness,  # noqa: F811 -- imported shared fixture
+) -> None:
+    transport, variants = stock_catalog
+    _, factory, _ = harness
+    async with factory() as session:
+        product_media = ProductMedia(
+            product_id=variants[0].product_id, asset_url="https://example.invalid/product.png",
+            is_primary=True, active=True,
+        )
+        variant_media = ProductMedia(
+            sellable_item_id=variants[1].sellable_item_id,
+            asset_url="https://example.invalid/variant.png", is_primary=True, active=True,
+        )
+        session.add_all([product_media, variant_media])
+        await session.commit()
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        await _login(client, "commerce.operator", OPERATOR_PASSWORD)
+        async def images():
+            response = await client.get("/api/v1/business/stock")
+            assert response.status_code == 200
+            return {row["sellable_item_id"]: row["primary_media"] for row in response.json()["items"]}
+        current = await images()
+        assert current[str(variants[0].sellable_item_id)]["asset_url"] == "https://example.invalid/product.png"
+        assert current[str(variants[1].sellable_item_id)]["asset_url"] == "https://example.invalid/variant.png"
+        async with factory() as session:
+            media = await session.get(ProductMedia, variant_media.media_id)
+            media.active = False
+            media.is_primary = False
+            await session.commit()
+        fallback = await images()
+        assert fallback[str(variants[1].sellable_item_id)]["asset_url"] == "https://example.invalid/product.png"
+        async with factory() as session:
+            media = await session.get(ProductMedia, product_media.media_id)
+            media.active = False
+            media.is_primary = False
+            await session.commit()
+        empty = await images()
+        assert empty[str(variants[0].sellable_item_id)] is None
+        assert empty[str(variants[1].sellable_item_id)] is None
 
 
 @pytest.mark.asyncio

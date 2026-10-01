@@ -16,4 +16,10 @@ export const handlers = [
   http.get('/api/v1/operator/conversations', () =>
     HttpResponse.json({ items: [], next_cursor: null }),
   ),
+  http.get('/api/v1/operator/commerce/products/:id/media', () =>
+    HttpResponse.json({ items: [] }),
+  ),
+  http.get('/api/v1/operator/commerce/sellable-items/:id/media', () =>
+    HttpResponse.json({ items: [] }),
+  ),
 ]

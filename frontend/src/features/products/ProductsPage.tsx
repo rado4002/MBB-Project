@@ -5,6 +5,7 @@ import { asApiError, errorMessage } from '../../api/errors'
 import { createProductOfferClient, type ProductOffer } from '../../api/productOffers'
 import { useAuth } from '../../auth/AuthProvider'
 import { PasswordField } from '../../components/PasswordField'
+import { ImageControl } from './ImageControl'
 
 const availability = { available: 'Available', out_of_stock: 'Out of stock', unknown: 'Availability unconfirmed' }
 const statuses = { sellable_now: 'Sellable now', out_of_stock: 'Out of stock', availability_unconfirmed: 'Availability unconfirmed', price_unavailable: 'Price not set', inactive: 'Inactive' }
@@ -494,6 +495,10 @@ function ProductDetail({ id }: { id: string }) {
           {manager && <p className="products-meta">{product.active ? 'Active product' : 'Inactive product'}</p>}
         </div>
       </header>
+      {manager && <ImageControl scope="product" ownerId={id} onChanged={async () => {
+        if (!await load()) throw new Error('Product detail could not be reread')
+        setNotice('Image change saved. Showing refreshed Product detail.')
+      }} />}
       {manager && <LifecycleAction kind="product" id={id} active={product.active}
         onChanged={async () => { if (await load()) setNotice('Showing refreshed Product detail.') }} />}
       <h2>Variants</h2>
@@ -655,6 +660,10 @@ function VariantDetail({ id, active, onChanged }: { id: string; active: boolean;
         </section>
         <ProductImage key={offer.primary_media?.asset_url ?? 'none'} media={offer.primary_media} large />
       </div>
+      {manager && !denied && <ImageControl scope="sellable_item" ownerId={id} onChanged={async () => {
+        if (!await load()) throw new Error('Product Offer could not be reread')
+        await onChanged()
+      }} />}
     </>}
     {manager && !denied && action && <form className="products-write" onSubmit={(event) => void save(event)}>
       <label htmlFor={fieldId}>New USD price</label>

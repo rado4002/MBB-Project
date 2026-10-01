@@ -9,6 +9,7 @@ export interface StockItem {
   product_active: boolean
   variant_active: boolean
   availability: 'available' | 'out_of_stock' | 'unknown'
+  primary_media: { asset_url: string; alt_text: string | null } | null
   quantity?: number | null
   inventory_updated_at?: string | null
   current_usd_price?: string | null

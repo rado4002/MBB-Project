@@ -68,6 +68,7 @@ describe('shared Business Products', () => {
     expect(screen.getByText('capacity l')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '6L' })).toHaveFocus()
     expect(screen.queryByRole('button', { name: /Change price|Update stock quantity|Create|Edit|Activate/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Add image|Replace image|Remove image/ })).not.toBeInTheDocument()
     await expectAccessible(container)
     await user.click(screen.getByRole('link', { name: 'Back to products' }))
     await screen.findByRole('heading', { name: 'Products' })
@@ -306,5 +307,116 @@ describe('shared Business Products', () => {
     await screen.findByRole('heading', { name: 'Products' })
     await waitFor(() => expect(screen.queryByRole('region', { name: 'Selected variant' })).not.toBeInTheDocument())
     expect(screen.queryByText('USD 55.00')).not.toBeInTheDocument()
+  })
+})
+
+describe('Administrator image management', () => {
+  it('adds, replaces, and deactivates a Product image after a successful preview and reread', async () => {
+    setup('administrator')
+    let image: { media_id: string; asset_url: string; alt_text: string | null; active: boolean; is_primary: boolean } | null = null
+    const writes: string[] = []
+    server.use(
+      http.get(`${base}/:id`, () => HttpResponse.json({ ...product, primary_media: image?.active
+        ? { media_id: image.media_id, asset_url: image.asset_url, alt_text: image.alt_text, source_scope: 'product' } : null })),
+      http.get(`/api/v1/operator/commerce/products/:id/media`, () => HttpResponse.json({ items: image ? [image] : [] })),
+      http.post('/api/v1/operator/commerce/product-media', async ({ request }) => {
+        writes.push('add')
+        const body = await request.json() as { asset_url: string; alt_text: string | null; product_id: string }
+        expect(body.product_id).toBe(productId)
+        expect(body.alt_text).toBe('Front view')
+        image = { media_id: productId, asset_url: body.asset_url, alt_text: body.alt_text, active: true, is_primary: true }
+        return HttpResponse.json(image, { status: 201 })
+      }),
+      http.patch('/api/v1/operator/commerce/product-media/:id', async ({ request }) => {
+        const body = await request.json() as { asset_url?: string; alt_text?: string | null; active?: boolean }
+        writes.push(body.active === false ? 'remove' : 'replace')
+        image = { ...image!, ...body, is_primary: body.active === false ? false : true }
+        return HttpResponse.json(image)
+      }),
+    )
+    const user = userEvent.setup()
+    const { container } = renderApp(`/business/products/${productId}`)
+    const region = await screen.findByRole('region', { name: 'Product image' })
+    await user.click(await within(region).findByRole('button', { name: 'Add image' }))
+    await user.type(within(region).getByRole('textbox', { name: 'HTTPS image URL' }), 'https://example.invalid/first.png')
+    expect(within(region).getByRole('button', { name: 'Save image' })).toBeDisabled()
+    fireEvent.error(within(region).getByRole('img', { name: 'Image preview' }))
+    expect(within(region).getByRole('alert')).toHaveTextContent('Image preview failed')
+    expect(writes).toEqual([])
+    await user.clear(within(region).getByRole('textbox', { name: 'HTTPS image URL' }))
+    await user.type(within(region).getByRole('textbox', { name: 'HTTPS image URL' }), 'https://example.invalid/ready.png')
+    await user.type(within(region).getByRole('textbox', { name: 'Alt text (optional)' }), 'Front view')
+    fireEvent.load(within(region).getByRole('img', { name: 'Front view' }))
+    await user.click(within(region).getByRole('button', { name: 'Save image' }))
+    await screen.findByRole('button', { name: 'Replace image' })
+    expect(container.querySelector('.products-family img')).toHaveAttribute('src', 'https://example.invalid/ready.png')
+    await user.click(screen.getByRole('button', { name: 'Replace image' }))
+    await user.clear(screen.getByRole('textbox', { name: 'HTTPS image URL' }))
+    await user.type(screen.getByRole('textbox', { name: 'HTTPS image URL' }), 'https://example.invalid/new.png')
+    fireEvent.load(within(screen.getByRole('region', { name: 'Product image' })).getByRole('img', { name: 'Front view' }))
+    await user.click(screen.getByRole('button', { name: 'Save image' }))
+    await waitFor(() => expect(container.querySelector('.products-family img')).toHaveAttribute('src', 'https://example.invalid/new.png'))
+    await user.click(await screen.findByRole('button', { name: 'Remove image' }))
+    await waitFor(() => expect(container.querySelector('.products-family')).toHaveTextContent('No image'))
+    expect(writes).toEqual(['add', 'replace', 'remove'])
+    await expectAccessible(container)
+  })
+
+  it('removing a variant override reveals the Product image', async () => {
+    setup('administrator')
+    const productImage = { media_id: productId, asset_url: 'https://example.invalid/product.png', alt_text: null, source_scope: 'product' as const }
+    let variantImage: { media_id: string; asset_url: string; alt_text: string | null; active: boolean; is_primary: boolean } | null = null
+    server.use(
+      http.get(`${base}/:id`, () => HttpResponse.json({ ...product, primary_media: productImage })),
+      http.get(offerPath, () => HttpResponse.json(offer({ primary_media: variantImage?.active
+        ? { media_id: variantImage.media_id, asset_url: variantImage.asset_url, alt_text: variantImage.alt_text, source_scope: 'sellable_item' }
+        : productImage }))),
+      http.get('/api/v1/operator/commerce/sellable-items/:id/media', () => HttpResponse.json({ items: variantImage ? [variantImage] : [] })),
+      http.post('/api/v1/operator/commerce/product-media', async ({ request }) => {
+        const body = await request.json() as { sellable_item_id: string; asset_url: string }
+        expect(body.sellable_item_id).toBe(itemId)
+        variantImage = { media_id: itemId, asset_url: body.asset_url, alt_text: null, active: true, is_primary: true }
+        return HttpResponse.json(variantImage, { status: 201 })
+      }),
+      http.patch('/api/v1/operator/commerce/product-media/:id', () => {
+        variantImage = { ...variantImage!, active: false, is_primary: false }
+        return HttpResponse.json(variantImage)
+      }),
+    )
+    const user = await openVariant()
+    const region = await screen.findByRole('region', { name: 'Variant image override' })
+    await user.click(within(region).getByRole('button', { name: 'Add image' }))
+    await user.type(within(region).getByRole('textbox', { name: 'HTTPS image URL' }), 'https://example.invalid/variant.png')
+    fireEvent.load(within(region).getByRole('img', { name: 'Image preview' }))
+    await user.click(within(region).getByRole('button', { name: 'Save image' }))
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Selected variant' }).querySelector('.products-commercial-layout img'))
+      .toHaveAttribute('src', 'https://example.invalid/variant.png'))
+    await user.click(await within(screen.getByRole('region', { name: 'Variant image override' })).findByRole('button', { name: 'Remove image' }))
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Selected variant' }).querySelector('.products-commercial-layout img'))
+      .toHaveAttribute('src', productImage.asset_url))
+  })
+
+  it('requires recent Administrator reauthentication before writing an image', async () => {
+    setup('administrator', offer(), false)
+    let writes = 0
+    server.use(
+      http.post('/api/v1/auth/reauthenticate', () => HttpResponse.json({
+        ...sessionFixture('administrator'), recent_reauthentication_expires_at_epoch: 2_000_000_000,
+        csrf_token: 'rotated-csrf',
+      })),
+      http.post('/api/v1/operator/commerce/product-media', () => { writes++; return HttpResponse.json({}) }),
+    )
+    const user = userEvent.setup()
+    renderApp(`/business/products/${productId}`)
+    const region = await screen.findByRole('region', { name: 'Product image' })
+    await user.click(await within(region).findByRole('button', { name: 'Add image' }))
+    await user.type(within(region).getByRole('textbox', { name: 'HTTPS image URL' }), 'https://example.invalid/image.png')
+    fireEvent.load(within(region).getByRole('img', { name: 'Image preview' }))
+    await user.click(within(region).getByRole('button', { name: 'Save image' }))
+    expect(writes).toBe(0)
+    await user.type(within(region).getByLabelText('Confirm Administrator password'), 'Fictional-Password-42!')
+    await user.click(within(region).getByRole('button', { name: 'Confirm password' }))
+    await within(region).findByText('Password confirmed. Review and save the image change.')
+    expect(writes).toBe(0)
   })
 })

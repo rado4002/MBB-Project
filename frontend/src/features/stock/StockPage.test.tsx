@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
@@ -75,6 +75,20 @@ function setup(role: 'administrator' | 'operator' = 'administrator', quantity: n
 }
 
 describe('Business Stock', () => {
+  it('shows the effective Catalog image in list and detail, with a failed-image placeholder', async () => {
+    setup()
+    server.use(http.get(base, () => HttpResponse.json({ items: [{ ...stockItem,
+      primary_media: { asset_url: 'https://example.invalid/variant.png', alt_text: 'Variant view' },
+    }], has_more: false })))
+    const user = userEvent.setup()
+    const { container } = renderApp('/business/stock')
+    expect(await screen.findByRole('img', { name: 'Variant view' })).toHaveAttribute('src', 'https://example.invalid/variant.png')
+    await user.click(screen.getByRole('link', { name: 'Fictional Air Fryer · 6L' }))
+    await waitFor(() => expect(screen.getAllByRole('img', { name: 'Variant view' })).toHaveLength(2))
+    fireEvent.error(screen.getAllByRole('img', { name: 'Variant view' })[1])
+    expect(container.querySelector('.stock-detail-heading')).toHaveTextContent('No image')
+    await expectAccessible(container)
+  })
   it('navigates Products and Stock, searches by product, variant, or SKU, and links to Product', async () => {
     setup()
     const user = userEvent.setup()
