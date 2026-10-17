@@ -14,8 +14,8 @@ from pydantic import ValidationError
 from app.adapters.base import ProviderTurnAdapter
 from app.ai import ops
 from app.ai.provider_contract import (
-    MAX_PROVIDER_TOOL_CALLS,
     MAX_PROVIDER_MESSAGE_CHARS,
+    MAX_PROVIDER_TOOL_CALLS,
     ProviderContinuationState,
     ProviderErrorCategory,
     ProviderFinishReason,
@@ -186,7 +186,7 @@ class DeepSeekAdapter(ProviderTurnAdapter):
                         http_status=None,
                     ),
                 ) from None
-            except Exception:
+            except Exception:  # noqa: BLE001 - map unexpected provider failures to the boundary error.
                 raise ProviderTurnError.unknown() from None
 
     def build_request_payload(self, request: ProviderTurnRequest) -> dict[str, Any]:

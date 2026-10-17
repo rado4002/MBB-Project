@@ -53,12 +53,12 @@ def _build_provider_turn_adapter(configured_name: str) -> ProviderTurnAdapter:
     return _build_ai_adapter(configured_name)
 
 
-@lru_cache()
+@lru_cache
 def get_ai_adapter() -> BaseAIAdapter:
     return _build_ai_adapter(settings.ai_adapter)
 
 
-@lru_cache()
+@lru_cache
 def get_provider_turn_adapter() -> ProviderTurnAdapter:
     return _build_provider_turn_adapter(settings.ai_turn_provider)
 
@@ -77,7 +77,7 @@ def ai_adapter_eligibility(
     return "disabled" if isinstance(adapter, DisabledAIAdapter) else "eligible"
 
 
-@lru_cache()
+@lru_cache
 def get_crm_adapter() -> BaseCRMAdapter:
     if settings.crm_adapter == "airtable":
         from app.adapters.crm.airtable_adapter import AirtableAdapter
@@ -85,7 +85,7 @@ def get_crm_adapter() -> BaseCRMAdapter:
     raise ValueError(f"Unknown CRM adapter: {settings.crm_adapter}")
 
 
-@lru_cache()
+@lru_cache
 def get_inventory_adapter() -> BaseInventoryAdapter:
     if settings.inventory_adapter == "static":
         from app.adapters.inventory.static_adapter import StaticInventoryAdapter
@@ -93,7 +93,7 @@ def get_inventory_adapter() -> BaseInventoryAdapter:
     raise ValueError(f"Unknown inventory adapter: {settings.inventory_adapter}")
 
 
-@lru_cache()
+@lru_cache
 def get_payment_adapter() -> BasePaymentAdapter:
     if settings.payment_adapter == "mobile_money":
         from app.adapters.payment.mobile_money_adapter import MobileMoneyAdapter
@@ -101,12 +101,14 @@ def get_payment_adapter() -> BasePaymentAdapter:
     raise ValueError(f"Unknown payment adapter: {settings.payment_adapter}")
 
 
-@lru_cache()
+@lru_cache
 def get_messaging_adapter() -> BaseMessagingAdapter:
     if settings.messaging_adapter == "whatsapp":
         if settings.whatsapp_mode == "baileys":
             from app.adapters.messaging.baileys_adapter import BaileysAdapter
             return BaileysAdapter()
-        from app.adapters.messaging.whatsapp_official_adapter import WhatsAppOfficialAdapter
+        from app.adapters.messaging.whatsapp_official_adapter import (
+            WhatsAppOfficialAdapter,
+        )
         return WhatsAppOfficialAdapter()
     raise ValueError(f"Unknown messaging adapter: {settings.messaging_adapter}")

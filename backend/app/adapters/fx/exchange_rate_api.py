@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -107,7 +107,7 @@ def _parse_observation(payload: Any) -> ExchangeRateAPIObservation:
     if isinstance(timestamp, bool) or not isinstance(timestamp, int):
         raise ExchangeRateAPIError("provider_timestamp_invalid")
     try:
-        published_at = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        published_at = datetime.fromtimestamp(timestamp, tz=UTC)
     except (OverflowError, OSError, ValueError) as exc:
         raise ExchangeRateAPIError("provider_timestamp_invalid") from exc
     return ExchangeRateAPIObservation(
