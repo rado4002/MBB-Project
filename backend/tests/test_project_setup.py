@@ -142,6 +142,7 @@ try:
         "app.tasks.maps.*": "maps",
         "app.tasks.escalation.*": "escalation",
         "app.tasks.conversion.*": "conversion",
+        "operator_replies.*": "default",
         "m7.*": "conversion",
     }
     assert set(routes) == set(expected_routes), "Celery task routes do not match current task names"
