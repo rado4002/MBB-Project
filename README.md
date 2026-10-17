@@ -13,7 +13,7 @@ has passed end-to-end validation.
 
 | Area | Implemented | Boundary / remaining evidence |
 | --- | --- | --- |
-| Products and variants | Product-family browsing; administrator creation of inactive Products and first variants; lifecycle controls and commercial review; product images with variant overrides. Variants are Sellable Items with their own identity. | Image management uses HTTPS asset URLs, not an upload service. The complete setup-to-Inbox journey remains to be validated. |
+| Products and variants | Product-family browsing; administrator creation of inactive Products and first variants; lifecycle controls and commercial review; product images with variant overrides. Variants are Sellable Items with their own identity. | Image management uses HTTPS asset URLs, not an upload service. The isolated Products → Stock → Inbox journey is covered by a real-browser regression test. |
 | Pricing | Current USD prices and history; manual/automatic USD-CDF exchange-rate authority; derived CDF quotes. | Pricing owns monetary authority; automatic refresh is an external provider operation requiring separate authorization. |
 | Stock | Quantity-derived availability, unknown-count handling, administrator receive/adjust operations, movement history, stale-state checks, and operation-key replay protection; role-shaped Business Stock UI and search. | Operators see availability; administrator contracts expose exact quantities and maintenance. Order acceptance does not reserve or decrement stock. |
 | Orders | Authoritative order drafts, exact customer confirmation/cancellation, changed-term reconfirmation, idempotent pending Order creation; order read/status APIs. | Pending acceptance does not establish payment, reservation, fulfillment, or delivery. There is no dedicated Orders workspace in the current React routes. |
@@ -68,15 +68,9 @@ Evidence is scoped to the revision and conditions in each report:
 - Current Products, Stock, offer-lookup, AI, and Relance test sources cover
   individual contracts and selected connected paths. Test presence alone is not
   a passing result; earlier reports do not certify later commits.
-
-The next validation journey is **Product/variant → pricing → stock → Inbox offer
-lookup**. It has not been established as passed by this documentation alignment.
-Use an isolated local environment to create and activate the catalog identities,
-set price and exchange-rate authority, establish and change verified stock,
-then confirm the same identities, prices, and availability through the real Inbox
-lookup. Include role restrictions, unknown/zero stock, inactive items, stale writes,
-and operation replay. Completion requires connected end-to-end evidence across
-these contracts; separate module successes are insufficient.
+- The Products → Stock → Inbox regression runs the real React UI through HTTPS,
+  FastAPI, and disposable PostgreSQL. It covers creation, price, lifecycle,
+  stock transitions, offer lookup, role restrictions, and stale-write rejection.
 
 Payment, fulfillment, live Relance, and limited-user/public operation require
 their own authorized scope and matching integration/runtime evidence.
@@ -142,6 +136,15 @@ their suite-specific disposable database variables; for example,
 `AI2B_TEST_DATABASE_URL` enables the commerce browser API suites. Read fixtures
 before running them and report skipped tests. Frontend tests use mocked HTTP
 contracts and do not establish backend integration or runtime delivery.
+
+Run the isolated Products → Stock → Inbox browser regression from the repository
+root after installing backend test and frontend dependencies and ensuring Docker
+is running. The runner uses cached Playwright Chromium, creates only disposable
+containers and temporary files, and disables all external effects:
+
+```powershell
+python scripts/run_products_stock_inbox_e2e.py
+```
 
 The example environment disables AI, WhatsApp sends, CRM writes, payments,
 Relance, scheduled tasks, and MAPS fanout. Check effective configuration for each
