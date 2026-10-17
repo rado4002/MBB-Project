@@ -1,158 +1,84 @@
 # AGENTS.md
 
-## Project Status
+MBB is a business-operating platform developed through coherent vertical
+capabilities. Current capabilities and development status belong in `README.md`;
+the current user prompt defines task scope and acceptance criteria.
 
-MBB-Project is fully stabilized for the validated local/codebase scope.
-Recovery and local/codebase stabilization are complete. This is not a
-production-ready, pilot-ready, publicly deployed, or general feature-readiness
-claim.
+## Scope and delivery
 
-The protected stabilization baseline is the annotated tag
-`local-stabilized-v1` at
-`cb39748deecf8ebe28c6ce3cded734754becbeb1`. Main may advance through
-controlled work while that tag remains fixed. Do not reopen a validated
-recovery path without a new reproducible defect or a new claim boundary that
-requires matching validation.
+- Define the business outcome before implementation.
+- Deliver one complete, measurable business capability at a time.
+- Make the narrowest reversible change that satisfies the authorized task.
+- Preserve existing interfaces and behavior unless the task authorizes changes.
+- Keep inspection, review, and planning read-only.
+- Respect allowed-file lists; explain necessary dependencies before changing scope.
+- Do not add features, broad refactoring, or a full audit without a task need.
+- Optimize only against measured or strongly evidenced constraints.
 
-This file contains durable repository rules. Step-specific scope, allowed files, and validation commands come from the current user prompt.
+## Domain integrity
 
-## Current Product-Development Goal
-
-Proceed through controlled product development:
-
-Preserve the stabilized foundation
--> define one MVP business journey
--> define contracts
--> implement one complete vertical capability
--> validate internally
--> prepare limited-user validation.
-
-The current next phase is Step 23B: first MVP business journey definition.
-Documentation alignment does not perform Step 23B.
-
-## Working Principles
-
-- Truth before polish.
-- Small verified steps before large changes.
-- Preserve existing working behavior when possible.
-- Prefer minimal, reversible changes.
-- Make the narrowest change that satisfies the current task.
-- Deliver one measurable business capability at a time.
-- Establish the business outcome before implementation.
-- Prefer complete vertical slices over disconnected partial modules.
-- Preserve the validated stabilization guarantees.
+- Each domain owns its authoritative data, invariants, lifecycle, and operations.
+- Cross-domain operations use explicit application/service contracts; do not bypass
+  domain ownership or duplicate business truth.
+- Products owns catalog and sellable identity.
+- Stock owns quantities and inventory operations.
+- Pricing owns prices and exchange-rate authority.
+- Orders owns order acceptance and lifecycle.
+- Compose domain facts through explicit read contracts such as Product Offer.
+- Inbox and AI consume authorized contracts; neither becomes a separate source of
+  commercial truth or bypasses conversation ownership.
 - Keep AI optional and subordinate to authoritative business rules.
-- Keep external capabilities default-off unless explicitly authorized.
-- Optimize only in response to measured or strongly evidenced constraints.
-- Allow main to advance while keeping the stabilization tag fixed.
-
-## Controlled Development Workflow
-
-Use one safe Codex run when the task is simple. Separate product definition,
-investigation, implementation, and external validation when risk or uncertainty
-justifies it.
-
-Evidence must match the claim being made. Product definition is not
-implementation evidence, local validation is not public-deployment evidence,
-and enabling any external side effect requires explicit authorization.
-
-## Scope Control Rules
-
-- Do not add features unless the user prompt explicitly authorizes them.
-- Do not perform broad refactoring unless the task explicitly requires it.
-- Do not change files outside the current task scope unless necessary to complete the task; explain the dependency before or while making the change.
-- If the user prompt lists allowed files, do not edit outside that list unless the task cannot be completed without it. If editing outside the list is necessary, explain why in the final report.
-- During inspection, audit, review, or planning tasks, do not modify files.
-- During implementation tasks, touch only the files needed for the requested change.
-- Do not force a full repository audit for small targeted tasks.
-
-## Evidence And Truthfulness Rules
-
-- Do not assume the project works unless it has been validated in this session or the user provides current evidence.
-- Do not hallucinate missing files, flows, modules, APIs, tests, or runtime behavior.
-- If something is unclear from the codebase, say: "unclear from the codebase."
-- Use exact file paths when reporting problems.
-- Separate facts, assumptions, risks, and recommendations.
-- Mention uncertainty directly instead of filling gaps with guesses.
-
-## Code-Change Rules
-
-- Preserve existing interfaces and behavior unless the task explicitly asks to change them.
-- Prefer targeted fixes over rewrites.
-- Avoid changing formatting, naming, or structure in unrelated code.
-- Keep configuration and secrets handling conservative; do not expose secrets in code, logs, or reports.
-- When touching backend code, prefer structured logging over print statements.
-- When touching customer-facing message logic, avoid English-only hardcoded user-facing strings unless the existing flow already requires them or the user asks for them.
-
-## Git Attribution Rules
-
-AI assistants may help inspect, design, edit, test, validate, stage or prepare
-commits, but they must never be recorded as Git authors, Git committers,
-co-authors, sign-offs, contributor trailers or generated-by identities.
-
-All commits must use the repository owner’s approved human Git identity.
-Do not add Co-authored-by, Generated-by, Assisted-by or similar AI attribution.
-
-## Architecture And Module Boundaries
-
-- Respect existing module boundaries.
-- Avoid direct imports between major modules when the surrounding architecture expects explicit APIs, service layers, events, or Celery tasks.
-- Preserve adapter boundaries for messaging, AI, CRM, payment, and other external integrations when touching those areas.
-- Do not introduce a broad redesign without an approved product reason or measured operational evidence.
-- Preserve the modular monolith unless evidence justifies extraction.
+- Preserve adapter boundaries for messaging, AI, CRM, payments, and other providers.
+- Keep Baileys a messaging channel adapter rather than the business core.
+- Preserve the modular monolith unless evidence justifies a different architecture.
 - Keep PostgreSQL authoritative for durable business data.
-- Keep Redis temporary: cache, broker, queue, or coordination data must not silently become the authoritative business record.
-- Use Celery selectively for work that benefits from asynchronous execution; do not move work to Celery by default.
-- Keep Baileys as a messaging channel adapter, not the business core.
+- Keep Redis temporary for caching, queues, and coordination.
+- Use Celery selectively where asynchronous execution benefits the capability.
 
-## DRC And Product Constraints
+## Safety and resilience
 
-Treat these as product realities when they are relevant to touched code:
+- Preserve authentication, authorization, browser-session, Origin, CSRF, and
+  reauthentication controls.
+- Preserve validation, escaping, uniqueness, idempotency, audit, and send-ledger
+  guarantees; retries must not create duplicate business effects.
+- Keep external capabilities default-off; enabling external side effects requires
+  explicit authorization and applicable safety gates.
+- Protect secrets in configuration, code, logs, and reports.
+- Prefer structured logging in backend changes.
+- Preserve supported localization in customer-facing messages; avoid new
+  English-only hardcoded responses unless the existing flow or task requires them.
+- Design for WhatsApp-first users, low bandwidth, intermittent 3G/4G, and power loss.
+- Make write operations idempotent where relevant and practical.
+- Bound external calls with timeouts and appropriate retry or circuit-breaker rules.
+- Avoid heavy payloads, polling loops, and WebSockets without task justification.
 
-- Unstable power and intermittent recovery.
-- Unstable 3G/4G and low bandwidth.
-- WhatsApp-first users.
-- Write operations should be idempotent when practical and relevant.
-- External API calls should use bounded retries, timeouts, or circuit-breaker behavior when practical and relevant.
-- Avoid heavy payloads, polling loops, and WebSockets unless the task explicitly justifies them.
+## Evidence and completion
 
-## Validation Rules
+- Verify claims against current repository evidence; distinguish facts, assumptions,
+  risks, and recommendations. State "unclear from the codebase" when appropriate.
+- Separate implementation, isolated tests, connected integration, and runtime proof.
+- Require end-to-end integration evidence across the relevant domain contracts before
+  declaring a business capability complete; working modules alone are insufficient.
+- Exercise the claimed journey and relevant failure, authorization, and replay paths
+  at the boundary being claimed.
+- Run task-relevant validation and report commands, results, skips, and limitations.
+- Do not infer production, pilot, public-deployment, or general feature readiness from
+  local tests or historical evidence.
+- Report exact files changed or inspected, verified findings, validation, remaining
+  gaps, and a recommended next step. State clearly when no files changed.
 
-- Validate changes before claiming success.
-- Run only validation commands relevant to the task.
-- Report validation commands and results honestly.
-- If validation cannot be run, say why and list the remaining risk.
-- Do not claim a flow works end-to-end unless it was actually exercised end-to-end.
+## Protected baseline and Git
 
-## Required Final Report Format
-
-For implementation tasks, final responses should include:
-
-- Exact files changed.
-- Summary of what changed.
-- Validation command(s) run and result.
-- Remaining risks or unknowns.
-- Recommended next step.
-- If no files were changed, say so clearly and list what was inspected or validated.
-
-For inspection or review tasks, final responses should include:
-
-- Exact files inspected.
-- Findings with file-path evidence.
-- Clear separation of facts, assumptions, risks, and recommendations.
-- No claims of fixes unless changes were explicitly requested and made.
-
-## Post-Stabilization Boundaries
-
-- Do not claim production, pilot, public-deployment, or general feature readiness without matching proof.
-- Do not reopen validated paths without a new reproducible defect or a new claim boundary.
-- Do not add feature scope because it appears in old documentation or assistant files.
-- Do not add speculative infrastructure or premature microservices.
-- Do not allow external side effects without explicit authorization and applicable safety gates.
-- Do not weaken safety gates, uniqueness, idempotency, escaping, authentication, or send-ledger guarantees.
-- Do not move, delete, recreate, or replace `local-stabilized-v1`.
-- Do not copy old production-ready, fixed-target, or broad build instructions into current work.
-- Do not enforce GSD workflow commands or "never edit outside GSD" rules unless the user explicitly asks to use GSD.
-- Do not apply CommonJS-only, `.cjs`-only, or Node-test-only rules from the GSD package to this repository as a whole.
-- Do not remove Claude, GSD, Copilot, worktree, or old assistant files unless the user explicitly requests that cleanup.
-- Do not add an AI identity as an author, committer, co-author, sign-off, contributor trailer, or generated-by identity.
+- Preserve the annotated `local-stabilized-v1` tag at
+  `cb39748deecf8ebe28c6ce3cded734754becbeb1`; never move, delete, or recreate it.
+- Allow `main` to advance through controlled work while the baseline remains fixed.
+- Reopen validated stabilization paths only for a reproducible defect or a new claim
+  boundary requiring matching validation.
+- Use only the repository owner's approved human Git author and committer identity.
+- Never add AI authors, committers, co-authors, sign-offs, contributor trailers, or
+  generated-by attribution.
+- Historical roadmaps and assistant files do not authorize scope or impose workflows.
+- Apply GSD-specific workflow or language restrictions only when explicitly requested;
+  do not apply package-local restrictions to the whole repository.
+- Do not remove Claude, GSD, Copilot, worktree, or other assistant files without an
+  explicit cleanup request.
