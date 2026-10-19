@@ -1,16 +1,9 @@
-"""
-Blackout Queue Resilience Integration Tests
-MBB ya Kin — validates zero-message-loss guarantee during Kinshasa power outages.
+"""Live Redis checks for the blackout queue's claim/ack recovery contract.
 
-Requirements:
-  - Redis running on localhost:6379 (DB 3 is used exclusively by the blackout queue).
-  - If Redis is not reachable the suite exits with SKIPPED (not FAILED) so local
-    dev without Docker is not broken.
-
-Run:
-  cd backend
-  python tests/test_resilience.py
+Run from backend with ``python tests/test_resilience.py``. Redis DB 3 must be
+disposable and empty; without Redis, local development reports SKIPPED.
 """
+
 import asyncio
 import json
 import os
@@ -18,7 +11,7 @@ import sys
 
 sys.path.insert(0, ".")
 
-# Minimal env so Settings() can instantiate without Docker secrets
+# Minimal env so Settings() can instantiate without Docker secrets.
 os.environ.setdefault("APP_ENV", "development")
 os.environ.setdefault("POSTGRES_HOST", "localhost")
 os.environ.setdefault("POSTGRES_DB", "mbb")
@@ -30,237 +23,161 @@ os.environ.setdefault("CLAUDE_API_KEY", "test")
 os.environ.setdefault("AIRTABLE_API_KEY", "test")
 os.environ.setdefault("PAYMENT_WEBHOOK_SECRET", "test")
 
-print("=" * 60)
-print("MBB ya Kin — Blackout Queue Resilience Tests")
-print("=" * 60)
 
-errors: list[str] = []
+async def main() -> int:
+    import redis.asyncio as aioredis
 
+    from app.config import get_settings
+    from app import redis_client as queue
 
-# ── Redis availability gate ───────────────────────────────────────────────────
+    settings = get_settings()
+    client = aioredis.from_url(
+        f"redis://{settings.redis_host}:{settings.redis_port}/3",
+        decode_responses=True,
+        socket_connect_timeout=2,
+        socket_timeout=2,
+    )
+    keys = (
+        queue._BLACKOUT_KEY,
+        queue._BLACKOUT_PROCESSING_KEY,
+        queue._BLACKOUT_QUARANTINE_KEY,
+        queue._BLACKOUT_DRAIN_LOCK_KEY,
+    )
+    errors: list[str] = []
+    owns_keys = False
 
-async def _redis_reachable() -> bool:
-    try:
-        import redis.asyncio as aioredis
-        from app.config import get_settings
-        s = get_settings()
-        url = f"redis://{s.redis_host}:{s.redis_port}/3"
-        client = aioredis.from_url(url, socket_connect_timeout=2, socket_timeout=2)
-        await client.ping()
-        await client.aclose()
-        return True
-    except Exception:
-        return False
+    async def clean_queue() -> None:
+        await client.delete(*keys)
 
+    async def raw_depths() -> tuple[int, int, int]:
+        depths = await asyncio.gather(*(client.llen(key) for key in keys[:3]))
+        return tuple(int(depth) for depth in depths)
 
-if not asyncio.run(_redis_reachable()):
-    print("\n  ⚠  Redis not reachable on localhost:6379.")
-    print("     Start Docker stack first:  docker compose ... up -d")
-    print("     Skipping live tests — this is expected in local dev without Docker.\n")
-    print("=" * 60)
-    print("SKIPPED — Redis unavailable")
-    sys.exit(0)
+    async def enqueue_persists() -> None:
+        assert await queue.blackout_enqueue({"wa_id": "msg001", "content": "Mbote"})
+        assert await raw_depths() == (1, 0, 0)
 
-print("  Redis reachable ✓\n")
+    async def queue_length() -> None:
+        for i in range(4):
+            assert await queue.blackout_enqueue({"wa_id": f"msg{i}", "seq": i})
+        assert await queue.blackout_queue_length() == 4
+        assert await queue.blackout_depths() == {
+            "pending_depth": 4,
+            "processing_depth": 0,
+            "quarantine_depth": 0,
+        }
+        assert await raw_depths() == (4, 0, 0)
 
+    async def fifo_claim_and_ack() -> None:
+        for i in range(6):
+            assert await queue.blackout_enqueue({"wa_id": f"fifo{i}", "seq": i})
+        for i in range(6):
+            raw = await queue.blackout_claim_one()
+            assert raw is not None
+            assert json.loads(raw)["seq"] == i, f"FIFO violation at position {i}"
+            assert await queue.blackout_acknowledge(raw)
+        assert await raw_depths() == (0, 0, 0)
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+    async def recover_abandoned_claims() -> None:
+        for i in range(4):
+            assert await queue.blackout_enqueue({"wa_id": f"recovery{i}", "seq": i})
+        for i in range(2):
+            raw = await queue.blackout_claim_one()
+            assert raw is not None and json.loads(raw)["seq"] == i
+        assert await raw_depths() == (2, 2, 0)
+        assert await queue.blackout_enqueue({"wa_id": "recovery4", "seq": 4})
+        assert await queue.blackout_recover_processing() == 2
+        assert await raw_depths() == (5, 0, 0)
+        for i in range(5):
+            raw = await queue.blackout_claim_one()
+            assert raw is not None and json.loads(raw)["seq"] == i
+            assert await queue.blackout_acknowledge(raw)
+        assert await raw_depths() == (0, 0, 0)
 
-def _reset_pool() -> None:
-    """Reset the module-level connection pool so each asyncio.run() gets fresh connections.
-    Required on Windows where asyncio.run() closes the event loop between calls,
-    leaving cached pool connections attached to a dead loop."""
-    import app.redis_client as _mod
-    _mod._blackout_pool = None
+    async def empty_claim() -> None:
+        assert await queue.blackout_claim_one() is None
+        assert not await queue.blackout_acknowledge("not-claimed")
+        assert await queue.blackout_recover_processing() == 0
+        assert await raw_depths() == (0, 0, 0)
 
-
-async def _clean_queue() -> None:
-    """Wipe the blackout queue key so each test starts from a clean slate."""
-    from app.redis_client import _blackout_client, _BLACKOUT_KEY
-    client = _blackout_client()
-    await client.delete(_BLACKOUT_KEY)
-    await client.aclose()
-
-
-async def _raw_length() -> int:
-    """Direct Redis LLEN — bypasses the module under test."""
-    from app.redis_client import _blackout_client, _BLACKOUT_KEY
-    client = _blackout_client()
-    n = await client.llen(_BLACKOUT_KEY)
-    await client.aclose()
-    return int(n)
-
-
-# ── Test 1: enqueue persists to Redis ────────────────────────────────────────
-
-print("[1] blackout_enqueue persists message...")
-async def _t1() -> None:
-    from app.redis_client import blackout_enqueue
-    await _clean_queue()
-    ok = await blackout_enqueue({"wa_id": "msg001", "phone": "+243970000001", "content": "Mbote"})
-    assert ok is True, f"blackout_enqueue returned {ok!r}, expected True"
-    n = await _raw_length()
-    assert n == 1, f"Expected queue depth 1 after single enqueue, got {n}"
-
-try:
-    _reset_pool()
-    asyncio.run(_t1())
-    print("    enqueue → Redis persist OK")
-except Exception as exc:
-    errors.append(f"enqueue: {exc}")
-    print(f"    FAIL: {exc}")
-
-
-# ── Test 2: queue length reflects real count ──────────────────────────────────
-
-print("\n[2] blackout_queue_length matches Redis LLEN...")
-async def _t2() -> None:
-    from app.redis_client import blackout_enqueue, blackout_queue_length
-    await _clean_queue()
-    for i in range(4):
-        await blackout_enqueue({"wa_id": f"msg{i:03d}", "seq": i})
-    reported = await blackout_queue_length()
-    raw = await _raw_length()
-    assert reported == 4, f"blackout_queue_length returned {reported}, expected 4"
-    assert raw == 4,      f"Raw Redis LLEN returned {raw}, expected 4"
-
-try:
-    _reset_pool()
-    asyncio.run(_t2())
-    print("    queue_length == LLEN OK")
-except Exception as exc:
-    errors.append(f"queue_length: {exc}")
-    print(f"    FAIL: {exc}")
-
-
-# ── Test 3: FIFO order preserved ──────────────────────────────────────────────
-
-print("\n[3] FIFO order preserved across enqueue → dequeue...")
-async def _t3() -> None:
-    from app.redis_client import blackout_enqueue, blackout_dequeue_batch
-    await _clean_queue()
-    msgs = [{"wa_id": f"fifo{i}", "seq": i} for i in range(6)]
-    for m in msgs:
-        await blackout_enqueue(m)
-    batch = await blackout_dequeue_batch(batch_size=6)
-    assert len(batch) == 6, f"Expected 6 messages back, got {len(batch)}"
-    for idx, msg in enumerate(batch):
-        assert msg["seq"] == idx, (
-            f"FIFO violation at position {idx}: got seq={msg['seq']}, expected {idx}"
+    async def quarantine_corrupt_payload() -> None:
+        corrupt = "NOT_JSON{{{{"
+        await client.rpush(
+            queue._BLACKOUT_KEY,
+            json.dumps({"wa_id": "good1"}),
+            corrupt,
+            json.dumps({"wa_id": "good2"}),
         )
-    remaining = await _raw_length()
-    assert remaining == 0, f"Queue should be empty after full dequeue, got depth={remaining}"
+        first = await queue.blackout_claim_one()
+        assert first is not None and json.loads(first)["wa_id"] == "good1"
+        assert await queue.blackout_acknowledge(first)
+        malformed = await queue.blackout_claim_one()
+        assert malformed == corrupt
+        assert await queue.blackout_quarantine(malformed)
+        last = await queue.blackout_claim_one()
+        assert last is not None and json.loads(last)["wa_id"] == "good2"
+        assert await queue.blackout_acknowledge(last)
+        assert await raw_depths() == (0, 0, 1)
+        assert await client.lrange(queue._BLACKOUT_QUARANTINE_KEY, 0, -1) == [corrupt]
 
-try:
-    _reset_pool()
-    asyncio.run(_t3())
-    print("    FIFO order OK — queue empty after drain")
-except Exception as exc:
-    errors.append(f"FIFO: {exc}")
-    print(f"    FAIL: {exc}")
+    async def gauge_sync() -> None:
+        for i in range(3):
+            assert await queue.blackout_enqueue({"wa_id": f"gauge{i}"})
+        depth = await queue.blackout_queue_length()
+        assert depth == 3
+        assert queue.BLACKOUT_QUEUE_DEPTH._value.get() == depth
 
-
-# ── Test 4: partial batch (request > available) ───────────────────────────────
-
-print("\n[4] Partial dequeue (batch_size > available messages)...")
-async def _t4() -> None:
-    from app.redis_client import blackout_enqueue, blackout_dequeue_batch
-    await _clean_queue()
-    for i in range(3):
-        await blackout_enqueue({"wa_id": f"part{i}", "i": i})
-    batch = await blackout_dequeue_batch(batch_size=50)   # ask for more than exist
-    assert len(batch) == 3, f"Expected 3 messages, got {len(batch)}"
-    remaining = await _raw_length()
-    assert remaining == 0, f"Queue should be empty, got {remaining}"
-
-try:
-    _reset_pool()
-    asyncio.run(_t4())
-    print("    partial dequeue OK")
-except Exception as exc:
-    errors.append(f"partial_dequeue: {exc}")
-    print(f"    FAIL: {exc}")
-
-
-# ── Test 5: dequeue on empty queue returns [] ─────────────────────────────────
-
-print("\n[5] Dequeue on empty queue returns empty list (no crash)...")
-async def _t5() -> None:
-    from app.redis_client import blackout_dequeue_batch
-    await _clean_queue()
-    batch = await blackout_dequeue_batch(batch_size=10)
-    assert batch == [], f"Expected [], got {batch!r}"
-
-try:
-    _reset_pool()
-    asyncio.run(_t5())
-    print("    empty dequeue → [] OK")
-except Exception as exc:
-    errors.append(f"empty_dequeue: {exc}")
-    print(f"    FAIL: {exc}")
-
-
-# ── Test 6: invalid JSON in queue is skipped, valid messages still returned ───
-
-print("\n[6] Corrupt payload in queue is skipped, valid messages still returned...")
-async def _t6() -> None:
-    from app.redis_client import _blackout_client, _BLACKOUT_KEY, blackout_dequeue_batch
-    await _clean_queue()
-    client = _blackout_client()
-    # Manually push: valid, corrupt, valid
-    await client.rpush(_BLACKOUT_KEY, json.dumps({"wa_id": "good1"}))
-    await client.rpush(_BLACKOUT_KEY, b"NOT_JSON{{{{")
-    await client.rpush(_BLACKOUT_KEY, json.dumps({"wa_id": "good2"}))
-    await client.aclose()
-
-    batch = await blackout_dequeue_batch(batch_size=10)
-    # Corrupt entry breaks FIFO scan (None sentinel reached after corrupt)
-    # Module logs a warning and stops — so we get 2 valid items (good1 + corrupt skipped,
-    # but pipeline pops all 3 at once so: good1 parsed OK, NOT_JSON → warning, good2 parsed OK)
-    wa_ids = [m.get("wa_id") for m in batch]
-    assert "good1" in wa_ids, f"good1 missing from batch: {wa_ids}"
-    assert "good2" in wa_ids, f"good2 missing from batch: {wa_ids}"
-
-try:
-    _reset_pool()
-    asyncio.run(_t6())
-    print("    corrupt entry skipped, valid messages returned OK")
-except Exception as exc:
-    errors.append(f"corrupt_payload: {exc}")
-    print(f"    FAIL: {exc}")
-
-
-# ── Test 7: Prometheus gauge syncs with queue depth ───────────────────────────
-
-print("\n[7] Prometheus BLACKOUT_QUEUE_DEPTH gauge syncs on queue_length call...")
-async def _t7() -> None:
-    from app.redis_client import BLACKOUT_QUEUE_DEPTH, blackout_enqueue, blackout_queue_length
-    await _clean_queue()
-    for i in range(3):
-        await blackout_enqueue({"wa_id": f"gauge{i}"})
-    depth = await blackout_queue_length()          # also calls BLACKOUT_QUEUE_DEPTH.set()
-    gauge_val = BLACKOUT_QUEUE_DEPTH._value.get()  # prometheus_client internal API
-    assert gauge_val == depth == 3, (
-        f"Gauge={gauge_val}, blackout_queue_length()={depth}, expected 3"
+    checks = (
+        ("enqueue persists", enqueue_persists),
+        ("queue length and depths", queue_length),
+        ("FIFO claim and ack", fifo_claim_and_ack),
+        ("abandoned claim recovery", recover_abandoned_claims),
+        ("empty claim", empty_claim),
+        ("corrupt payload quarantine", quarantine_corrupt_payload),
+        ("Prometheus gauge sync", gauge_sync),
     )
 
-try:
-    _reset_pool()
-    asyncio.run(_t7())
-    print("    Prometheus gauge synced OK")
-except Exception as exc:
-    errors.append(f"gauge_sync: {exc}")
-    print(f"    FAIL: {exc}")
+    print("MBB ya Kin — Blackout Queue Resilience Tests", flush=True)
+    try:
+        try:
+            await client.ping()
+        except Exception as exc:
+            print(f"SKIPPED — Redis unavailable: {exc}")
+            return 0
+
+        if any(await asyncio.gather(*(client.exists(key) for key in keys))):
+            print("FAILED — blackout DB 3 keys are not empty; refusing to alter existing data")
+            return 1
+        owns_keys = True
+
+        for index, (label, check) in enumerate(checks, start=1):
+            print(f"[{index}] {label}...", flush=True)
+            try:
+                await check()
+                print("    OK", flush=True)
+            except Exception as exc:
+                errors.append(f"{label}: {exc!r}")
+                print(f"    FAIL: {exc!r}", flush=True)
+            finally:
+                await clean_queue()
+
+        if errors:
+            print(f"FAILED — {len(errors)} error(s):")
+            for error in errors:
+                print(f"  {error}")
+            return 1
+        print("ALL 7 RESILIENCE TESTS PASSED")
+        return 0
+    finally:
+        try:
+            if owns_keys:
+                await clean_queue()
+        finally:
+            await client.aclose()
+            if queue._blackout_pool is not None:
+                await queue._blackout_pool.disconnect()
+                queue._blackout_pool = None
 
 
-# ── Summary ───────────────────────────────────────────────────────────────────
-
-print("\n" + "=" * 60)
-if errors:
-    print(f"FAILED — {len(errors)} error(s):")
-    for e in errors:
-        print(f"  ✗ {e}")
-    sys.exit(1)
-else:
-    print("ALL 7 RESILIENCE TESTS PASSED ✓")
-    sys.exit(0)
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main()))

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
+import json
 import os
 import shutil
 import socket
@@ -56,23 +58,52 @@ def wait_for_postgres(container: str, timeout: float = 45) -> None:
     raise RuntimeError("Disposable PostgreSQL did not become ready")
 
 
-def wait_for_url(url: str, *, insecure: bool = False, timeout: float = 45) -> None:
+def wait_for_url(
+    url: str,
+    *,
+    insecure: bool = False,
+    expected_status: int = 200,
+    expected_error_code: str | None = None,
+    timeout: float = 45,
+) -> None:
     context = ssl._create_unverified_context() if insecure else None
     deadline = time.monotonic() + timeout
-    last_error: Exception | None = None
+    last_error: str | None = None
     while time.monotonic() < deadline:
         try:
             with urllib.request.urlopen(url, context=context, timeout=2) as response:
-                if response.status < 500:
-                    return
+                status = response.status
+                body = response.read()
         except urllib.error.HTTPError as exc:
-            if exc.code < 500:
-                return
-            last_error = exc
+            status = exc.code
+            body = exc.read()
         except Exception as exc:  # service readiness intentionally retries
-            last_error = exc
+            last_error = str(exc)
+            time.sleep(0.5)
+            continue
+        code = None
+        if expected_error_code is not None:
+            try:
+                code = json.loads(body)["error"]["code"]
+            except (ValueError, KeyError, TypeError):
+                pass
+        if status == expected_status and code == expected_error_code:
+            return
+        last_error = f"HTTP {status}, error code {code!r}"
         time.sleep(0.5)
     raise RuntimeError(f"Runtime did not become ready at {url}: {last_error}")
+
+
+def api_bind_host() -> str:
+    if not sys.platform.startswith("linux"):
+        return "127.0.0.1"
+    # host-gateway in the Nginx container resolves to this bridge address.
+    gateway = subprocess.check_output(
+        ["docker", "network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"],
+        cwd=ROOT,
+        text=True,
+    ).strip()
+    return str(ipaddress.IPv4Address(gateway))
 
 
 def remove_container(name: str) -> None:
@@ -109,6 +140,7 @@ def main() -> int:
     redis_name = f"mbb-e2e-redis-{suffix}"
     nginx_name = f"mbb-e2e-nginx-{suffix}"
     postgres_port, redis_port, api_port, https_port = free_ports(4)
+    api_host = api_bind_host()
     base_url = f"https://localhost:{https_port}"
     containers = [nginx_name, redis_name, postgres_name]
     api_process: subprocess.Popen[bytes] | None = None
@@ -211,13 +243,17 @@ http {
 
             log_handle = api_log.open("wb")
             api_process = subprocess.Popen(
-                [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(api_port)],
+                [sys.executable, "-m", "uvicorn", "app.main:app", "--host", api_host, "--port", str(api_port)],
                 cwd=BACKEND,
                 env=env,
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
             )
-            wait_for_url(f"http://127.0.0.1:{api_port}/openapi.json")
+            wait_for_url(
+                f"http://{api_host}:{api_port}/api/v1/auth/session",
+                expected_status=401,
+                expected_error_code="session_required",
+            )
             run(
                 [
                     "docker", "run", "-d", "--rm", "--name", nginx_name,
@@ -231,6 +267,12 @@ http {
                 ]
             )
             wait_for_url(base_url, insecure=True)
+            wait_for_url(
+                f"{base_url}/api/v1/auth/session",
+                insecure=True,
+                expected_status=401,
+                expected_error_code="session_required",
+            )
             run([sys.executable, "-m", "pytest", str(TEST), "-q"], cwd=BACKEND, env=env)
             return 0
         except Exception:
