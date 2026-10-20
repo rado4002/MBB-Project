@@ -14,6 +14,7 @@ import { SessionPage } from '../features/session/SessionPage'
 import { ProductsPage } from '../features/products/ProductsPage'
 import { BusinessWorkspace } from '../features/business/BusinessWorkspace'
 import { StockPage } from '../features/stock/StockPage'
+import { OrdersPage } from '../features/orders/OrdersPage'
 
 function EntryRoute() {
   const auth = useAuth()
@@ -47,6 +48,12 @@ function BusinessRoute() {
     ? <BusinessWorkspace /> : <Navigate to="/inbox" replace />
 }
 
+function OrdersRoute() {
+  const auth = useAuth()
+  return auth.session?.capabilities.includes('order.read')
+    ? <OrdersPage /> : <Navigate to="/inbox" replace />
+}
+
 export function AppRouter() {
   return (
     <Routes>
@@ -77,6 +84,8 @@ export function AppRouter() {
           <Route path="products" element={<ProductsPage />} />
           <Route path="products/:productId" element={<ProductsPage />} />
           <Route path="stock" element={<StockPage />} />
+          <Route path="orders" element={<OrdersRoute />} />
+          <Route path="orders/:orderId" element={<OrdersRoute />} />
         </Route>
       </Route>
       <Route path="*" element={<NotFoundPage />} />

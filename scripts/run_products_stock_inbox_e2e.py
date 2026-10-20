@@ -206,6 +206,9 @@ http {
                 "SCHEDULED_TASKS_ENABLED": "false",
                 "M1_MAPS_FANOUT_ENABLED": "false",
                 "MBB_E2E_BASE_URL": base_url,
+                "AI2B_TEST_DATABASE_URL": (
+                    f"postgresql+asyncpg://mbb_e2e:mbb_e2e_password@127.0.0.1:{postgres_port}/mbb"
+                ),
             }
         )
 
@@ -273,7 +276,11 @@ http {
                 expected_status=401,
                 expected_error_code="session_required",
             )
-            run([sys.executable, "-m", "pytest", str(TEST), "-q"], cwd=BACKEND, env=env)
+            run([sys.executable, "-m", "pytest", str(TEST), "-q", "--tb=short"], cwd=BACKEND, env=env)
+            run(
+                [sys.executable, "-m", "pytest", "tests/test_business_orders_api.py", "-q", "--tb=short"],
+                cwd=BACKEND, env=env,
+            )
             return 0
         except Exception:
             if api_log.exists():

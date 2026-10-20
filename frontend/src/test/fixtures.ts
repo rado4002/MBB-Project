@@ -26,6 +26,7 @@ export function sessionFixture(
         : [
             'message.reply',
             'product_offer.read',
+            'order.read',
             'internal_note.read',
             'internal_note.create',
             'escalation.create',

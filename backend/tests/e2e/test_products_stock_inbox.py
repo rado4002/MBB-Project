@@ -213,7 +213,7 @@ def _open_offer(page: Page):
     return dialog
 
 
-async def _assert_order_acceptance(monkeypatch: pytest.MonkeyPatch) -> None:
+async def _assert_order_acceptance(monkeypatch: pytest.MonkeyPatch) -> uuid.UUID:
     """Continue the browser-created offer through scripted AI and real M1."""
     factory = async_session_factory
     try:
@@ -413,6 +413,7 @@ async def _assert_order_acceptance(monkeypatch: pytest.MonkeyPatch) -> None:
                     < receipt_orders[FIRST_CONFIRMATION_ID]
                     < receipt_orders[REPLAY_CONFIRMATION_ID])
         assert external_calls == []
+        return order.order_id
     finally:
         await engine.dispose()
 
@@ -633,4 +634,30 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
     assert any(method == "POST" and path.endswith("/inventory/receive") and status == 200 for method, path, status in responses)
     assert any(method == "POST" and path.endswith("/inventory/adjust") and status == 409 for method, path, status in responses)
     assert any(method == "GET" and path == "/api/v1/operator/product-offers" and status == 200 for method, path, status in responses)
-    asyncio.run(_assert_order_acceptance(monkeypatch))
+    order_id = asyncio.run(_assert_order_acceptance(monkeypatch))
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        context = browser.new_context(ignore_https_errors=True, viewport={"width": 390, "height": 844})
+        page = context.new_page()
+        _login(page, "e2e.operator", OPERATOR_PASSWORD)
+        page.goto(f"{BASE_URL}/business/stock", wait_until="domcontentloaded")
+        page.get_by_label("Business", exact=True).select_option("orders")
+        expect(page).to_have_url(re.compile(r"/business/orders$"))
+        expect(page.get_by_role("heading", name="Orders", exact=True)).to_be_visible()
+        expect(page.get_by_role("link", name=re.compile(PRODUCT))).to_be_visible(timeout=15_000)
+        page.get_by_role("link", name=re.compile(PRODUCT)).click()
+        expect(page).to_have_url(re.compile(rf"/business/orders/{order_id}"))
+        detail = page.get_by_role("region", name="Order detail")
+        expect(detail.get_by_text("pending", exact=True)).to_be_visible(timeout=15_000)
+        expect(detail.get_by_text("CDF 309,400.00")).to_be_visible()
+        expect(detail.get_by_text("USD 55.25")).to_be_visible()
+        expect(detail.get_by_text("Accepted USD/CDF rate 2800")).to_be_visible()
+        expect(detail.get_by_role("link", name="Open associated Inbox conversation")).to_have_attribute(
+            "href", f"/inbox/{CONVERSATION_ID}"
+        )
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        assert not detail.get_by_role("button").count()
+        context.close()
+        browser.close()

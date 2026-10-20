@@ -14,8 +14,9 @@ export function ApplicationShell() {
   const auth = useAuth()
   const location = useLocation()
   const navigate = useNavigate()
-  const pageName = location.pathname.startsWith('/business/stock')
-    ? 'Stock'
+  const pageName = location.pathname.startsWith('/business/orders')
+    ? 'Orders'
+    : location.pathname.startsWith('/business/stock') ? 'Stock'
     : location.pathname.startsWith('/business') ? 'Products'
     : location.pathname.startsWith('/inbox/') ? 'Inbox' : (pageNames[location.pathname] ?? 'MBB')
   const inboxDestination = location.pathname.startsWith('/inbox')

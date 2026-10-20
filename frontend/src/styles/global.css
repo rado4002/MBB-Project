@@ -757,6 +757,31 @@ h2 { font-size: 1.125rem; }
 .stock-activity-receive .stock-activity-kind { color: #15803d; }
 .stock-activity-adjust .stock-activity-kind { color: #1d4ed8; }
 .stock-activity time { color: #64748b; font-size: .8rem; }
+/* Read-only Orders queue and the Order-owned accepted snapshot. */
+.orders-page { max-width: 100rem; margin-inline: auto; padding: var(--space-8); overflow-wrap: anywhere; }
+.orders-caution, .orders-current-note { color: #64748b; font-size: .9rem; }
+.orders-caution { margin: calc(-1 * var(--space-3)) 0 var(--space-5); }
+.orders-workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-5); align-items: start; }
+.orders-workspace--selected { grid-template-columns: minmax(16rem, .8fr) minmax(0, 1.4fr); }
+.orders-list, .orders-detail { min-width: 0; padding: var(--space-5); border: 1px solid #dce3ee; border-radius: .5rem; background: #fff; }
+.orders-list label { display: block; margin-bottom: var(--space-2); font-weight: 650; }
+.orders-list select { width: min(100%, 20rem); min-height: 2.75rem; padding: var(--space-2); border: 1px solid #dce3ee; border-radius: .5rem; background: #fff; color: #0f172a; font: inherit; }
+.orders-list ul, .orders-lines { list-style: none; margin: var(--space-4) 0; padding: 0; }
+.orders-list li { border-top: 1px solid #dce3ee; }
+.orders-list li a { display: grid; gap: var(--space-1); padding: var(--space-4) var(--space-2); color: #0f172a; text-decoration: none; }
+.orders-list li a:hover, .orders-list li a[aria-current="page"] { background: #eef4ff; }
+.orders-list li span, .orders-list time { color: #64748b; font-size: .875rem; }
+.orders-pagination, .orders-links { display: flex; flex-wrap: wrap; gap: var(--space-3); }
+.orders-detail h2 { margin: var(--space-2) 0 var(--space-5); }
+.orders-detail h3 { margin-top: var(--space-6); }
+.orders-back { display: inline-block; margin-bottom: var(--space-2); }
+.orders-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); margin: 0; }
+.orders-facts > div, .orders-lines li { min-width: 0; padding: var(--space-4); border: 1px solid #dce3ee; border-radius: .5rem; }
+.orders-facts dt { color: #64748b; font-size: .875rem; }
+.orders-facts dd { margin: var(--space-2) 0 0; font-weight: 700; }
+.orders-lines { display: grid; gap: var(--space-3); }
+.orders-lines li { display: grid; gap: var(--space-2); }
+.orders-lines li span { color: #475569; }
 @media (max-width: 75rem) {
   .business-workspace { display: block; }
   .business-sidebar { display: flex; align-items: center; gap: var(--space-4); padding: var(--space-3) var(--space-5); border-right: 0; border-bottom: 1px solid #dce3ee; }
@@ -765,13 +790,17 @@ h2 { font-size: 1.125rem; }
   .business-navigation a { padding-inline: var(--space-3); }
   .stock-workspace--selected { grid-template-columns: minmax(0, 1fr); grid-template-areas: "search" "results" "detail"; }
   .stock-results li { grid-template-columns: 3.25rem minmax(0, 1fr) auto; }
+  .orders-workspace--selected { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 40rem) {
   .business-sidebar { display: none; }
   .business-module-switcher { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-4); background: #fff; border-bottom: 1px solid #dce3ee; }
   .business-module-switcher label { color: #0f172a; font-weight: 700; }
   .business-module-switcher select { flex: 1; min-width: 0; min-height: 2.75rem; padding: var(--space-2); border: 1px solid #dce3ee; border-radius: .5rem; background: #fff; color: #2563eb; font-weight: 650; }
-  .products-page, .stock-page { padding: var(--space-4); }
+  .products-page, .stock-page, .orders-page { padding: var(--space-4); }
+  .orders-workspace--selected .orders-list { display: none; }
+  .orders-list, .orders-detail { padding: var(--space-4); }
+  .orders-facts { grid-template-columns: minmax(0, 1fr); }
   .business-page-heading { align-items: start; flex-wrap: wrap; }
   .business-page-heading .button { width: 100%; }
   .stock-page:has(.stock-workspace--selected) > .business-page-heading { display: none; }
