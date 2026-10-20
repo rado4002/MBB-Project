@@ -61,7 +61,12 @@ async def update_order_status(
     Raises:
         InvalidOrderTransition if the transition is not allowed.
     """
-    result = await session.execute(select(Order).where(Order.order_id == order_id))
+    result = await session.execute(
+        select(Order)
+        .where(Order.order_id == order_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     order = result.scalar_one_or_none()
     if order is None:
         raise ValueError(f"Order not found: {order_id}")

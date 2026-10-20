@@ -21,7 +21,7 @@ from app.models.order import Order
 from app.models.order_draft import OrderDraft
 from app.models.payment import Payment
 from app.models.pricing import SellableItemPrice
-from app.modules.m7_conversion import order_cancellation
+from app.modules.m7_conversion import order_cancellation, service as conversion_service
 from app.tasks import celery_app
 from test_commerce_admin_api import (
     ADMIN_PASSWORD,
@@ -661,3 +661,156 @@ async def test_cancellation_waits_for_payment_transaction(
             inventory.status,
             inventory.updated_at,
         ) == inventory_before
+
+
+@pytest.mark.asyncio
+async def test_legacy_status_write_waits_for_cancellation_and_preserves_audit(
+    accepted_order,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    transport, factory, seeded, order_id = accepted_order
+    cancellation_locked = asyncio.Event()
+    release_cancellation = asyncio.Event()
+    legacy_read_pending = asyncio.Event()
+    original_append = order_cancellation.append_operator_audit_event
+
+    async def pause_after_order_lock(*args, **kwargs):
+        cancellation_locked.set()
+        await release_cancellation.wait()
+        return await original_append(*args, **kwargs)
+
+    monkeypatch.setattr(
+        order_cancellation, "append_operator_audit_event", pause_after_order_lock
+    )
+    async with factory() as db:
+        reviewed_at = (await db.get(Order, order_id)).updated_at
+        inventory = await db.get(InventoryRecord, seeded.inventory_id)
+        inventory_before = (inventory.quantity, inventory.status, inventory.updated_at)
+
+    async def legacy_transition():
+        async with factory() as db:
+            assert (await db.get(Order, order_id)).status == "pending"
+            legacy_read_pending.set()
+            await conversion_service.update_order_status(
+                db, order_id=order_id, new_status="confirmed"
+            )
+
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        csrf = await _login(client, "commerce.admin", ADMIN_PASSWORD)
+        csrf = await _reauthenticate(client, csrf)
+        cancellation = asyncio.create_task(
+            client.post(
+                f"/api/v1/business/orders/{order_id}/cancel",
+                headers=_cancel_headers(csrf, uuid.uuid4()),
+                json=_cancel_body(reviewed_at),
+            )
+        )
+        await asyncio.wait_for(cancellation_locked.wait(), timeout=5)
+        transition = asyncio.create_task(legacy_transition())
+        try:
+            await asyncio.wait_for(legacy_read_pending.wait(), timeout=5)
+            await asyncio.sleep(0.1)
+            assert not transition.done(), "Legacy status write bypassed the Order lock"
+        finally:
+            release_cancellation.set()
+        response = await asyncio.wait_for(cancellation, timeout=5)
+        assert response.status_code == 200
+        with pytest.raises(conversion_service.InvalidOrderTransition):
+            await asyncio.wait_for(transition, timeout=5)
+
+    async with factory() as db:
+        stored = await db.get(Order, order_id)
+        assert stored.status == "cancelled" and stored.confirmed_at is None
+        assert await db.scalar(select(func.count()).select_from(Payment)) == 0
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(OperatorAuditEvent)
+                .where(OperatorAuditEvent.action == "order.cancelled")
+            )
+            == 1
+        )
+        inventory = await db.get(InventoryRecord, seeded.inventory_id)
+        assert (
+            inventory.quantity,
+            inventory.status,
+            inventory.updated_at,
+        ) == inventory_before
+
+
+@pytest.mark.asyncio
+async def test_cancellation_waits_for_legacy_status_write(accepted_order):
+    transport, factory, seeded, order_id = accepted_order
+    async with factory() as db:
+        reviewed_at = (await db.get(Order, order_id)).updated_at
+        inventory = await db.get(InventoryRecord, seeded.inventory_id)
+        inventory_before = (inventory.quantity, inventory.status, inventory.updated_at)
+
+    async with factory() as legacy_db:
+        await legacy_db.scalar(
+            select(Order).where(Order.order_id == order_id).with_for_update()
+        )
+        async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+            csrf = await _login(client, "commerce.admin", ADMIN_PASSWORD)
+            csrf = await _reauthenticate(client, csrf)
+            cancellation = asyncio.create_task(
+                client.post(
+                    f"/api/v1/business/orders/{order_id}/cancel",
+                    headers=_cancel_headers(csrf, uuid.uuid4()),
+                    json=_cancel_body(reviewed_at),
+                )
+            )
+            await asyncio.sleep(0.1)
+            assert not cancellation.done(), "Cancellation bypassed the Order lock"
+            transitioned = await conversion_service.update_order_status(
+                legacy_db, order_id=order_id, new_status="confirmed"
+            )
+            assert transitioned.status == "confirmed"
+            response = await asyncio.wait_for(cancellation, timeout=5)
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "ORDER_STATE_CONFLICT"
+    async with factory() as db:
+        stored = await db.get(Order, order_id)
+        assert stored.status == "confirmed" and stored.confirmed_at is not None
+        assert await db.scalar(select(func.count()).select_from(Payment)) == 0
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(OperatorAuditEvent)
+                .where(OperatorAuditEvent.action == "order.cancelled")
+            )
+            == 0
+        )
+        inventory = await db.get(InventoryRecord, seeded.inventory_id)
+        assert (
+            inventory.quantity,
+            inventory.status,
+            inventory.updated_at,
+        ) == inventory_before
+
+
+@pytest.mark.asyncio
+async def test_legacy_transition_preserves_delivered_terminal_order(accepted_order):
+    _transport, factory, _seeded, order_id = accepted_order
+    async with factory() as db:
+        order = await db.get(Order, order_id)
+        order.status = "delivered"
+        await db.commit()
+
+    async with factory() as db:
+        with pytest.raises(conversion_service.InvalidOrderTransition):
+            await conversion_service.update_order_status(
+                db, order_id=order_id, new_status="confirmed"
+            )
+
+    async with factory() as db:
+        assert (await db.get(Order, order_id)).status == "delivered"
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(OperatorAuditEvent)
+                .where(OperatorAuditEvent.action == "order.cancelled")
+            )
+            == 0
+        )
