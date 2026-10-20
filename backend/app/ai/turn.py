@@ -859,9 +859,7 @@ async def _require_current_transaction_snapshot(
     commercial_state_revision: int,
 ) -> None:
     """Lock and reject a stale terminal result before any durable capability work."""
-    from sqlalchemy import select
-
-    from app.models.message import Message
+    from app.modules.m4_conversation.inbound_order import latest_inbound_message_id
     from app.modules.m4_conversation.ownership import ai_may_reply
 
     if not await ai_may_reply(
@@ -877,18 +875,8 @@ async def _require_current_transaction_snapshot(
         raise StaleAITurnAuthority
     if source_message_id is None:
         return
-    latest_inbound_id = await session.scalar(
-        select(Message.message_id)
-        .where(
-            Message.conversation_id == context.conversation_id,
-            Message.direction == "inbound",
-        )
-        .order_by(
-            Message.created_at.desc(),
-            Message.timestamp.desc(),
-            Message.message_id.desc(),
-        )
-        .limit(1)
+    latest_inbound_id = await latest_inbound_message_id(
+        session, context.conversation_id,
     )
     if latest_inbound_id != source_message_id:
         raise StaleAITurnAuthority

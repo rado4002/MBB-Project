@@ -762,6 +762,46 @@ async def test_retired_creation_and_historical_read_status_api(engine: AsyncEngi
 
 
 @pytest.mark.asyncio
+async def test_clock_regression_does_not_supersede_exact_confirmation(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    seeded = await _seed(factory)
+    prepared = await _prepare(factory, seeded)
+    async with factory() as session:
+        draft = await session.get(OrderDraft, (prepared.draft_id, prepared.draft_version))
+        assert draft is not None
+        confirmation = f"OUI {draft.confirmation_code}"
+        # Simulate a backward database clock step after the earlier receipt.
+        await session.execute(
+            update(Message)
+            .where(Message.message_id == seeded.source_message_id)
+            .values(created_at=datetime.now(timezone.utc) + timedelta(days=1))
+        )
+        await session.commit()
+    external_calls = _block_m1_external_effects(
+        monkeypatch, factory, whatsapp_send_enabled=False,
+    )
+    first = await _process_m1_confirmation(content=confirmation, sequence=1)
+    replay = await _process_m1_confirmation(content=confirmation, sequence=2)
+    assert first["status"] == "order_draft_confirmed"
+    assert replay["status"] == "order_draft_already_confirmed"
+    assert replay["order_id"] == first["order_id"]
+    assert external_calls == []
+    async with factory() as session:
+        inbounds = (await session.scalars(
+            select(Message)
+            .where(Message.conversation_id == seeded.conversation_id,
+                   Message.direction == "inbound")
+            .order_by(Message.inbound_receipt_order)
+        )).all()
+        assert [message.inbound_receipt_order for message in inbounds] == [1, 2, 3]
+        assert inbounds[0].created_at > inbounds[1].created_at
+        assert await session.scalar(select(func.count()).select_from(Order)) == 1
+
+
+@pytest.mark.asyncio
 async def test_m1_exact_confirmation_creates_and_replays_one_pending_order(
     engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,

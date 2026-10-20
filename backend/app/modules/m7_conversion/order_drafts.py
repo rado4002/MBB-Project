@@ -22,6 +22,7 @@ from app.models.message import Message
 from app.models.order import Order
 from app.models.order_draft import OrderDraft
 from app.modules.m1_gateway.service import persist_outbound
+from app.modules.m4_conversation.inbound_order import latest_inbound_message_id
 from app.modules.product_offer.service import get_product_offer
 from app.schemas.order_drafts import OrderDraftReplyResult
 from app.schemas.product_offer import ProductOfferResponse
@@ -172,6 +173,8 @@ async def _latest_message_id(
     conversation_id: uuid.UUID,
     direction: str,
 ) -> uuid.UUID | None:
+    if direction == "inbound":
+        return await latest_inbound_message_id(session, conversation_id)
     return await session.scalar(
         select(Message.message_id)
         .where(

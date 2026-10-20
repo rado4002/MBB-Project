@@ -2,7 +2,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import TIMESTAMP, CheckConstraint, ForeignKey, Index, Integer, String, text
+from sqlalchemy import TIMESTAMP, BigInteger, CheckConstraint, ForeignKey, Index, Integer, String, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -71,6 +71,9 @@ class Conversation(Base):
     )
     message_count: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")
+    )
+    last_inbound_receipt_order: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
     )
     owner_type: Mapped[str] = mapped_column(
         String(10), nullable=False, server_default="ai"

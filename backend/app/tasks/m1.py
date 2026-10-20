@@ -36,6 +36,7 @@ from app.modules.m1_gateway.turn_recovery import (
     mark_skipped_in_session,
     source_is_latest,
 )
+from app.modules.m4_conversation.inbound_order import latest_inbound_message_id
 from app.tasks.celery_app import celery_app, run_async
 
 log = structlog.get_logger(__name__)
@@ -172,9 +173,7 @@ async def _persist_outbound(
             read_commercial_state,
             update_commercial_state_from_locked_snapshot,
         )
-        from app.models.message import Message
         from app.modules.m1_gateway.service import persist_outbound
-        from sqlalchemy import select
 
         async with async_session_factory() as session:
             try:
@@ -221,18 +220,8 @@ async def _persist_outbound(
                         != expected_commercial_state_revision
                     ):
                         raise ValueError("AI audit commercial-state snapshot is inconsistent")
-                    latest_inbound_id = await session.scalar(
-                        select(Message.message_id)
-                        .where(
-                            Message.conversation_id == conversation_id,
-                            Message.direction == "inbound",
-                        )
-                        .order_by(
-                            Message.created_at.desc(),
-                            Message.timestamp.desc(),
-                            Message.message_id.desc(),
-                        )
-                        .limit(1)
+                    latest_inbound_id = await latest_inbound_message_id(
+                        session, conversation_id,
                     )
                     if latest_inbound_id != source_message_id:
                         skipped = await mark_skipped_in_session(

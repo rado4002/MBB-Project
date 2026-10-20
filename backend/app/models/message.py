@@ -2,7 +2,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import TIMESTAMP, CheckConstraint, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import TIMESTAMP, BigInteger, CheckConstraint, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -14,6 +14,12 @@ class Message(Base):
     __table_args__ = (
         CheckConstraint(
             "direction IN ('inbound', 'outbound')", name="chk_msg_direction"
+        ),
+        CheckConstraint(
+            "(direction = 'inbound' AND inbound_receipt_order IS NOT NULL "
+            "AND inbound_receipt_order > 0) OR "
+            "(direction = 'outbound' AND inbound_receipt_order IS NULL)",
+            name="chk_msg_inbound_receipt_order",
         ),
         CheckConstraint(
             "content_type IN ('text', 'voice_note', 'image')",
@@ -42,6 +48,11 @@ class Message(Base):
         Index("idx_msg_conversation", "conversation_id"),
         Index("idx_msg_timestamp", "timestamp"),
         Index("idx_msg_direction", "direction"),
+        Index(
+            "uq_msg_conversation_inbound_receipt_order",
+            "conversation_id", "inbound_receipt_order", unique=True,
+            postgresql_where=text("direction = 'inbound'"),
+        ),
         Index(
             "uq_messages_inbound_whatsapp_message_id",
             "whatsapp_message_id",
@@ -73,6 +84,7 @@ class Message(Base):
         TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
     )
     direction: Mapped[str] = mapped_column(String(10), nullable=False)
+    inbound_receipt_order: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     content_type: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default="text"

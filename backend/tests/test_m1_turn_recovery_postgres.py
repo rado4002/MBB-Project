@@ -42,6 +42,7 @@ from app.modules.m1_gateway.turn_recovery import (
     add_pending_turn,
     claim_turn,
     mark_outcome_committed,
+    source_is_latest,
 )
 from app.modules.m4_conversation.ownership import ai_may_reply
 from app.tasks import m1
@@ -376,6 +377,16 @@ async def test_outbound_commit_reuses_uuid_and_completed_redelivery_is_noop(
     assert messaging.calls == [
         (customer.phone_number, "Réponse durable test.", str(outbound_id))
     ]
+    async with factory() as session:
+        stored_conversation = await session.get(Conversation, conversation.conversation_id)
+        assert stored_conversation is not None
+        assert stored_conversation.last_inbound_receipt_order == 2
+        assert await session.scalar(
+            select(func.count(Message.message_id)).where(
+                Message.conversation_id == conversation.conversation_id,
+                Message.direction == "inbound",
+            )
+        ) == 2
 
 
 @pytest.mark.asyncio
@@ -409,6 +420,74 @@ async def test_send_attempt_is_durable_uncertain_and_never_blindly_retried(
     )
     assert replay["status"] == "send_uncertain"
     assert len(messaging.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_inbound_receipts_follow_commit_order(factory):
+    _customer, conversation, _seed_inbound = await _seed(factory)
+    first_id, second_id = uuid.uuid4(), uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    second_started = asyncio.Event()
+    second_flushed = asyncio.Event()
+
+    async def insert_second():
+        async with factory() as session:
+            session.add(Message(
+                message_id=second_id,
+                conversation_id=conversation.conversation_id,
+                timestamp=now - timedelta(days=1),
+                created_at=now - timedelta(days=1),
+                direction="inbound", content="Second receipt",
+                content_type="text", language="french",
+                whatsapp_message_id=f"receipt-{second_id}",
+            ))
+            second_started.set()
+            await session.flush()
+            second_flushed.set()
+            await session.commit()
+
+    async with factory() as first_session:
+        first_session.add(Message(
+            message_id=first_id,
+            conversation_id=conversation.conversation_id,
+            timestamp=now + timedelta(days=1),
+            created_at=now + timedelta(days=1),
+            direction="inbound", content="First receipt",
+            content_type="text", language="french",
+            whatsapp_message_id=f"receipt-{first_id}",
+        ))
+        await first_session.flush()  # Holds the conversation row lock.
+        second_task = asyncio.create_task(insert_second())
+        try:
+            await asyncio.wait_for(second_started.wait(), timeout=5)
+            await asyncio.sleep(0.1)
+            assert not second_flushed.is_set()
+            await first_session.commit()
+            await asyncio.wait_for(second_task, timeout=5)
+        finally:
+            if not second_task.done():
+                second_task.cancel()
+                await asyncio.gather(second_task, return_exceptions=True)
+
+    async with factory() as session:
+        rows = (await session.execute(
+            select(Message.message_id, Message.inbound_receipt_order)
+            .where(Message.conversation_id == conversation.conversation_id,
+                   Message.direction == "inbound")
+            .order_by(Message.inbound_receipt_order)
+        )).all()
+        assert [row.message_id for row in rows] == [
+            _seed_inbound.message_id, first_id, second_id,
+        ]
+        assert [row.inbound_receipt_order for row in rows] == [1, 2, 3]
+        assert await source_is_latest(
+            session, conversation_id=conversation.conversation_id,
+            source_message_id=second_id,
+        )
+        assert not await source_is_latest(
+            session, conversation_id=conversation.conversation_id,
+            source_message_id=first_id,
+        )
 
 
 @pytest.mark.asyncio

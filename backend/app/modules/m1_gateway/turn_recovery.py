@@ -16,6 +16,7 @@ from app.models.conversation import Conversation
 from app.models.inbound_turn_lifecycle import InboundTurnLifecycle
 from app.models.message import Message
 from app.models.order_draft import OrderDraft
+from app.modules.m4_conversation.inbound_order import latest_inbound_message_id
 
 
 _CLAIM_TTL = timedelta(minutes=30)
@@ -126,19 +127,7 @@ async def _legacy_lifecycle(
     ):
         state = "skipped"
         disposition = "ownership_changed_before_send"
-    latest_inbound_id = await session.scalar(
-        select(Message.message_id)
-        .where(
-            Message.conversation_id == source.conversation_id,
-            Message.direction == "inbound",
-        )
-        .order_by(
-            Message.created_at.desc(),
-            Message.timestamp.desc(),
-            Message.message_id.desc(),
-        )
-        .limit(1)
-    )
+    latest_inbound_id = await latest_inbound_message_id(session, source.conversation_id)
     if state == "pending" and latest_inbound_id != source.message_id:
         state = "skipped"
         disposition = "superseded"
@@ -264,19 +253,7 @@ async def source_is_latest(
     conversation_id: uuid.UUID,
     source_message_id: uuid.UUID,
 ) -> bool:
-    latest = await session.scalar(
-        select(Message.message_id)
-        .where(
-            Message.conversation_id == conversation_id,
-            Message.direction == "inbound",
-        )
-        .order_by(
-            Message.created_at.desc(),
-            Message.timestamp.desc(),
-            Message.message_id.desc(),
-        )
-        .limit(1)
-    )
+    latest = await latest_inbound_message_id(session, conversation_id)
     return latest == source_message_id
 
 
