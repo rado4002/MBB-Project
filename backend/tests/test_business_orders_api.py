@@ -10,7 +10,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import func, select, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app import adapters
 from app.api.v1 import business_orders
@@ -514,3 +514,150 @@ async def test_audit_failure_rolls_back_cancellation(
             )
             == 0
         )
+
+
+@pytest.mark.asyncio
+async def test_payment_insert_waits_for_cancellation_then_rolls_back(
+    accepted_order,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    transport, factory, seeded, order_id = accepted_order
+    entered_audit = asyncio.Event()
+    release_audit = asyncio.Event()
+    original_append = order_cancellation.append_operator_audit_event
+
+    async def pause_after_order_lock(*args, **kwargs):
+        entered_audit.set()
+        await release_audit.wait()
+        return await original_append(*args, **kwargs)
+
+    monkeypatch.setattr(
+        order_cancellation, "append_operator_audit_event", pause_after_order_lock
+    )
+    async with factory() as db:
+        order = await db.get(Order, order_id)
+        reviewed_at = order.updated_at
+        amount = order.total_amount
+        inventory = await db.get(InventoryRecord, seeded.inventory_id)
+        inventory_before = (inventory.quantity, inventory.status, inventory.updated_at)
+
+    async def insert_payment():
+        async with factory() as db:
+            db.add(
+                Payment(
+                    order_id=order_id,
+                    method="orange_money",
+                    amount=amount,
+                    currency="CDF",
+                    status="pending",
+                )
+            )
+            await db.commit()
+
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        csrf = await _login(client, "commerce.admin", ADMIN_PASSWORD)
+        csrf = await _reauthenticate(client, csrf)
+        cancellation = asyncio.create_task(
+            client.post(
+                f"/api/v1/business/orders/{order_id}/cancel",
+                headers=_cancel_headers(csrf, uuid.uuid4()),
+                json=_cancel_body(reviewed_at),
+            )
+        )
+        await asyncio.wait_for(entered_audit.wait(), timeout=5)
+        insertion = asyncio.create_task(insert_payment())
+        try:
+            await asyncio.sleep(0.1)
+            assert not insertion.done(), "Payment insert bypassed the Order lock"
+        finally:
+            release_audit.set()
+        response = await asyncio.wait_for(cancellation, timeout=5)
+        assert response.status_code == 200
+        with pytest.raises(
+            IntegrityError, match="Payment cannot be attached to a cancelled Order"
+        ):
+            await asyncio.wait_for(insertion, timeout=5)
+
+    async with factory() as db:
+        assert (await db.get(Order, order_id)).status == "cancelled"
+        assert await db.scalar(select(func.count()).select_from(Payment)) == 0
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(OperatorAuditEvent)
+                .where(OperatorAuditEvent.action == "order.cancelled")
+            )
+            == 1
+        )
+        inventory = await db.get(InventoryRecord, seeded.inventory_id)
+        assert (
+            inventory.quantity,
+            inventory.status,
+            inventory.updated_at,
+        ) == inventory_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("commit_payment", [True, False])
+async def test_cancellation_waits_for_payment_transaction(
+    accepted_order,
+    commit_payment: bool,
+):
+    transport, factory, seeded, order_id = accepted_order
+    async with factory() as db:
+        order = await db.get(Order, order_id)
+        reviewed_at = order.updated_at
+        amount = order.total_amount
+        inventory = await db.get(InventoryRecord, seeded.inventory_id)
+        inventory_before = (inventory.quantity, inventory.status, inventory.updated_at)
+
+    async with factory() as payment_db:
+        payment_db.add(
+            Payment(
+                order_id=order_id,
+                method="orange_money",
+                amount=amount,
+                currency="CDF",
+                status="pending",
+            )
+        )
+        await payment_db.flush()
+        async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+            csrf = await _login(client, "commerce.admin", ADMIN_PASSWORD)
+            csrf = await _reauthenticate(client, csrf)
+            cancellation = asyncio.create_task(
+                client.post(
+                    f"/api/v1/business/orders/{order_id}/cancel",
+                    headers=_cancel_headers(csrf, uuid.uuid4()),
+                    json=_cancel_body(reviewed_at),
+                )
+            )
+            await asyncio.sleep(0.1)
+            assert not cancellation.done(), "Cancellation bypassed the Payment lock"
+            if commit_payment:
+                await payment_db.commit()
+            else:
+                await payment_db.rollback()
+            response = await asyncio.wait_for(cancellation, timeout=5)
+
+    assert response.status_code == (409 if commit_payment else 200)
+    if commit_payment:
+        assert response.json()["error"]["code"] == "ORDER_PAYMENT_CONFLICT"
+    async with factory() as db:
+        assert (await db.get(Order, order_id)).status == (
+            "pending" if commit_payment else "cancelled"
+        )
+        assert await db.scalar(select(func.count()).select_from(Payment)) == int(
+            commit_payment
+        )
+        assert await db.scalar(
+            select(func.count())
+            .select_from(OperatorAuditEvent)
+            .where(OperatorAuditEvent.action == "order.cancelled")
+        ) == int(not commit_payment)
+        inventory = await db.get(InventoryRecord, seeded.inventory_id)
+        assert (
+            inventory.quantity,
+            inventory.status,
+            inventory.updated_at,
+        ) == inventory_before

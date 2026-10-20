@@ -135,8 +135,8 @@ async def cancel_pending_order(
     The transaction-scoped advisory lock serializes use of an idempotency key,
     including concurrent attempts aimed at different Orders. The Order row lock
     serializes different cancellation keys for the same Order. Locking the Order
-    also prevents a concurrent Payment insert from passing its foreign-key check
-    until this transaction completes; any existing Payment fails closed.
+    also conflicts with the Payment table's status guard, which checks the
+    Order after acquiring a row lock. Any existing Payment fails closed.
     """
     if actor_role != "administrator":
         raise OrderCancellationForbidden
