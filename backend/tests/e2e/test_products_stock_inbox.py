@@ -9,13 +9,16 @@ import sys
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import Page, expect, sync_playwright
 import pytest
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 
 from app.database import async_session_factory, engine
+from app.ai.provider_contract import ProviderFinishReason, ProviderToolCall, ProviderTurnResult
+from app.ai.turn import AITurn, AITurnService
 from app.models import (
     Conversation,
     Customer,
@@ -24,7 +27,17 @@ from app.models import (
     Message,
     OperatorAccount,
 )
+from app.models.catalog import SellableItem
+from app.models.inventory import InventoryRecord
+from app.models.order import Order
+from app.models.order_draft import OrderDraft
+from app.models.payment import Payment
+from app.models.stock_movement import StockMovement
+from app.modules.m1_gateway.turn_recovery import add_pending_turn, claim_turn, mark_outcome_committed
+from app.modules.product_offer.service import get_product_offer
 from app.operator_identity.passwords import hash_password
+from app.tasks import m1
+from test_order_drafts_postgres import _block_m1_external_effects
 
 
 BASE_URL = os.environ.get("MBB_E2E_BASE_URL")
@@ -40,6 +53,9 @@ OPERATOR_PASSWORD = "Amber-Cloud-5187!"
 PRODUCT = "E2E Solar Kettle"
 VARIANT = "Three litre"
 SKU = "E2E-SOLAR-KETTLE-3L"
+ORDER_SOURCE_ID = uuid.UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+FIRST_CONFIRMATION_ID = uuid.UUID("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")
+REPLAY_CONFIRMATION_ID = uuid.UUID("ffffffff-ffff-4fff-8fff-ffffffffffff")
 
 
 async def _seed_prerequisites() -> None:
@@ -197,7 +213,211 @@ def _open_offer(page: Page):
     return dialog
 
 
-def test_products_stock_inbox_complete_journey() -> None:
+async def _assert_order_acceptance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Continue the browser-created offer through scripted AI and real M1."""
+    factory = async_session_factory
+    try:
+        async with factory() as session:
+            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "c4d5e6f7a8b9"
+            item = await session.scalar(select(SellableItem).where(SellableItem.sku == SKU))
+            conversation = await session.get(Conversation, CONVERSATION_ID)
+            lead = await session.scalar(select(Lead).where(Lead.conversation_id == CONVERSATION_ID))
+            assert item is not None and conversation is not None and lead is not None
+            assert conversation.customer_id == "+243812345678"
+            assert conversation.owner_type == "ai" and conversation.ai_execution_state == "eligible"
+            offer = await get_product_offer(session, item.sellable_item_id)
+            inventory = await session.scalar(
+                select(InventoryRecord).where(InventoryRecord.sellable_item_id == item.sellable_item_id)
+            )
+            assert offer is not None and inventory is not None
+            assert offer.product_name == PRODUCT and offer.current_usd_price == Decimal("55.25")
+            assert offer.inventory_status == "available" and offer.is_sellable_now
+            quote = offer.derived_cdf_quote
+            assert quote is not None
+            assert quote.usd_to_cdf_rate == Decimal("2800")
+            assert quote.cdf_amount == Decimal("154700.00")
+            assert inventory.quantity == 3
+            inventory_before = (inventory.quantity, inventory.status, inventory.updated_at)
+            movement_count = await session.scalar(
+                select(func.count()).select_from(StockMovement).where(
+                    StockMovement.sellable_item_id == item.sellable_item_id
+                )
+            )
+            assert movement_count == 3
+            assert await session.scalar(select(func.count()).select_from(Order)) == 0
+            assert await session.scalar(select(func.count()).select_from(Payment)) == 0
+
+            # The browser fixture begins at inquiry; qualify it for the scripted
+            # draft turn without replacing any Product, Pricing, FX, or Stock row.
+            lead.score = "hot"
+            lead.score_value = 9
+            lead.stage = "decision"
+            session.add(Message(
+                message_id=ORDER_SOURCE_ID,
+                conversation_id=CONVERSATION_ID,
+                timestamp=datetime.now(UTC),
+                direction="inbound",
+                content="Je le prends.",
+                content_type="text",
+                language="french",
+                whatsapp_message_id="e2e-order-source",
+            ))
+            await session.flush()
+            add_pending_turn(
+                session,
+                source_message_id=ORDER_SOURCE_ID,
+                conversation_id=CONVERSATION_ID,
+                ownership_version=conversation.ownership_version,
+            )
+            await session.commit()
+
+        # Reuse the M1 tests' fail-closed provider, transport, CRM, payment,
+        # inventory-adapter, FX, and Celery guards. Enable the send gate to
+        # prove Order acceptance itself still takes the no-send path.
+        external_calls = _block_m1_external_effects(
+            monkeypatch, factory, whatsapp_send_enabled=True,
+        )
+        assert (await claim_turn(ORDER_SOURCE_ID, attempt_id="e2e-draft")).action == "process"
+
+        class ScriptedDraftAdapter:
+            calls = 0
+
+            async def generate_turn(self, _request):
+                self.calls += 1
+                return ProviderTurnResult(
+                    tool_calls=(ProviderToolCall(
+                        call_id="e2e-order-draft",
+                        capability_name="prepare_order_draft",
+                        arguments={
+                            "selected_sellable_item_id": str(item.sellable_item_id),
+                            "quantity": 2,
+                        },
+                    ),),
+                    finish_reason=ProviderFinishReason.tool_call,
+                )
+
+        async def current_authority(_context):
+            return True
+
+        async def load_state(_conversation_id):
+            return None
+
+        adapter = ScriptedDraftAdapter()
+        service = AITurnService(
+            adapter,
+            authority_checker=current_authority,
+            durable_session_factory=factory,
+            commercial_state_loader=load_state,
+            turn_lifecycle_recorder=mark_outcome_committed,
+        )
+        presented = await service.generate_finalized(AITurn(
+            user_content="Je le prends.",
+            language="french",
+            expected_ownership_version=conversation.ownership_version,
+            conversation_id=CONVERSATION_ID,
+            source_message_id=ORDER_SOURCE_ID,
+            allowed_capabilities=("prepare_order_draft",),
+        ))
+        assert adapter.calls == 1
+        assert presented.audit_persisted
+        assert presented.audit_record.outcome.value == "order_draft_presented"
+        assert presented.text is not None and "309 400 CDF" in presented.text
+
+        async with factory() as session:
+            draft = await session.scalar(select(OrderDraft).where(
+                OrderDraft.conversation_id == CONVERSATION_ID
+            ))
+            assert draft is not None and draft.status == "awaiting_confirmation"
+            assert draft.source_message_id == ORDER_SOURCE_ID and draft.quantity == 2
+            assert draft.product_id == offer.product_id
+            assert draft.sellable_item_id == offer.sellable_item_id
+            assert draft.price_id == offer.price_id
+            assert draft.exchange_rate_id == quote.exchange_rate_id
+            assert draft.unit_price_usd == Decimal("55.25")
+            assert draft.unit_price_cdf == Decimal("154700.00")
+            assert draft.total_cdf == Decimal("309400.00")
+            assert draft.inventory_status == inventory_before[1]
+            assert draft.inventory_updated_at == inventory_before[2]
+            confirmation = f"OUI {draft.confirmation_code}"
+
+        class TaskStub:
+            request = SimpleNamespace(retries=0)
+
+            def retry(self, **_kwargs):
+                raise AssertionError("M1 unexpectedly retried")
+
+        async def confirm(message_id: uuid.UUID, whatsapp_message_id: str):
+            return await m1._process(
+                task=TaskStub(),
+                message_id=str(message_id),
+                customer_phone="+243812345678",
+                content=confirmation,
+                content_type="text",
+                timestamp=datetime.now(UTC).isoformat(),
+                whatsapp_message_id=whatsapp_message_id,
+            )
+
+        first = await confirm(FIRST_CONFIRMATION_ID, "e2e-order-confirm-first")
+        replay = await confirm(REPLAY_CONFIRMATION_ID, "e2e-order-confirm-replay")
+        redelivery = await confirm(FIRST_CONFIRMATION_ID, "e2e-order-confirm-first")
+        assert first["status"] == "order_draft_confirmed"
+        assert replay["status"] == "order_draft_already_confirmed"
+        assert first["order_id"] == replay["order_id"]
+        assert first["send_status"] == replay["send_status"] == "skipped"
+        assert redelivery["status"] == "skipped"
+        assert redelivery["send_status"] == "skipped"
+
+        async with factory() as session:
+            orders = list((await session.scalars(select(Order))).all())
+            assert len(orders) == 1
+            order = orders[0]
+            assert order.order_id == uuid.UUID(first["order_id"])
+            assert order.status == "pending" and order.total_amount == Decimal("309400.00")
+            assert order.customer_id == "+243812345678" and order.lead_id == lead.lead_id
+            assert order.confirmed_at is None and order.delivered_at is None
+            assert order.hub_crm_synced is False and order.hub_crm_order_id is None
+            assert len(order.items) == 1
+            line = order.items[0]
+            assert line["product_id"] == str(offer.product_id)
+            assert line["sellable_item_id"] == str(offer.sellable_item_id)
+            assert line["price_id"] == str(offer.price_id)
+            assert line["exchange_rate_id"] == str(quote.exchange_rate_id)
+            assert line["quantity"] == 2
+            assert Decimal(line["unit_price_usd"]) == Decimal("55.25")
+            assert Decimal(line["usd_to_cdf_rate"]) == Decimal("2800")
+            assert Decimal(line["unit_price_cdf"]) == Decimal("154700.00")
+            stored_draft = await session.get(OrderDraft, (draft.draft_id, draft.draft_version))
+            assert stored_draft is not None and stored_draft.status == "confirmed"
+            assert stored_draft.order_id == order.order_id
+            inventory_after = await session.get(InventoryRecord, inventory.inventory_id)
+            assert inventory_after is not None
+            assert (inventory_after.quantity, inventory_after.status, inventory_after.updated_at) == inventory_before
+            assert await session.scalar(
+                select(func.count()).select_from(StockMovement).where(
+                    StockMovement.sellable_item_id == item.sellable_item_id
+                )
+            ) == movement_count
+            assert await session.scalar(select(func.count()).select_from(Payment)) == 0
+            assert await session.scalar(
+                select(func.count()).select_from(Message).where(
+                    Message.whatsapp_message_id == "e2e-order-confirm-first"
+                )
+            ) == 1
+            receipt_orders = dict((await session.execute(
+                select(Message.message_id, Message.inbound_receipt_order).where(Message.message_id.in_((
+                    ORDER_SOURCE_ID, FIRST_CONFIRMATION_ID, REPLAY_CONFIRMATION_ID,
+                )))
+            )).all())
+            assert len(receipt_orders) == 3
+            assert (receipt_orders[ORDER_SOURCE_ID]
+                    < receipt_orders[FIRST_CONFIRMATION_ID]
+                    < receipt_orders[REPLAY_CONFIRMATION_ID])
+        assert external_calls == []
+    finally:
+        await engine.dispose()
+
+
+def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) -> None:
     asyncio.run(_seed_prerequisites())
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -413,3 +633,4 @@ def test_products_stock_inbox_complete_journey() -> None:
     assert any(method == "POST" and path.endswith("/inventory/receive") and status == 200 for method, path, status in responses)
     assert any(method == "POST" and path.endswith("/inventory/adjust") and status == 409 for method, path, status in responses)
     assert any(method == "GET" and path == "/api/v1/operator/product-offers" and status == 200 for method, path, status in responses)
+    asyncio.run(_assert_order_acceptance(monkeypatch))
