@@ -6,6 +6,7 @@ export interface OrderQueueItem {
   order_id: string
   status: OrderStatus
   created_at: string
+  updated_at: string
   total_cdf: string
   currency: string
   item_count: number
@@ -31,6 +32,19 @@ export interface OrderDetail extends OrderQueueItem {
   delivery_zone: string
 }
 
+export type OrderCancellationReason =
+  | 'customer_requested'
+  | 'duplicate_order'
+  | 'commercial_terms_unavailable'
+  | 'other_operational'
+
+export interface OrderCancellationResponse {
+  order_id: string
+  status: 'cancelled'
+  updated_at: string
+  replayed: boolean
+}
+
 export function createBusinessOrdersClient(onSessionExpired: () => void) {
   const base = '/api/v1/business/orders'
   return {
@@ -43,5 +57,19 @@ export function createBusinessOrdersClient(onSessionExpired: () => void) {
     },
     detail: (id: string, signal: AbortSignal) =>
       requestJson<OrderDetail>(`${base}/${encodeURIComponent(id)}`, { signal }, onSessionExpired),
+    cancel: (
+      id: string,
+      reasonCode: OrderCancellationReason,
+      expectedUpdatedAt: string,
+      idempotencyKey: string,
+      csrfToken: string,
+      signal: AbortSignal,
+    ) => requestJson<OrderCancellationResponse>(`${base}/${encodeURIComponent(id)}/cancel`, {
+      method: 'POST',
+      body: { reason_code: reasonCode, expected_updated_at: expectedUpdatedAt },
+      idempotencyKey,
+      csrfToken,
+      signal,
+    }, onSessionExpired),
   }
 }

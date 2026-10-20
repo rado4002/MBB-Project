@@ -13,6 +13,7 @@ const itemId = '44444444-4444-4444-8444-444444444444'
 const base = '/api/v1/business/orders'
 const summary = {
   order_id: orderId, status: 'pending', created_at: '2026-10-01T12:00:00Z',
+  updated_at: '2026-10-01T12:00:00Z',
   total_cdf: '309400.00', currency: 'CDF', item_count: 1,
   first_product_name: 'Fictional Air Fryer', conversation_id: conversationId,
 }
@@ -25,9 +26,12 @@ const detail = {
   }],
 }
 
-function setup(conversation: string | null = conversationId) {
+function setup(conversation: string | null = conversationId, role: 'operator' | 'administrator' = 'operator') {
   server.use(
-    http.get('/api/v1/auth/session', () => HttpResponse.json(sessionFixture('operator'))),
+    http.get('/api/v1/auth/session', () => HttpResponse.json({
+      ...sessionFixture(role),
+      recent_reauthentication_expires_at_epoch: role === 'administrator' ? 2_000_000_000 : null,
+    })),
     http.get(base, ({ request }) => HttpResponse.json({
       items: new URL(request.url).searchParams.get('status') === 'delivered' ? [] : [summary],
       has_more: false,
@@ -49,6 +53,40 @@ describe('read-only Business Orders', () => {
     expect(within(region).getByText(/Accepted USD\/CDF rate 2800/)).toBeInTheDocument()
     expect(within(region).getByRole('link', { name: 'Open associated Inbox conversation' })).toHaveAttribute('href', `/inbox/${conversationId}`)
     expect(within(region).queryByRole('button')).not.toBeInTheDocument()
+  })
+
+  it('lets an Administrator cancel a reviewed pending Order with a structured reason', async () => {
+    const submissions: { body: unknown; key: string | null; csrf: string | null }[] = []
+    setup(conversationId, 'administrator')
+    server.use(
+      http.get('/api/v1/auth/csrf', () => HttpResponse.json({ csrf_token: 'cancel-csrf', expires_at_epoch: 2_000_000_000 })),
+      http.post(`${base}/${orderId}/cancel`, async ({ request }) => {
+        submissions.push({
+          body: await request.json(),
+          key: request.headers.get('Idempotency-Key'),
+          csrf: request.headers.get('X-CSRF-Token'),
+        })
+        return HttpResponse.json({
+          order_id: orderId, status: 'cancelled',
+          updated_at: '2026-10-01T12:01:00Z', replayed: false,
+        })
+      }),
+    )
+    const user = userEvent.setup()
+    renderApp(`/business/orders/${orderId}`)
+    const region = await screen.findByRole('region', { name: 'Order detail' })
+    await within(region).findByText('pending')
+    await user.click(within(region).getByRole('button', { name: 'Cancel Order' }))
+    await user.selectOptions(within(region).getByLabelText('Cancellation reason'), 'customer_requested')
+    await user.click(within(region).getByRole('button', { name: 'Confirm cancellation' }))
+    expect(await within(region).findByText('Order cancelled.')).toBeInTheDocument()
+    expect(within(region).getByText('cancelled')).toBeInTheDocument()
+    expect(submissions[0]).toMatchObject({
+      body: { reason_code: 'customer_requested', expected_updated_at: detail.updated_at },
+      csrf: 'cancel-csrf',
+    })
+    expect(submissions[0]?.key).toMatch(/^[0-9a-f-]{36}$/)
+    expect(within(region).queryByRole('button', { name: 'Cancel Order' })).not.toBeInTheDocument()
   })
 
   it('omits an unverified Inbox link and filters status in the queue', async () => {

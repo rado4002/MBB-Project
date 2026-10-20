@@ -47,6 +47,7 @@ def _settings() -> Settings:
         browser_allowed_origin=ORIGIN,
         browser_session_hmac_secret="s" * 32,
         browser_csrf_hmac_secret="c" * 32,
+        browser_idempotency_hmac_secret="i" * 32,
         browser_session_redis_db=4,
         browser_session_idle_seconds=1800,
         browser_session_absolute_seconds=28800,
