@@ -585,8 +585,8 @@ async def test_order_state_machine_invalid_skip():
 
 
 @pytest.mark.asyncio
-async def test_order_cancel_from_pending():
-    """pending → cancelled is always allowed"""
+async def test_generic_service_rejects_order_cancellation():
+    """The generic status service cannot bypass cancellation authority."""
     async with AsyncSessionLocal() as session:
         phone, lead_id = await _seed_customer_lead(session)
         order = await _seed_historical_order(
@@ -598,8 +598,17 @@ async def test_order_cancel_from_pending():
             payment_method=PaymentMethod.bank_transfer,
         )
 
-        order = await update_order_status(session, order_id=order.order_id, new_status="cancelled")
-        assert order.status == "cancelled"
+        order_id = order.order_id
+        with pytest.raises(
+            InvalidOrderTransition,
+            match="authorized Order cancellation endpoint",
+        ):
+            await update_order_status(
+                session, order_id=order_id, new_status="cancelled"
+            )
+
+    async with AsyncSessionLocal() as session:
+        assert (await session.get(Order, order_id)).status == "pending"
 
 
 @pytest.mark.asyncio

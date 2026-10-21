@@ -756,8 +756,12 @@ async def test_retired_creation_and_historical_read_status_api(engine: AsyncEngi
             assert body["items"][0]["product_id"] == "historical-sku"
             assert "delivery_method" not in body and "payment_status" not in body
             assert (await client.put(url + "/status", json={"status": "delivered"})).status_code == 409
-            assert (await client.put(url + "/status", json={"status": "cancelled"})).status_code == 200
-            assert (await client.get(url)).json()["status"] == "cancelled"
+            cancelled = await client.put(url + "/status", json={"status": "cancelled"})
+            assert cancelled.status_code == 409
+            assert cancelled.json()["detail"] == (
+                "Cancellation must use the authorized Order cancellation endpoint."
+            )
+            assert (await client.get(url)).json()["status"] == "pending"
         assert (await client.get(f"/api/v1/orders/{uuid.uuid4()}")).status_code == 404
 
 

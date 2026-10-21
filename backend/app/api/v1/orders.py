@@ -49,13 +49,21 @@ async def get_order(order_id: uuid.UUID, db: DBSession):
     "/{order_id}/status",
     response_model=OrderStatusResponse,
     dependencies=[Depends(get_current_role)],
+    responses={
+        409: {
+            "description": (
+                "Invalid lifecycle transition. Cancellation must use "
+                "POST /api/v1/business/orders/{order_id}/cancel."
+            )
+        }
+    },
 )
 async def update_order_status(
     order_id: uuid.UUID,
     body: OrderStatusUpdate,
     db: DBSession,
 ):
-    """Advance order through fulfillment lifecycle."""
+    """Advance fulfillment; cancellation uses the authorized business endpoint."""
     log.info("order.status.update", order_id=str(order_id), status=body.status)
     try:
         order = await svc_update_order_status(db, order_id=order_id, new_status=body.status.value)

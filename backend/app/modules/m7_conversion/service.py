@@ -10,7 +10,7 @@ Entry points:
 
 State machine (enforced here):
   pending → confirmed → preparing → delivering → delivered
-  Any (except delivered) → cancelled
+  Cancellation is owned by order_cancellation.cancel_pending_order().
 """
 from __future__ import annotations
 
@@ -33,10 +33,10 @@ _POINTS_PER_CDF = 1 / 1000
 
 # Valid state transitions (state machine)
 _VALID_TRANSITIONS: dict[str, set[str]] = {
-    "pending": {"confirmed", "cancelled"},
-    "confirmed": {"preparing", "cancelled"},
-    "preparing": {"delivering", "cancelled"},
-    "delivering": {"delivered", "cancelled"},
+    "pending": {"confirmed"},
+    "confirmed": {"preparing"},
+    "preparing": {"delivering"},
+    "delivering": {"delivered"},
     "delivered": set(),        # Terminal state
     "cancelled": set(),        # Terminal state
 }
@@ -56,11 +56,18 @@ async def update_order_status(
 
     Enforces allowed transitions:
       pending → confirmed → preparing → delivering → delivered
-      Any (except delivered/cancelled) → cancelled
+
+    Cancellation is deliberately excluded. It requires the authorized,
+    payment-aware, audited Order cancellation service.
 
     Raises:
         InvalidOrderTransition if the transition is not allowed.
     """
+    if new_status == "cancelled":
+        raise InvalidOrderTransition(
+            "Cancellation must use the authorized Order cancellation endpoint."
+        )
+
     result = await session.execute(
         select(Order)
         .where(Order.order_id == order_id)

@@ -29,7 +29,13 @@ class OrderResponse(BaseModel):
 
 
 class OrderStatusUpdate(BaseModel):
-    status: OrderStatus
+    status: OrderStatus = Field(
+        description=(
+            "Requested fulfillment status. The generic service rejects cancelled; "
+            "use the authorized Order cancellation endpoint: "
+            "POST /api/v1/business/orders/{order_id}/cancel."
+        )
+    )
     note: str | None = Field(None, max_length=500)
 
 

@@ -140,6 +140,12 @@ def test_only_confirmed_draft_domain_constructs_orders():
     assert "OrderCreate" not in contract["components"]["schemas"]
     assert "get" in contract["paths"]["/api/v1/orders/{order_id}"]
     assert "put" in contract["paths"]["/api/v1/orders/{order_id}/status"]
+    status_operation = contract["paths"]["/api/v1/orders/{order_id}/status"]["put"]
+    assert "409" in status_operation["responses"]
+    status_schema = contract["components"]["schemas"]["OrderStatusUpdate"]
+    assert "authorized Order cancellation endpoint" in (
+        status_schema["properties"]["status"]["description"]
+    )
     constructors = []
     root = Path(__file__).resolve().parents[1] / "app"
     for path in root.rglob("*.py"):
@@ -148,3 +154,18 @@ def test_only_confirmed_draft_domain_constructs_orders():
                 if node.func.id == "Order":
                     constructors.append(path.relative_to(root).as_posix())
     assert constructors == ["modules/m7_conversion/order_drafts.py"]
+
+
+def test_generic_celery_status_path_rejects_cancellation():
+    from app.modules.m7_conversion.service import InvalidOrderTransition
+    from app.tasks.conversion import update_order_status as status_task
+
+    with pytest.raises(
+        InvalidOrderTransition,
+        match="authorized Order cancellation endpoint",
+    ):
+        status_task.run(
+            order_id=str(uuid.uuid4()),
+            new_status="cancelled",
+            idempotency_key=str(uuid.uuid4()),
+        )

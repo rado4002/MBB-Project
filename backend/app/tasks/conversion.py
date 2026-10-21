@@ -236,7 +236,9 @@ def update_order_status(
 
     Valid transitions:
       pending → confirmed → preparing → delivering → delivered
-      Any (except delivered) → cancelled
+
+    Cancellation is rejected by the service and must use the authorized Order
+    cancellation workflow.
     """
     import uuid as _uuid
 
