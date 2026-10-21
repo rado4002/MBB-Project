@@ -52,8 +52,9 @@ async def get_order(order_id: uuid.UUID, db: DBSession):
     responses={
         409: {
             "description": (
-                "Invalid lifecycle transition. Cancellation must use "
-                "POST /api/v1/business/orders/{order_id}/cancel."
+                "Invalid lifecycle transition. Confirmation requires verified "
+                "Payment; preparation requires full Stock allocation. Cancellation "
+                "must use POST /api/v1/business/orders/{order_id}/cancel."
             )
         }
     },
@@ -63,7 +64,7 @@ async def update_order_status(
     body: OrderStatusUpdate,
     db: DBSession,
 ):
-    """Advance fulfillment; cancellation uses the authorized business endpoint."""
+    """Advance eligible legacy fulfillment; payment and Stock gates fail closed."""
     log.info("order.status.update", order_id=str(order_id), status=body.status)
     try:
         order = await svc_update_order_status(db, order_id=order_id, new_status=body.status.value)

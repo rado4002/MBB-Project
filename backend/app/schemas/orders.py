@@ -31,7 +31,9 @@ class OrderResponse(BaseModel):
 class OrderStatusUpdate(BaseModel):
     status: OrderStatus = Field(
         description=(
-            "Requested fulfillment status. The generic service rejects cancelled; "
+            "Requested fulfillment status. The generic service blocks confirmed "
+            "without verified Payment and preparing without full Stock allocation, "
+            "and rejects cancelled; "
             "use the authorized Order cancellation endpoint: "
             "POST /api/v1/business/orders/{order_id}/cancel."
         )

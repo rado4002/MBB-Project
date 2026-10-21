@@ -2,15 +2,16 @@
 app/modules/m7_conversion/service.py — Core M7 Conversion Engine.
 
 Entry points:
-  initiate_payment()    — Trigger Mobile Money payment (called by Celery task)
-  process_callback()    — Handle payment callback (called by Celery task)
+  initiate_payment()    — Fail-closed legacy payment task
+  process_callback()    — Fail-closed legacy callback task
   update_order_status() — Advance order through state machine
   credit_club_points()  — Auto-credit loyalty points on confirmed order
   sync_order_to_crm()   — Push order to Airtable CRM (idempotent)
 
-State machine (enforced here):
-  pending → confirmed → preparing → delivering → delivered
-  Cancellation is owned by order_cancellation.cancel_pending_order().
+The generic path cannot establish verified Payment or Stock allocation.
+It rejects pending → confirmed and confirmed → preparing until their
+authoritative domain contracts exist. Cancellation belongs to
+order_cancellation.cancel_pending_order().
 """
 from __future__ import annotations
 
@@ -24,7 +25,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
 from app.models.order import Order
-from app.models.payment import Payment
 
 log = structlog.get_logger(__name__)
 
@@ -33,8 +33,8 @@ _POINTS_PER_CDF = 1 / 1000
 
 # Valid state transitions (state machine)
 _VALID_TRANSITIONS: dict[str, set[str]] = {
-    "pending": {"confirmed"},
-    "confirmed": {"preparing"},
+    "pending": set(),
+    "confirmed": set(),
     "preparing": {"delivering"},
     "delivering": {"delivered"},
     "delivered": set(),        # Terminal state
@@ -45,6 +45,10 @@ class InvalidOrderTransition(ValueError):
     """Raised when a state transition is not permitted by the state machine."""
 
 
+class PaymentPrerequisiteUnavailable(InvalidOrderTransition):
+    """Payment/Stock proof cannot yet be established by this legacy path."""
+
+
 async def update_order_status(
     session: AsyncSession,
     *,
@@ -52,10 +56,10 @@ async def update_order_status(
     new_status: str,
 ) -> Order:
     """
-    Advance order through the state machine.
+    Advance an already prepared Order through the remaining legacy states.
 
-    Enforces allowed transitions:
-      pending → confirmed → preparing → delivering → delivered
+    Payment confirmation and preparation fail closed until their authoritative
+    prerequisites can be proved. Later transitions retain row locking.
 
     Cancellation is deliberately excluded. It requires the authorized,
     payment-aware, audited Order cancellation service.
@@ -66,6 +70,14 @@ async def update_order_status(
     if new_status == "cancelled":
         raise InvalidOrderTransition(
             "Cancellation must use the authorized Order cancellation endpoint."
+        )
+    if new_status == "confirmed":
+        raise PaymentPrerequisiteUnavailable(
+            "Order confirmation requires an authoritative verified Payment."
+        )
+    if new_status == "preparing":
+        raise PaymentPrerequisiteUnavailable(
+            "Order preparation requires a durable full Stock allocation."
         )
 
     result = await session.execute(
@@ -90,9 +102,7 @@ async def update_order_status(
     order.status = new_status
     order.updated_at = now
 
-    if new_status == "confirmed":
-        order.confirmed_at = now
-    elif new_status == "delivered":
+    if new_status == "delivered":
         order.delivered_at = now
 
     await session.commit()
@@ -199,62 +209,11 @@ async def sync_order_to_crm(order_id: str, idempotency_key: str) -> str:
 
 async def initiate_payment(*, order_id: str, idempotency_key: str) -> dict[str, Any]:
     """
-    Trigger Mobile Money payment for an order. Called by Celery task.
-
-    Opens its own DB session (Celery workers can't share FastAPI sessions).
-
-    Returns:
-        {"status": "pending" | "failed", "payment_id": str, "transaction_id": str}
+    Fail closed until a DRC provider contract and send gate are approved.
     """
-    from app.adapters.payment import get_payment_adapter
-
-    async with AsyncSessionLocal() as session:
-        # Load order + payment
-        order_result = await session.execute(
-            select(Order).where(Order.order_id == uuid.UUID(order_id))
-        )
-        order = order_result.scalar_one_or_none()
-        if order is None:
-            raise ValueError(f"Order not found: {order_id}")
-
-        payment_result = await session.execute(
-            select(Payment).where(Payment.order_id == order.order_id)
-        )
-        payment = payment_result.scalar_one_or_none()
-        if payment is None:
-            raise ValueError(f"No payment record for order: {order_id}")
-
-        # COD / Bank Transfer: no adapter call needed
-        if payment.method in ("cash", "bank_transfer"):
-            log.info("m7.payment.no_adapter_needed", method=payment.method, order_id=order_id)
-            return {"status": "pending", "payment_id": str(payment.payment_id), "method": payment.method}
-
-        adapter = get_payment_adapter(payment.method)
-        result = await adapter.initiate_payment(
-            phone=order.customer_id,
-            amount=float(order.total_amount),
-            currency=order.currency,
-            reference=idempotency_key,
-            method=payment.method,
-        )
-
-        # Store provider transaction ID for callback matching
-        if result.get("transaction_id"):
-            payment.provider_transaction_id = result["transaction_id"]
-            payment.provider_response = result
-            await session.commit()
-
-        log.info(
-            "m7.payment.initiated",
-            order_id=order_id,
-            method=payment.method,
-            txn_id=result.get("transaction_id"),
-        )
-        return {
-            "status": result.get("status", "pending"),
-            "payment_id": str(payment.payment_id),
-            "transaction_id": result.get("transaction_id"),
-        }
+    # No provider has an approved DRC merchant contract or an authorized send
+    # configuration. This also protects direct service/Celery invocation.
+    return {"status": "blocked", "reason": "payment_provider_not_configured"}
 
 
 # ── Callback processing (called by Celery) ───────────────────────────────────
@@ -266,74 +225,7 @@ async def process_callback(
     status: str,
     idempotency_key: str,
 ) -> dict[str, Any]:
-    """
-    Handle a Mobile Money payment callback. Called by Celery task.
-
-    Idempotent: safe to call multiple times (same payment_id + idempotency_key).
-
-    Args:
-        payment_id:       Provider transaction ID
-        provider:         "orange" | "airtel" | "mpesa"
-        status:           "success" | "failed"
-        idempotency_key:  Deduplication key
-
-    Returns:
-        {"order_id": str, "order_status": str, "payment_status": str}
-    """
-    async with AsyncSessionLocal() as session:
-        # Find payment by provider transaction ID
-        result = await session.execute(
-            select(Payment).where(Payment.provider_transaction_id == payment_id)
-        )
-        payment = result.scalar_one_or_none()
-        if payment is None:
-            log.warning("m7.callback.payment_not_found", payment_id=payment_id)
-            return {"status": "not_found", "payment_id": payment_id}
-
-        # Idempotency: already processed?
-        if payment.status in ("completed", "failed"):
-            log.info("m7.callback.already_processed", payment_id=payment_id, status=payment.status)
-            order_result = await session.execute(
-                select(Order).where(Order.order_id == payment.order_id)
-            )
-            order = order_result.scalar_one()
-            return {
-                "order_id": str(order.order_id),
-                "order_status": order.status,
-                "payment_status": payment.status,
-                "idempotent": True,
-            }
-
-        now = datetime.now(timezone.utc)
-        # Map provider "success" → "completed"
-        payment_status = "completed" if status == "success" else "failed"
-        payment.status = payment_status
-        payment.completed_at = now if payment_status == "completed" else None
-
-        # Advance order state if payment succeeded
-        order_result = await session.execute(
-            select(Order).where(Order.order_id == payment.order_id)
-        )
-        order = order_result.scalar_one()
-
-        if payment_status == "completed" and order.status == "pending":
-            order.status = "confirmed"
-            order.confirmed_at = now
-            order.updated_at = now
-            log.info("m7.callback.order_confirmed", order_id=str(order.order_id))
-
-        await session.commit()
-
-        # Trigger CRM sync asynchronously
-        from app.tasks.conversion import sync_order_crm  # type: ignore[import]
-        sync_order_crm.apply_async(
-            kwargs={"order_id": str(order.order_id), "idempotency_key": idempotency_key},
-            queue="conversion",
-        )
-
-        return {
-            "order_id": str(order.order_id),
-            "order_status": order.status,
-            "payment_status": payment_status,
-            "idempotent": False,
-        }
+    """Fail closed until authoritative DRC settlement verification exists."""
+    # The generic callback has no approved provider authenticity or settlement
+    # verification contract. A signed notification is not proof of settlement.
+    return {"status": "blocked", "reason": "payment_verification_unavailable"}

@@ -664,14 +664,13 @@ async def test_cancellation_waits_for_payment_transaction(
 
 
 @pytest.mark.asyncio
-async def test_legacy_status_write_waits_for_cancellation_and_preserves_audit(
+async def test_blocked_legacy_confirmation_preserves_cancellation_audit(
     accepted_order,
     monkeypatch: pytest.MonkeyPatch,
 ):
     transport, factory, seeded, order_id = accepted_order
     cancellation_locked = asyncio.Event()
     release_cancellation = asyncio.Event()
-    legacy_read_pending = asyncio.Event()
     original_append = order_cancellation.append_operator_audit_event
 
     async def pause_after_order_lock(*args, **kwargs):
@@ -690,7 +689,6 @@ async def test_legacy_status_write_waits_for_cancellation_and_preserves_audit(
     async def legacy_transition():
         async with factory() as db:
             assert (await db.get(Order, order_id)).status == "pending"
-            legacy_read_pending.set()
             await conversion_service.update_order_status(
                 db, order_id=order_id, new_status="confirmed"
             )
@@ -706,17 +704,15 @@ async def test_legacy_status_write_waits_for_cancellation_and_preserves_audit(
             )
         )
         await asyncio.wait_for(cancellation_locked.wait(), timeout=5)
-        transition = asyncio.create_task(legacy_transition())
+        with pytest.raises(conversion_service.PaymentPrerequisiteUnavailable):
+            await asyncio.wait_for(legacy_transition(), timeout=5)
         try:
-            await asyncio.wait_for(legacy_read_pending.wait(), timeout=5)
             await asyncio.sleep(0.1)
-            assert not transition.done(), "Legacy status write bypassed the Order lock"
+            assert not cancellation.done()
         finally:
             release_cancellation.set()
         response = await asyncio.wait_for(cancellation, timeout=5)
         assert response.status_code == 200
-        with pytest.raises(conversion_service.InvalidOrderTransition):
-            await asyncio.wait_for(transition, timeout=5)
 
     async with factory() as db:
         stored = await db.get(Order, order_id)
@@ -739,7 +735,7 @@ async def test_legacy_status_write_waits_for_cancellation_and_preserves_audit(
 
 
 @pytest.mark.asyncio
-async def test_cancellation_waits_for_legacy_status_write(accepted_order):
+async def test_cancellation_waits_for_order_lock_despite_blocked_legacy_confirmation(accepted_order):
     transport, factory, seeded, order_id = accepted_order
     async with factory() as db:
         reviewed_at = (await db.get(Order, order_id)).updated_at
@@ -762,17 +758,17 @@ async def test_cancellation_waits_for_legacy_status_write(accepted_order):
             )
             await asyncio.sleep(0.1)
             assert not cancellation.done(), "Cancellation bypassed the Order lock"
-            transitioned = await conversion_service.update_order_status(
-                legacy_db, order_id=order_id, new_status="confirmed"
-            )
-            assert transitioned.status == "confirmed"
+            with pytest.raises(conversion_service.PaymentPrerequisiteUnavailable):
+                await conversion_service.update_order_status(
+                    legacy_db, order_id=order_id, new_status="confirmed"
+                )
+            await legacy_db.rollback()
             response = await asyncio.wait_for(cancellation, timeout=5)
 
-    assert response.status_code == 409
-    assert response.json()["error"]["code"] == "ORDER_STATE_CONFLICT"
+    assert response.status_code == 200
     async with factory() as db:
         stored = await db.get(Order, order_id)
-        assert stored.status == "confirmed" and stored.confirmed_at is not None
+        assert stored.status == "cancelled" and stored.confirmed_at is None
         assert await db.scalar(select(func.count()).select_from(Payment)) == 0
         assert (
             await db.scalar(
@@ -780,7 +776,7 @@ async def test_cancellation_waits_for_legacy_status_write(accepted_order):
                 .select_from(OperatorAuditEvent)
                 .where(OperatorAuditEvent.action == "order.cancelled")
             )
-            == 0
+            == 1
         )
         inventory = await db.get(InventoryRecord, seeded.inventory_id)
         assert (

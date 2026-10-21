@@ -366,19 +366,19 @@ def test_valid_transitions_map():
     """Verify all valid transitions are defined"""
     from app.modules.m7_conversion.service import _VALID_TRANSITIONS
 
-    assert "confirmed" in _VALID_TRANSITIONS["pending"]
-    assert "cancelled" in _VALID_TRANSITIONS["pending"]
-    assert "preparing" in _VALID_TRANSITIONS["confirmed"]
+    assert "confirmed" not in _VALID_TRANSITIONS["pending"]
+    assert "cancelled" not in _VALID_TRANSITIONS["pending"]
+    assert "preparing" not in _VALID_TRANSITIONS["confirmed"]
     assert "delivering" in _VALID_TRANSITIONS["preparing"]
     assert "delivered" in _VALID_TRANSITIONS["delivering"]
     assert len(_VALID_TRANSITIONS["delivered"]) == 0  # Terminal
     assert len(_VALID_TRANSITIONS["cancelled"]) == 0  # Terminal
 
 
-def test_cancelled_from_pending_allowed():
-    """pending → cancelled is a valid transition"""
+def test_cancelled_from_pending_requires_authorized_service():
+    """The generic state machine cannot cancel a pending Order."""
     from app.modules.m7_conversion.service import _VALID_TRANSITIONS
-    assert "cancelled" in _VALID_TRANSITIONS["pending"]
+    assert "cancelled" not in _VALID_TRANSITIONS["pending"]
 
 
 def test_delivered_is_terminal():
@@ -535,7 +535,7 @@ async def _seed_historical_order(
 
 @pytest.mark.asyncio
 async def test_order_state_machine_valid_sequence():
-    """Full valid sequence: pending → confirmed → preparing → delivering → delivered"""
+    """Payment/Stock gates reject early transitions; later states still advance."""
     async with AsyncSessionLocal() as session:
         phone, lead_id = await _seed_customer_lead(session)
         order = await _seed_historical_order(
@@ -548,14 +548,14 @@ async def test_order_state_machine_valid_sequence():
         )
         order_id = order.order_id
 
-        # pending → confirmed
-        order = await update_order_status(session, order_id=order_id, new_status="confirmed")
-        assert order.status == "confirmed"
-        assert order.confirmed_at is not None
-
-        # confirmed → preparing
-        order = await update_order_status(session, order_id=order_id, new_status="preparing")
-        assert order.status == "preparing"
+        with pytest.raises(InvalidOrderTransition, match="verified Payment"):
+            await update_order_status(session, order_id=order_id, new_status="confirmed")
+        order.status = "confirmed"  # Historical state fixture, not a Payment workflow.
+        await session.commit()
+        with pytest.raises(InvalidOrderTransition, match="Stock allocation"):
+            await update_order_status(session, order_id=order_id, new_status="preparing")
+        order.status = "preparing"  # Historical state fixture for later transitions.
+        await session.commit()
 
         # preparing → delivering
         order = await update_order_status(session, order_id=order_id, new_status="delivering")
@@ -624,9 +624,8 @@ async def test_order_terminal_state_no_transition():
             delivery_zone="Gombe",
             payment_method=PaymentMethod.orange_money,
         )
-        # Fast-track to delivered via valid steps
-        for status in ("confirmed", "preparing", "delivering", "delivered"):
-            order = await update_order_status(session, order_id=order.order_id, new_status=status)
+        order.status = "delivered"  # Historical terminal-state fixture.
+        await session.commit()
 
         with pytest.raises(InvalidOrderTransition):
             await update_order_status(session, order_id=order.order_id, new_status="cancelled")
@@ -650,8 +649,8 @@ async def test_credit_club_points_formula():
             payment_method=PaymentMethod.orange_money,
         )
 
-        # Advance to confirmed (required for points crediting)
-        order = await update_order_status(session, order_id=order.order_id, new_status="confirmed")
+        order.status = "confirmed"  # Historical state fixture for points-only test.
+        await session.commit()
 
         points = await credit_club_points(session, order_id=order.order_id)
         assert points == 15
@@ -670,7 +669,8 @@ async def test_credit_club_points_idempotent():
             delivery_zone="Kinshasa",
             payment_method=PaymentMethod.airtel_money,
         )
-        order = await update_order_status(session, order_id=order.order_id, new_status="confirmed")
+        order.status = "confirmed"  # Historical state fixture for points-only test.
+        await session.commit()
 
         first = await credit_club_points(session, order_id=order.order_id)
         second = await credit_club_points(session, order_id=order.order_id)
@@ -762,7 +762,7 @@ def test_m7_payment_initiated_all_methods_french():
 
 @pytest.mark.asyncio
 async def test_process_callback_success_confirms_order():
-    """Successful payment callback → payment=completed, order=confirmed"""
+    """A claimed success cannot settle without authoritative verification."""
     from app.modules.m7_conversion.service import process_callback
     from unittest.mock import patch, AsyncMock
 
@@ -797,14 +797,15 @@ async def test_process_callback_success_confirms_order():
             idempotency_key="idem-cb-001",
         )
 
-    assert callback_result["payment_status"] == "completed"
-    assert callback_result["order_status"] == "confirmed"
-    assert callback_result["idempotent"] is False
+    assert callback_result == {"status": "blocked", "reason": "payment_verification_unavailable"}
+    async with AsyncSessionLocal() as session:
+        assert (await session.get(Order, order.order_id)).status == "pending"
+        assert (await session.get(Payment, payment.payment_id)).status == "pending"
 
 
 @pytest.mark.asyncio
 async def test_process_callback_idempotent():
-    """Same callback twice → second returns idempotent=True"""
+    """Replayed unverified callbacks remain blocked without writes."""
     from app.modules.m7_conversion.service import process_callback
     from unittest.mock import patch
 
@@ -844,14 +845,15 @@ async def test_process_callback_idempotent():
             idempotency_key="idem-cb-002",
         )
 
-    assert first["idempotent"] is False
-    assert second["idempotent"] is True
-    assert second["payment_status"] == "completed"
+    assert first == second == {"status": "blocked", "reason": "payment_verification_unavailable"}
+    async with AsyncSessionLocal() as session:
+        assert (await session.get(Order, order.order_id)).status == "pending"
+        assert (await session.get(Payment, payment.payment_id)).status == "pending"
 
 
 @pytest.mark.asyncio
 async def test_process_callback_failed_payment():
-    """Failed payment callback → payment=failed, order stays pending"""
+    """Unverified failure cannot alter Payment either."""
     from app.modules.m7_conversion.service import process_callback
     from unittest.mock import patch
 
@@ -884,8 +886,10 @@ async def test_process_callback_failed_payment():
             idempotency_key="idem-cb-003",
         )
 
-    assert callback_result["payment_status"] == "failed"
-    assert callback_result["order_status"] == "pending"
+    assert callback_result == {"status": "blocked", "reason": "payment_verification_unavailable"}
+    async with AsyncSessionLocal() as session:
+        assert (await session.get(Order, order.order_id)).status == "pending"
+        assert (await session.get(Payment, payment.payment_id)).status == "pending"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

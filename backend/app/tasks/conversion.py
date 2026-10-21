@@ -2,8 +2,7 @@
 app/tasks/conversion.py — Celery tasks for M6 Conversion Engine.
 
 Handles:
-  - Initiating Mobile Money payment requests (Orange / Airtel / M-Pesa)
-  - Processing payment callbacks (idempotent — webhook may replay)
+  - Fail-closed legacy Mobile Money initiation and callback tasks
   - Blackout queue recovery: drain and re-process messages queued during outages
   - Order status updates
 """
@@ -39,13 +38,13 @@ def initiate_payment(
     idempotency_key: str,
 ) -> dict:
     """
-    Call the MobileMoneyAdapter to initiate payment for *order_id*.
+    Reject initiation until a DRC provider contract and send gate exist.
 
     Args:
         order_id:         UUID of the Order row.
         idempotency_key:  Client-supplied key — safe to retry.
 
-    Returns dict with {"status": "pending" | "failed", "payment_id": str}.
+    Returns a blocked result without adapter or network use.
     """
     from app.modules.m7_conversion import service as conversion_svc  # type: ignore[import]
 
@@ -84,10 +83,7 @@ def process_payment_callback(
     timestamp: str,
 ) -> dict:
     """
-    Handle a Mobile Money provider callback.
-
-    Idempotent: re-delivering the same callback (same transaction_id + provider)
-    returns the existing result without double-processing.
+    Reject generic callbacks without provider settlement verification.
 
     Args:
         transaction_id:   Provider-assigned payment reference.
@@ -134,37 +130,19 @@ async def _process_payment_callback(
     timestamp: str,
 ) -> dict:
     """
-    Core logic for processing payment callback.
-
-    Delegates to service.process_callback() which handles all DB logic correctly.
+    Legacy callback compatibility task; the service fails closed.
 
     Returns:
         Dict with processing status
     """
     from app.modules.m7_conversion import service as conversion_svc  # type: ignore[import]
 
-    # Use the correct service implementation instead of broken inline logic
     result = await conversion_svc.process_callback(
         payment_id=transaction_id,
         provider=provider,
         status=status,
         idempotency_key=f"{transaction_id}:{provider}",
     )
-
-    # Send customer notification via WhatsApp
-    from app.adapters.messaging import get_messaging_adapter
-
-    messaging = get_messaging_adapter()
-    if status == "success":
-        await messaging.send_message(
-            phone=customer_phone,
-            text=f"Paiement reçu ✅ Commande #{order_id[:8]} confirmée. Livraison en cours!",
-        )
-    else:
-        await messaging.send_message(
-            phone=customer_phone,
-            text=f"Paiement échoué ❌ Commande #{order_id[:8]}. Veuillez réessayer.",
-        )
 
     return result
 
@@ -232,10 +210,7 @@ def update_order_status(
     idempotency_key: str,
 ) -> dict:
     """
-    Advance an order through the state machine.
-
-    Valid transitions:
-      pending → confirmed → preparing → delivering → delivered
+    Advance a legacy Order only when the service can prove prerequisites.
 
     Cancellation is rejected by the service and must use the authorized Order
     cancellation workflow.
@@ -256,6 +231,9 @@ def update_order_status(
         order = run_async(_run())
         log.info("conversion.status_update.done", order_id=order_id, status=order.status)
         return {"order_id": order_id, "status": order.status}
+    except conversion_svc.PaymentPrerequisiteUnavailable as exc:
+        log.warning("conversion.status_update.blocked", order_id=order_id, reason=str(exc))
+        return {"order_id": order_id, "status": "blocked", "reason": str(exc)}
     except Exception as exc:
         log.error("conversion.status_update.error", order_id=order_id, error=str(exc))
         raise self.retry(exc=exc, countdown=2 ** self.request.retries * 30)
