@@ -191,6 +191,15 @@ def get_exchange_rate_api_adapter(
     )
 
 
+def _require_automatic_fx_configuration(settings: Settings) -> None:
+    if not settings.automatic_fx_refresh_enabled or not settings.exchange_rate_api_key.strip():
+        raise _error(
+            409,
+            "AUTOMATIC_EXCHANGE_RATE_NOT_CONFIGURED",
+            "Automatic FX requires explicit provider approval and configuration.",
+        )
+
+
 @router.get("/products", response_model=ProductListResponse)
 async def list_products(
     response: Response,
@@ -768,6 +777,8 @@ async def set_exchange_rate_authority(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ExchangeRateAuthorityResponse:
     _write_guard(request, settings)
+    if body.mode == "AUTOMATIC":
+        _require_automatic_fx_configuration(settings)
     authority = await _commit_or_raise(
         db,
         pricing_service.set_exchange_rate_authority_mode(
@@ -795,6 +806,7 @@ async def refresh_automatic_exchange_rate(
     provider: Annotated[ExchangeRateAPIAdapter, Depends(get_exchange_rate_api_adapter)],
 ) -> ExchangeRateResponse:
     _write_guard(request, settings)
+    _require_automatic_fx_configuration(settings)
     rate = await _commit_or_raise(
         db,
         pricing_service.refresh_automatic_exchange_rate(

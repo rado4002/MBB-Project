@@ -121,6 +121,7 @@ class Settings(BaseSettings):
         default=_read_secret("exchange_rate_api_key", ""),
         repr=False,
     )
+    automatic_fx_refresh_enabled: bool = False  # explicit gate for provider reads and mode activation
     exchange_rate_api_timeout_s: int = Field(default=10, ge=1, le=30)
 
     # ── CRM — Airtable ────────────────────────────────────────────────────────

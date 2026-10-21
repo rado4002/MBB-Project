@@ -56,6 +56,8 @@ def _settings() -> Settings:
         browser_session_activity_coalesce_seconds=0,
         operator_audit_retention_days=365,
         operator_security_metadata_retention_days=90,
+        automatic_fx_refresh_enabled=True,
+        exchange_rate_api_key="offline-test-only",
     )
 
 
