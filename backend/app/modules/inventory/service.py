@@ -8,11 +8,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.catalog import Product, SellableItem
 from app.models.inventory import InventoryRecord
+from app.models.stock_allocation import StockAllocation
 from app.models.stock_movement import StockMovement
 from app.modules.commerce_admin import (
     CommerceAdminContext,
@@ -23,10 +24,12 @@ from app.operator_identity.audit import append_operator_audit_event
 InventoryStatus = Literal["available", "out_of_stock", "unknown"]
 
 
-def availability_from_quantity(quantity: int | None) -> InventoryStatus:
+def availability_from_quantity(
+    quantity: int | None, allocated_quantity: int = 0
+) -> InventoryStatus:
     if quantity is None:
         return "unknown"
-    return "out_of_stock" if quantity == 0 else "available"
+    return "out_of_stock" if quantity - allocated_quantity <= 0 else "available"
 
 
 class InventoryNotFound(Exception):
@@ -39,6 +42,21 @@ class InventoryConflict(Exception):
 
 class InventoryQuantityUnknown(Exception):
     """A receipt cannot be applied without a verified starting count."""
+
+
+class InventoryAllocationConflict(InventoryConflict):
+    """A requested change conflicts with committed allocation integrity."""
+
+
+class InventoryInsufficientStock(Exception):
+    """The full requested quantity is not currently available."""
+
+    def __init__(self, *, available: int, requested: int) -> None:
+        self.available = available
+        self.requested = requested
+        super().__init__(
+            f"insufficient available stock: requested {requested}, available {available}"
+        )
 
 
 @dataclass(frozen=True)
@@ -109,8 +127,19 @@ async def _persist_change(
 ) -> tuple[InventoryRecord, StockMovement]:
     previous_quantity = None if record is None else record.quantity
     previous_updated_at = None if record is None else record.updated_at
-    previous_status = "not_configured" if record is None else availability_from_quantity(record.quantity)
-    status = availability_from_quantity(quantity)
+    allocated_quantity = 0 if record is None else record.allocated_quantity
+    if quantity is None and allocated_quantity != 0:
+        raise InventoryAllocationConflict(
+            "allocated Stock cannot be changed to an unknown physical count"
+        )
+    if quantity is not None and quantity < allocated_quantity:
+        raise InventoryAllocationConflict(
+            "physical Stock cannot be adjusted below its allocated quantity"
+        )
+    previous_status = "not_configured" if record is None else availability_from_quantity(
+        record.quantity, allocated_quantity
+    )
+    status = availability_from_quantity(quantity, allocated_quantity)
     if previous_updated_at is not None and event_time <= previous_updated_at:
         event_time = previous_updated_at + timedelta(microseconds=1)
     if record is None:
@@ -188,11 +217,82 @@ async def get_inventory_status(
     return InventoryStatusResult(
         sellable_item_id=sellable_item_id,
         configured=record.quantity is not None,
-        status=availability_from_quantity(record.quantity),
+        status=availability_from_quantity(record.quantity, record.allocated_quantity),
         quantity=record.quantity,
         inventory_id=record.inventory_id,
         updated_at=record.updated_at,
     )
+
+
+async def get_order_stock_allocation(
+    session: AsyncSession, *, order_id: uuid.UUID
+) -> StockAllocation | None:
+    return await session.get(StockAllocation, order_id)
+
+
+async def allocate_order_quantity(
+    session: AsyncSession,
+    *,
+    order_id: uuid.UUID,
+    sellable_item_id: uuid.UUID,
+    quantity: int,
+) -> StockAllocation:
+    """Atomically reserve one Order's full quantity from available Stock.
+
+    The caller owns and must hold the Order row lock. Inventory serializes all
+    quantity writers by locking the Sellable Item parent before its quantity.
+    """
+    if type(quantity) is not int or not 1 <= quantity <= 2147483647:
+        raise ValueError("allocation quantity must be a positive integer")
+    record = await _lock_item_and_inventory(session, sellable_item_id)
+    existing = await get_order_stock_allocation(session, order_id=order_id)
+    if existing is not None:
+        if (
+            existing.sellable_item_id != sellable_item_id
+            or existing.quantity != quantity
+        ):
+            raise InventoryAllocationConflict(
+                "Order is already bound to another Stock allocation"
+            )
+        return existing
+    if record is None or record.quantity is None:
+        raise InventoryQuantityUnknown(
+            "a verified available quantity is required before allocation"
+        )
+    available_quantity = record.quantity - record.allocated_quantity
+    if available_quantity < quantity:
+        raise InventoryInsufficientStock(
+            available=available_quantity, requested=quantity
+        )
+
+    before_available_quantity = available_quantity
+    after_available_quantity = before_available_quantity - quantity
+    allocated_at = await session.scalar(
+        select(
+            func.greatest(
+                func.clock_timestamp(),
+                record.updated_at + timedelta(microseconds=1),
+            )
+        )
+    )
+    if allocated_at is None:
+        raise InventoryConflict("allocation timestamp is unavailable")
+    record.allocated_quantity += quantity
+    record.status = availability_from_quantity(
+        record.quantity, record.allocated_quantity
+    )
+    record.updated_at = allocated_at
+    allocation = StockAllocation(
+        order_id=order_id,
+        sellable_item_id=sellable_item_id,
+        quantity=quantity,
+        before_available_quantity=before_available_quantity,
+        after_available_quantity=after_available_quantity,
+        allocated_at=allocated_at,
+    )
+    session.add(allocation)
+    await session.flush()
+    return allocation
 
 
 async def set_inventory_quantity(

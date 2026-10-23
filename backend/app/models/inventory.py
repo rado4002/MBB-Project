@@ -23,6 +23,12 @@ class InventoryRecord(Base):
             name="chk_inventory_statuses_status",
         ),
         CheckConstraint("quantity IS NULL OR quantity >= 0", name="chk_inventory_statuses_quantity"),
+        CheckConstraint(
+            "allocated_quantity >= 0 AND "
+            "((quantity IS NULL AND allocated_quantity = 0) OR "
+            "(quantity IS NOT NULL AND allocated_quantity <= quantity))",
+            name="chk_inventory_statuses_allocated_quantity",
+        ),
         {"schema": "mbb"},
     )
 
@@ -40,6 +46,9 @@ class InventoryRecord(Base):
     )
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    allocated_quantity: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
     )

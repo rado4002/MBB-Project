@@ -55,15 +55,18 @@ def _inventory(status: str) -> SimpleNamespace:
     return SimpleNamespace(
         inventory_id=uuid.uuid4(),
         quantity={"available": 5, "out_of_stock": 0, "unknown": None}[status],
+        allocated_quantity=0,
         updated_at=datetime(2026, 8, 13, tzinfo=timezone.utc),
     )
 
 
-def test_availability_is_derived_only_from_quantity() -> None:
+def test_availability_is_derived_from_physical_and_allocated_quantity() -> None:
     assert availability_from_quantity(None) == "unknown"
     assert availability_from_quantity(0) == "out_of_stock"
     assert availability_from_quantity(1) == "available"
     assert availability_from_quantity(250) == "available"
+    assert availability_from_quantity(5, 5) == "out_of_stock"
+    assert availability_from_quantity(5, 4) == "available"
 
 
 @pytest.mark.asyncio

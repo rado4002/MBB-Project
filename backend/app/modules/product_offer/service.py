@@ -97,7 +97,10 @@ def _offer_interpretation(
     if price is None:
         return "price_unavailable", False, "price_unavailable"
 
-    inventory_status = availability_from_quantity(None if inventory is None else inventory.quantity)
+    inventory_status = availability_from_quantity(
+        None if inventory is None else inventory.quantity,
+        0 if inventory is None else inventory.allocated_quantity,
+    )
     if inventory_status == "out_of_stock":
         return "out_of_stock", False, "inventory_out_of_stock"
     if inventory_status == "unknown":
@@ -155,7 +158,10 @@ def _compose_offer(row: ProductOfferRow, *, read_at: datetime) -> ProductOfferRe
         cdf_quote_status=cdf_quote_status,
         cdf_quote_unavailable_reason=cdf_quote_unavailable_reason,
         derived_cdf_quote=derived_cdf_quote,
-        inventory_status=availability_from_quantity(None if inventory is None else inventory.quantity),
+        inventory_status=availability_from_quantity(
+            None if inventory is None else inventory.quantity,
+            0 if inventory is None else inventory.allocated_quantity,
+        ),
         inventory_configured=inventory is not None and inventory.quantity is not None,
         inventory_updated_at=None if inventory is None else inventory.updated_at,
         offer_status=offer_status,
@@ -221,7 +227,10 @@ def _status_rank_expression():
             4,
         ),
         (SellableItemPrice.price_id.is_(None), 3),
-        (InventoryRecord.quantity == 0, 2),
+        (
+            InventoryRecord.quantity - InventoryRecord.allocated_quantity == 0,
+            2,
+        ),
         (InventoryRecord.quantity.is_(None), 1),
         else_=0,
     )
@@ -315,7 +324,7 @@ async def search_product_offers(
             Product.active.is_(True),
             SellableItem.active.is_(True),
             SellableItemPrice.price_id.is_not(None),
-            InventoryRecord.quantity > 0,
+            InventoryRecord.quantity - InventoryRecord.allocated_quantity > 0,
         )
     elif search_mode == "include_unavailable":
         statement = statement.where(

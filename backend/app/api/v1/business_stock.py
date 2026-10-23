@@ -91,7 +91,10 @@ async def search_stock(
             sku=item.sku,
             product_active=product.active,
             variant_active=item.active,
-            availability=availability_from_quantity(None if inventory is None else inventory.quantity),
+            availability=availability_from_quantity(
+                None if inventory is None else inventory.quantity,
+                0 if inventory is None else inventory.allocated_quantity,
+            ),
             primary_media=(None if (image := images.get(item.sellable_item_id)) is None else {
                 "asset_url": image.asset_url, "alt_text": image.alt_text,
             }),

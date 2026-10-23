@@ -32,6 +32,7 @@ from app.models.catalog import Product, ProductMedia, SellableItem
 from app.models.pricing import ExchangeRate, ExchangeRateAuthority, SellableItemPrice
 from app.models.inventory import InventoryRecord
 from app.models.stock_movement import StockMovement
+from app.models.stock_allocation import StockAllocation
 
 __all__ = [
     "Customer",
@@ -65,4 +66,5 @@ __all__ = [
     "ExchangeRateAuthority",
     "InventoryRecord",
     "StockMovement",
+    "StockAllocation",
 ]
