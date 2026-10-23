@@ -30,6 +30,16 @@ export interface OrderLineSnapshot {
 export interface OrderDetail extends OrderQueueItem {
   items: OrderLineSnapshot[]
   delivery_zone: string
+  preparation: OrderPreparationEligibility
+}
+
+export interface OrderPreparationEligibility {
+  eligible: boolean
+  order_state: 'confirmed' | 'not_confirmed'
+  payment_state: 'verified' | 'missing' | 'not_verified' | 'mismatch' | 'unknown'
+  allocation_state: 'full' | 'missing' | 'mismatch' | 'unsupported'
+  required_quantity: number | null
+  allocated_quantity: number | null
 }
 
 export type OrderCancellationReason =
@@ -41,6 +51,13 @@ export type OrderCancellationReason =
 export interface OrderCancellationResponse {
   order_id: string
   status: 'cancelled'
+  updated_at: string
+  replayed: boolean
+}
+
+export interface OrderPreparationResponse {
+  order_id: string
+  status: 'preparing'
   updated_at: string
   replayed: boolean
 }
@@ -67,6 +84,19 @@ export function createBusinessOrdersClient(onSessionExpired: () => void) {
     ) => requestJson<OrderCancellationResponse>(`${base}/${encodeURIComponent(id)}/cancel`, {
       method: 'POST',
       body: { reason_code: reasonCode, expected_updated_at: expectedUpdatedAt },
+      idempotencyKey,
+      csrfToken,
+      signal,
+    }, onSessionExpired),
+    prepare: (
+      id: string,
+      expectedUpdatedAt: string,
+      idempotencyKey: string,
+      csrfToken: string,
+      signal: AbortSignal,
+    ) => requestJson<OrderPreparationResponse>(`${base}/${encodeURIComponent(id)}/prepare`, {
+      method: 'POST',
+      body: { expected_updated_at: expectedUpdatedAt },
       idempotencyKey,
       csrfToken,
       signal,

@@ -38,6 +38,25 @@ function readError(failure: unknown) {
   return errorMessage(error)
 }
 
+function paymentReadiness(state: OrderDetail['preparation']['payment_state']) {
+  if (state === 'verified') return 'Verified completed Payment matches the accepted Order'
+  if (state === 'missing') return 'No Payment recorded'
+  if (state === 'not_verified') return 'Payment is not verified as completed'
+  if (state === 'mismatch') return 'Completed Payment does not match the accepted amount or currency'
+  return 'Unavailable for this Order shape'
+}
+
+function allocationReadiness(preparation: OrderDetail['preparation']) {
+  if (preparation.allocation_state === 'full') {
+    return `Full allocation · ${preparation.allocated_quantity} of ${preparation.required_quantity}`
+  }
+  if (preparation.allocation_state === 'missing') return 'No durable Stock allocation recorded'
+  if (preparation.allocation_state === 'mismatch') {
+    return `Allocation does not match · ${preparation.allocated_quantity ?? 0} of ${preparation.required_quantity}`
+  }
+  return 'Unsupported Order line structure'
+}
+
 export function OrdersPage() {
   const auth = useAuth()
   const { orderId } = useParams()
@@ -57,11 +76,18 @@ export function OrdersPage() {
   const [cancelBusy, setCancelBusy] = useState(false)
   const [cancelError, setCancelError] = useState<string | null>(null)
   const [cancelNotice, setCancelNotice] = useState<string | null>(null)
+  const [prepareOpen, setPrepareOpen] = useState(false)
+  const [prepareBusy, setPrepareBusy] = useState(false)
+  const [prepareError, setPrepareError] = useState<string | null>(null)
+  const [prepareNotice, setPrepareNotice] = useState<string | null>(null)
   const [reauth, setReauth] = useState(false)
   const [password, setPassword] = useState('')
   const attempt = useRef<{ signature: string; key: string } | null>(null)
   const cancellation = useRef<AbortController | null>(null)
+  const prepareAttempt = useRef<{ signature: string; key: string } | null>(null)
+  const preparation = useRef<AbortController | null>(null)
   const canCancel = auth.session?.capabilities.includes('order.cancel') ?? false
+  const canPrepare = auth.session?.capabilities.includes('order.prepare') ?? false
 
   const loadList = useCallback(async (signal: AbortSignal) => {
     setList(null); setListError(null)
@@ -76,8 +102,10 @@ export function OrdersPage() {
   const loadDetail = useCallback(async (signal: AbortSignal) => {
     setDetail(null); setDetailError(null)
     cancellation.current?.abort(); attempt.current = null
+    preparation.current?.abort(); prepareAttempt.current = null
     setCancelOpen(false); setCancelReason(''); setCancelError(null); setCancelNotice(null)
     setReauth(false); setPassword(''); setCancelBusy(false)
+    setPrepareOpen(false); setPrepareBusy(false); setPrepareError(null); setPrepareNotice(null)
     if (!orderId) return
     try {
       const result = await client.detail(orderId, signal)
@@ -174,6 +202,77 @@ export function OrdersPage() {
     }
   }
 
+  const submitPreparation = async (event: FormEvent) => {
+    event.preventDefault()
+    if (!detail || !canPrepare || !detail.preparation.eligible || prepareBusy) return
+    const signature = `${detail.order_id}:${detail.updated_at}`
+    if (!prepareAttempt.current || prepareAttempt.current.signature !== signature) {
+      prepareAttempt.current = { signature, key: crypto.randomUUID() }
+    }
+    const controller = new AbortController()
+    preparation.current?.abort(); preparation.current = controller
+    setPrepareBusy(true); setPrepareError(null); setPrepareNotice(null)
+    try {
+      const csrf = await auth.getCsrfForMutation()
+      if (controller.signal.aborted) return
+      const result = await client.prepare(
+        detail.order_id, detail.updated_at, prepareAttempt.current.key, csrf, controller.signal,
+      )
+      if (controller.signal.aborted) return
+      setDetail({
+        ...detail,
+        status: result.status,
+        updated_at: result.updated_at,
+        preparation: { ...detail.preparation, eligible: false, order_state: 'not_confirmed' },
+      })
+      setList((current) => current ? {
+        ...current,
+        items: current.items.map((item) => item.order_id === result.order_id
+          ? { ...item, status: result.status, updated_at: result.updated_at }
+          : item),
+      } : current)
+      setPrepareOpen(false)
+      setPrepareNotice(result.replayed
+        ? 'Preparation was already recorded. Showing the current Order.'
+        : 'Order preparation started.')
+      prepareAttempt.current = null
+    } catch (failure) {
+      if (controller.signal.aborted) return
+      const apiError = asApiError(failure)
+      if (
+        apiError.code === 'ORDER_STALE' || apiError.code === 'ORDER_STATE_CONFLICT'
+        || apiError.code === 'ORDER_PAYMENT_REQUIRED' || apiError.code === 'ORDER_ALLOCATION_REQUIRED'
+        || apiError.code === 'ORDER_PREPARATION_UNSUPPORTED'
+      ) {
+        prepareAttempt.current = null
+        setPrepareOpen(false)
+        try {
+          const fresh = await client.detail(detail.order_id, controller.signal)
+          if (!controller.signal.aborted) setDetail(fresh)
+        } catch {
+          // Keep the reviewed snapshot and the actionable conflict message.
+        }
+        if (!controller.signal.aborted) {
+          setPrepareError(apiError.code === 'ORDER_STALE' || apiError.code === 'ORDER_STATE_CONFLICT'
+            ? 'The Order changed since review. Its current preparation state is shown.'
+            : apiError.code === 'ORDER_PAYMENT_REQUIRED'
+              ? 'Preparation is blocked because matching verified Payment evidence is no longer available.'
+              : apiError.code === 'ORDER_ALLOCATION_REQUIRED'
+                ? 'Preparation is blocked because the full Stock allocation is no longer available.'
+                : 'This Order is not supported by the preparation workflow.')
+          void loadList(new AbortController().signal)
+        }
+      } else if (apiError.status === 0 || apiError.status >= 500) {
+        setPrepareError('The result could not be confirmed. Retry the same preparation request.')
+      } else {
+        prepareAttempt.current = null
+        setPrepareError(errorMessage(apiError))
+      }
+    } finally {
+      if (!controller.signal.aborted) setPrepareBusy(false)
+    }
+  }
+
   const listPath = `/business/orders?${new URLSearchParams({ status: status ?? 'all', offset: String(offset) })}`
   const chooseStatus = (value: string) => setParams({ status: value, offset: '0' })
   const chooseOffset = (value: number) => setParams({ status: status ?? 'all', offset: String(value) })
@@ -209,6 +308,8 @@ export function OrdersPage() {
         {detailError && <div role="alert"><p>{detailError}</p><button className="button button--secondary" onClick={() => void loadDetail(new AbortController().signal)}>Retry</button></div>}
         {cancelError && <p role="alert">{cancelError}</p>}
         {cancelNotice && <p role="status">{cancelNotice}</p>}
+        {prepareError && <p role="alert">{prepareError}</p>}
+        {prepareNotice && <p role="status">{prepareNotice}</p>}
         {detail && <>
           <h2>Order {detail.order_id.slice(0, 8)}</h2>
           <dl className="orders-facts">
@@ -217,6 +318,29 @@ export function OrdersPage() {
             <div><dt>Created</dt><dd><time dateTime={detail.created_at}>{formatDate(detail.created_at)}</time></dd></div>
             <div><dt>Recorded zone</dt><dd>{detail.delivery_zone}</dd></div>
           </dl>
+          <section className="orders-preparation" aria-labelledby="order-preparation-heading">
+            <h3 id="order-preparation-heading">Preparation readiness</h3>
+            <dl className="orders-facts">
+              <div><dt>Payment verification</dt><dd>{paymentReadiness(detail.preparation.payment_state)}</dd></div>
+              <div><dt>Stock allocation</dt><dd>{allocationReadiness(detail.preparation)}</dd></div>
+              <div><dt>Eligibility</dt><dd>{detail.preparation.eligible ? 'Ready to prepare' : 'Not eligible'}</dd></div>
+            </dl>
+            {canPrepare && detail.preparation.eligible && !prepareOpen && <div className="orders-actions">
+              <button className="button button--primary" onClick={() => {
+                setPrepareOpen(true); setPrepareError(null); setPrepareNotice(null)
+              }}>Prepare Order</button>
+            </div>}
+            {canPrepare && detail.preparation.eligible && prepareOpen && <form className="orders-preparation-confirm" onSubmit={(event) => void submitPreparation(event)}>
+              <h3>Begin Order preparation?</h3>
+              <p>This changes the Order from confirmed to preparing. It does not dispatch, deliver, or settle Payment.</p>
+              <div className="orders-actions">
+                <button className="button button--primary" disabled={prepareBusy}>Confirm preparation</button>
+                <button type="button" className="button button--secondary" disabled={prepareBusy} onClick={() => {
+                  setPrepareOpen(false); setPrepareError(null); prepareAttempt.current = null
+                }}>Keep confirmed</button>
+              </div>
+            </form>}
+          </section>
           <h3>Accepted commercial snapshot</h3>
           <ul className="orders-lines">{detail.items.map((line, index) => <li key={`${line.product_id}-${index}`}>
             <strong>{line.product_name ?? `Product ${line.product_id}`}{line.model_label ? ` · ${line.model_label}` : ''}</strong>

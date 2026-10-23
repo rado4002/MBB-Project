@@ -1,4 +1,4 @@
-"""Browser-session, read-only Orders queue and accepted-snapshot detail."""
+"""Browser-session Orders workspace and guarded operational actions."""
 
 from __future__ import annotations
 
@@ -45,6 +45,19 @@ from app.modules.m7_conversion.order_cancellation import (
     OrderCancellationUnavailable,
     OrderNotFound,
     cancel_pending_order,
+)
+from app.modules.m7_conversion.order_fulfillment import (
+    OrderPreparationAllocationRequired,
+    OrderPreparationForbidden,
+    OrderPreparationIdempotencyConflict,
+    OrderPreparationNotFound,
+    OrderPreparationPaymentRequired,
+    OrderPreparationStale,
+    OrderPreparationStateConflict,
+    OrderPreparationUnavailable,
+    UnsupportedOrderPreparation,
+    get_order_preparation_eligibility,
+    prepare_confirmed_order,
 )
 from app.request_ids import normalize_or_generate_request_id
 from app.schemas.common import OrderStatus
@@ -96,9 +109,19 @@ class OrderQueueResponse(StrictOrderRead):
     has_more: bool
 
 
+class OrderPreparationEligibilityResponse(StrictOrderRead):
+    eligible: bool
+    order_state: str
+    payment_state: str
+    allocation_state: str
+    required_quantity: int | None
+    allocated_quantity: int | None
+
+
 class OrderDetail(OrderQueueItem):
     items: list[OrderLineSnapshot]
     delivery_zone: str
+    preparation: OrderPreparationEligibilityResponse
 
 
 class OrderCancellationReason(str, Enum):
@@ -121,6 +144,24 @@ class OrderCancellationRequest(StrictOrderRead):
 
 
 class OrderCancellationResponse(StrictOrderRead):
+    order_id: UUID
+    status: OrderStatus
+    updated_at: datetime
+    replayed: bool
+
+
+class OrderPreparationRequest(StrictOrderRead):
+    expected_updated_at: datetime
+
+    @field_validator("expected_updated_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("expected_updated_at must include a timezone")
+        return value
+
+
+class OrderPreparationResponse(StrictOrderRead):
     order_id: UUID
     status: OrderStatus
     updated_at: datetime
@@ -228,10 +269,12 @@ async def get_order(
         links = await _verified_conversations(db, [order_id])
         lines = _lines(order)
         summary = _summary(order, lines, links.get(order_id))
+        eligibility = await get_order_preparation_eligibility(db, order=order)
         detail = OrderDetail(
             **summary.model_dump(),
             items=lines,
             delivery_zone=order.delivery_zone,
+            preparation=OrderPreparationEligibilityResponse(**eligibility.__dict__),
         )
     except (SQLAlchemyError, OSError, ValidationError, TypeError, ValueError) as exc:
         raise _unavailable() from exc
@@ -312,6 +355,66 @@ async def cancel_order(
         raise _unavailable() from exc
     response.headers["Cache-Control"] = "no-store"
     return OrderCancellationResponse(
+        order_id=result.order.order_id,
+        status=OrderStatus(result.order.status),
+        updated_at=result.order.updated_at,
+        replayed=result.replayed,
+    )
+
+
+@router.post("/{order_id}/prepare", response_model=OrderPreparationResponse)
+async def prepare_order(
+    order_id: UUID,
+    body: OrderPreparationRequest,
+    request: Request,
+    response: Response,
+    principal: Annotated[BrowserPrincipal, Depends(require_capability("order.prepare"))],
+    _csrf: Annotated[BrowserPrincipal, Depends(require_csrf)],
+    settings: Annotated[Settings, Depends(get_browser_settings)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[
+        UUID4, Header(alias="Idempotency-Key", include_in_schema=True)
+    ],
+) -> OrderPreparationResponse:
+    validate_state_changing_request(request, settings)
+    request_id = normalize_or_generate_request_id(
+        getattr(request.state, "request_id", None)
+        or request.headers.get("X-Request-ID")
+    )
+    try:
+        result = await prepare_confirmed_order(
+            db,
+            order_id=order_id,
+            expected_updated_at=body.expected_updated_at,
+            idempotency_key=idempotency_key,
+            actor_kind="human",
+            actor_account_id=principal.account.account_id,
+            actor_display_name=principal.account.display_name,
+            actor_role=principal.account.role,
+            request_id=request_id,
+            source_network_fingerprint=principal.session.record.ip_prefix_fingerprint,
+            user_agent_fingerprint=principal.session.record.user_agent_fingerprint,
+        )
+    except OrderPreparationNotFound as exc:
+        raise BrowserAuthError(status_code=404, code="ORDER_NOT_FOUND", message="Order not found.") from exc
+    except OrderPreparationForbidden as exc:
+        raise BrowserAuthError(status_code=403, code="FORBIDDEN", message="Administrator permission is required.") from exc
+    except OrderPreparationIdempotencyConflict as exc:
+        raise BrowserAuthError(status_code=409, code="IDEMPOTENCY_CONFLICT", message="The idempotency key was already used for another request.") from exc
+    except OrderPreparationStale as exc:
+        raise BrowserAuthError(status_code=409, code="ORDER_STALE", message="The Order changed since it was reviewed.") from exc
+    except OrderPreparationStateConflict as exc:
+        raise BrowserAuthError(status_code=409, code="ORDER_STATE_CONFLICT", message="Only a confirmed Order can begin preparation.") from exc
+    except OrderPreparationPaymentRequired as exc:
+        raise BrowserAuthError(status_code=409, code="ORDER_PAYMENT_REQUIRED", message="A matching verified completed Payment is required.") from exc
+    except OrderPreparationAllocationRequired as exc:
+        raise BrowserAuthError(status_code=409, code="ORDER_ALLOCATION_REQUIRED", message="A full durable Stock allocation is required.") from exc
+    except UnsupportedOrderPreparation as exc:
+        raise BrowserAuthError(status_code=409, code="ORDER_PREPARATION_UNSUPPORTED", message="This Order cannot be prepared in this workflow.") from exc
+    except OrderPreparationUnavailable as exc:
+        raise _unavailable() from exc
+    response.headers["Cache-Control"] = "no-store"
+    return OrderPreparationResponse(
         order_id=result.order.order_id,
         status=OrderStatus(result.order.status),
         updated_at=result.order.updated_at,

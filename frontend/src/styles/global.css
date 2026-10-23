@@ -775,6 +775,10 @@ h2 { font-size: 1.125rem; }
 .orders-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-top: var(--space-5); }
 .orders-cancellation { display: grid; gap: var(--space-3); margin-top: var(--space-5); padding: var(--space-4); border: 1px solid #dce3ee; border-radius: .5rem; background: #f8fafc; }
 .orders-cancellation h3, .orders-cancellation p { margin: 0; }
+.orders-preparation { margin-top: var(--space-6); }
+.orders-preparation > h3 { margin-bottom: var(--space-3); }
+.orders-preparation-confirm { display: grid; gap: var(--space-3); margin-top: var(--space-4); padding: var(--space-4); border: 1px solid #b8c7dd; border-radius: .5rem; background: #f8fafc; }
+.orders-preparation-confirm h3, .orders-preparation-confirm p { margin: 0; }
 .orders-cancellation select { min-height: 2.75rem; padding: var(--space-2); border: 1px solid #dce3ee; border-radius: .5rem; background: #fff; color: #0f172a; font: inherit; }
 .orders-detail h2 { margin: var(--space-2) 0 var(--space-5); }
 .orders-detail h3 { margin-top: var(--space-6); }

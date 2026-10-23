@@ -68,6 +68,16 @@ class OrderPreparationResult:
     replayed: bool
 
 
+@dataclass(frozen=True)
+class OrderPreparationEligibility:
+    eligible: bool
+    order_state: str
+    payment_state: str
+    allocation_state: str
+    required_quantity: int | None
+    allocated_quantity: int | None
+
+
 def _digest(purpose: bytes, value: bytes) -> str:
     return hashlib.sha256(purpose + value).hexdigest()
 
@@ -118,6 +128,74 @@ def _single_line(order: Order) -> tuple[uuid.UUID, int]:
     return sellable_item_id, quantity
 
 
+def _payment_state(payment: Payment | None, order: Order) -> str:
+    if payment is None:
+        return "missing"
+    if payment.status != "completed" or payment.completed_at is None:
+        return "not_verified"
+    if payment.amount != order.total_amount or payment.currency != order.currency:
+        return "mismatch"
+    return "verified"
+
+
+def _allocation_state(
+    allocation: StockAllocation | None,
+    *,
+    sellable_item_id: uuid.UUID,
+    quantity: int,
+) -> str:
+    if allocation is None:
+        return "missing"
+    if (
+        allocation.sellable_item_id != sellable_item_id
+        or allocation.quantity != quantity
+    ):
+        return "mismatch"
+    return "full"
+
+
+async def get_order_preparation_eligibility(
+    session: AsyncSession,
+    *,
+    order: Order,
+) -> OrderPreparationEligibility:
+    """Project preparation evidence; the write path rechecks it under locks."""
+    payment = await session.scalar(select(Payment).where(Payment.order_id == order.order_id))
+    payment_state = _payment_state(payment, order)
+    order_state = "confirmed" if order.status == "confirmed" else "not_confirmed"
+    try:
+        sellable_item_id, quantity = _single_line(order)
+    except UnsupportedOrderPreparation:
+        return OrderPreparationEligibility(
+            eligible=False,
+            order_state=order_state,
+            payment_state=payment_state,
+            allocation_state="unsupported",
+            required_quantity=None,
+            allocated_quantity=None,
+        )
+    allocation = await session.scalar(
+        select(StockAllocation).where(StockAllocation.order_id == order.order_id)
+    )
+    allocation_state = _allocation_state(
+        allocation,
+        sellable_item_id=sellable_item_id,
+        quantity=quantity,
+    )
+    return OrderPreparationEligibility(
+        eligible=(
+            order_state == "confirmed"
+            and payment_state == "verified"
+            and allocation_state == "full"
+        ),
+        order_state=order_state,
+        payment_state=payment_state,
+        allocation_state=allocation_state,
+        required_quantity=quantity,
+        allocated_quantity=allocation.quantity if allocation is not None else None,
+    )
+
+
 async def prepare_confirmed_order(
     session: AsyncSession,
     *,
@@ -129,6 +207,8 @@ async def prepare_confirmed_order(
     request_id: str | None = None,
     actor_account_id: uuid.UUID | None = None,
     actor_role: str | None = None,
+    source_network_fingerprint: str | None = None,
+    user_agent_fingerprint: str | None = None,
 ) -> OrderPreparationResult:
     """Atomically prepare one fully paid and allocated confirmed Order."""
     if actor_kind == "human":
@@ -198,13 +278,7 @@ async def prepare_confirmed_order(
         payment = await session.scalar(
             select(Payment).where(Payment.order_id == order_id).with_for_update()
         )
-        if (
-            payment is None
-            or payment.status != "completed"
-            or payment.completed_at is None
-            or payment.amount != order.total_amount
-            or payment.currency != order.currency
-        ):
+        if _payment_state(payment, order) != "verified":
             raise OrderPreparationPaymentRequired(
                 "matching verified completed Payment is required"
             )
@@ -214,11 +288,11 @@ async def prepare_confirmed_order(
             .where(StockAllocation.order_id == order_id)
             .with_for_update()
         )
-        if (
-            allocation is None
-            or allocation.sellable_item_id != sellable_item_id
-            or allocation.quantity != quantity
-        ):
+        if _allocation_state(
+            allocation,
+            sellable_item_id=sellable_item_id,
+            quantity=quantity,
+        ) != "full":
             raise OrderPreparationAllocationRequired(
                 "full durable Stock allocation is required"
             )
@@ -259,6 +333,8 @@ async def prepare_confirmed_order(
                 "allocation_quantity": allocation.quantity,
                 "sellable_item_id": str(allocation.sellable_item_id),
             },
+            source_network_fingerprint=source_network_fingerprint,
+            user_agent_fingerprint=user_agent_fingerprint,
             occurred_at=occurred_at,
         )
         await session.commit()

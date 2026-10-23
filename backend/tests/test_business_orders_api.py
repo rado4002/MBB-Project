@@ -3,7 +3,7 @@
 import asyncio
 import os
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import httpx
@@ -20,8 +20,10 @@ from app.models.operator_account import OperatorAccount
 from app.models.order import Order
 from app.models.order_draft import OrderDraft
 from app.models.payment import Payment
+from app.models.stock_allocation import StockAllocation
 from app.models.pricing import SellableItemPrice
 from app.modules.m7_conversion import order_cancellation, service as conversion_service
+from app.modules.m7_conversion.order_allocation import allocate_paid_order_stock
 from app.tasks import celery_app
 from test_commerce_admin_api import (
     ADMIN_PASSWORD,
@@ -95,6 +97,27 @@ def _cancel_body(updated_at, reason: str = "customer_requested") -> dict[str, st
     }
 
 
+async def _make_ready_for_preparation(factory, order_id: uuid.UUID):
+    async with factory() as db:
+        order = await db.get(Order, order_id)
+        order.status = "confirmed"
+        order.confirmed_at = datetime.now(timezone.utc)
+        db.add(
+            Payment(
+                order_id=order_id,
+                method="cash",
+                amount=order.total_amount,
+                currency=order.currency,
+                status="completed",
+                completed_at=datetime.now(timezone.utc),
+            )
+        )
+        await db.flush()
+        await allocate_paid_order_stock(db, order_id=order_id)
+        await db.commit()
+        return order.updated_at
+
+
 @pytest.mark.asyncio
 async def test_authoritative_snapshot_survives_current_commercial_changes(
     accepted_order,
@@ -131,6 +154,14 @@ async def test_authoritative_snapshot_survives_current_commercial_changes(
         assert body["items"] == original_items
         assert body["items"][0]["price_id"] == str(seeded.price_id)
         assert body["items"][0]["sellable_item_id"] == str(seeded.sellable_item_id)
+        assert body["preparation"] == {
+            "eligible": False,
+            "order_state": "not_confirmed",
+            "payment_state": "missing",
+            "allocation_state": "missing",
+            "required_quantity": 2,
+            "allocated_quantity": None,
+        }
         assert Decimal(body["items"][0]["usd_to_cdf_rate"]) == Decimal("2800.000000")
         assert (await client.get("/api/v1/business/orders?status=delivered")).json()[
             "items"
@@ -147,6 +178,101 @@ async def test_authoritative_snapshot_survives_current_commercial_changes(
         assert stored.updated_at == original_updated_at and stored.status == "pending"
         assert await db.scalar(select(func.count()).select_from(Payment)) == 0
         assert (await db.get(InventoryRecord, seeded.inventory_id)).quantity == 0
+
+
+@pytest.mark.asyncio
+async def test_administrator_prepares_ready_order_with_browser_guard_and_audit(
+    accepted_order,
+):
+    transport, factory, _seeded, order_id = accepted_order
+    reviewed_at = await _make_ready_for_preparation(factory, order_id)
+    key = uuid.uuid4()
+    url = f"/api/v1/business/orders/{order_id}/prepare"
+
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        csrf = await _login(client, "commerce.admin", ADMIN_PASSWORD)
+        detail = await client.get(f"/api/v1/business/orders/{order_id}")
+        assert detail.status_code == 200
+        assert detail.json()["preparation"] == {
+            "eligible": True,
+            "order_state": "confirmed",
+            "payment_state": "verified",
+            "allocation_state": "full",
+            "required_quantity": 2,
+            "allocated_quantity": 2,
+        }
+        first = await client.post(
+            url,
+            headers={**_headers(csrf), "Idempotency-Key": str(key)},
+            json={"expected_updated_at": reviewed_at.isoformat()},
+        )
+        assert first.status_code == 200
+        assert first.headers["cache-control"] == "no-store"
+        assert first.json()["status"] == "preparing"
+        assert first.json()["replayed"] is False
+
+        replay = await client.post(
+            url,
+            headers={**_headers(csrf), "Idempotency-Key": str(key)},
+            json={"expected_updated_at": reviewed_at.isoformat()},
+        )
+        assert replay.status_code == 200 and replay.json()["replayed"] is True
+
+    async with factory() as db:
+        order = await db.get(Order, order_id)
+        audit = await db.scalar(
+            select(OperatorAuditEvent).where(
+                OperatorAuditEvent.action == "order.prepared",
+                OperatorAuditEvent.target_id == str(order_id),
+            )
+        )
+        allocation = await db.get(StockAllocation, order_id)
+        assert order.status == "preparing" and order.updated_at > reviewed_at
+        assert allocation.quantity == 2
+        assert audit.actor_kind == "human"
+        assert audit.actor_display_name == "Commerce.Admin"
+        assert audit.effective_role == "administrator"
+
+
+@pytest.mark.asyncio
+async def test_preparation_browser_permissions_and_stale_write_are_enforced(
+    accepted_order,
+):
+    transport, factory, _seeded, order_id = accepted_order
+    reviewed_at = await _make_ready_for_preparation(factory, order_id)
+    url = f"/api/v1/business/orders/{order_id}/prepare"
+    body = {"expected_updated_at": reviewed_at.isoformat()}
+
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        operator_csrf = await _login(client, "commerce.operator", OPERATOR_PASSWORD)
+        forbidden = await client.post(
+            url,
+            headers={**_headers(operator_csrf), "Idempotency-Key": str(uuid.uuid4())},
+            json=body,
+        )
+        assert forbidden.status_code == 403
+
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        admin_csrf = await _login(client, "commerce.admin", ADMIN_PASSWORD)
+        stale = await client.post(
+            url,
+            headers={**_headers(admin_csrf), "Idempotency-Key": str(uuid.uuid4())},
+            json={
+                "expected_updated_at": (
+                    reviewed_at - timedelta(microseconds=1)
+                ).isoformat()
+            },
+        )
+        assert stale.status_code == 409
+        assert stale.json()["error"]["code"] == "ORDER_STALE"
+
+    async with factory() as db:
+        assert (await db.get(Order, order_id)).status == "confirmed"
+        assert await db.scalar(
+            select(func.count())
+            .select_from(OperatorAuditEvent)
+            .where(OperatorAuditEvent.action == "order.prepared")
+        ) == 0
 
 
 @pytest.mark.asyncio

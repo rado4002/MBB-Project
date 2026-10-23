@@ -32,9 +32,12 @@ from app.models.inventory import InventoryRecord
 from app.models.order import Order
 from app.models.order_draft import OrderDraft
 from app.models.payment import Payment
+from app.models.operator_audit import OperatorAuditEvent
+from app.models.stock_allocation import StockAllocation
 from app.models.stock_movement import StockMovement
 from app.modules.m1_gateway.turn_recovery import add_pending_turn, claim_turn, mark_outcome_committed
 from app.modules.product_offer.service import get_product_offer
+from app.modules.m7_conversion.order_allocation import allocate_paid_order_stock
 from app.operator_identity.passwords import hash_password
 from app.tasks import m1
 from test_order_drafts_postgres import _block_m1_external_effects
@@ -170,6 +173,53 @@ async def _database_state(sku: str) -> dict:
         async with async_session_factory() as session:
             row = (await session.execute(statement, {"sku": sku})).mappings().one()
             return dict(row)
+    finally:
+        await engine.dispose()
+
+
+async def _make_order_ready_for_preparation(order_id: uuid.UUID) -> datetime:
+    try:
+        async with async_session_factory() as session:
+            order = await session.get(Order, order_id)
+            assert order is not None and order.status == "pending"
+            order.status = "confirmed"
+            order.confirmed_at = datetime.now(UTC)
+            session.add(
+                Payment(
+                    order_id=order_id,
+                    method="cash",
+                    amount=order.total_amount,
+                    currency=order.currency,
+                    status="completed",
+                    completed_at=datetime.now(UTC),
+                )
+            )
+            await session.flush()
+            await allocate_paid_order_stock(session, order_id=order_id)
+            await session.commit()
+            return order.updated_at
+    finally:
+        await engine.dispose()
+
+
+async def _assert_prepared_order(order_id: uuid.UUID, reviewed_at: datetime) -> None:
+    try:
+        async with async_session_factory() as session:
+            order = await session.get(Order, order_id)
+            payment = await session.scalar(select(Payment).where(Payment.order_id == order_id))
+            allocation = await session.get(StockAllocation, order_id)
+            audit = await session.scalar(
+                select(OperatorAuditEvent).where(
+                    OperatorAuditEvent.action == "order.prepared",
+                    OperatorAuditEvent.target_id == str(order_id),
+                )
+            )
+            assert order is not None and order.status == "preparing"
+            assert order.updated_at > reviewed_at
+            assert payment is not None and payment.status == "completed"
+            assert allocation is not None and allocation.quantity == 2
+            assert audit is not None and audit.actor_kind == "human"
+            assert audit.actor_display_name == "E2E Administrator"
     finally:
         await engine.dispose()
 
@@ -661,3 +711,40 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
         assert not detail.get_by_role("button").count()
         context.close()
         browser.close()
+
+    reviewed_at = asyncio.run(_make_order_ready_for_preparation(order_id))
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        admin_context = browser.new_context(ignore_https_errors=True)
+        admin_page = admin_context.new_page()
+        _login(admin_page, "e2e.admin", ADMIN_PASSWORD)
+        admin_page.goto(
+            f"{BASE_URL}/business/orders/{order_id}?status=confirmed&offset=0",
+            wait_until="domcontentloaded",
+        )
+        admin_detail = admin_page.get_by_role("region", name="Order detail")
+        expect(admin_detail.get_by_text("Ready to prepare")).to_be_visible(timeout=15_000)
+        expect(
+            admin_detail.get_by_text("Verified completed Payment matches the accepted Order")
+        ).to_be_visible()
+        expect(admin_detail.get_by_text("Full allocation · 2 of 2")).to_be_visible()
+        admin_page.set_viewport_size({"width": 390, "height": 844})
+        assert admin_page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        expect(admin_detail.get_by_role("button", name="Prepare Order")).to_be_visible()
+        admin_page.set_viewport_size({"width": 1280, "height": 900})
+        admin_detail.get_by_role("button", name="Prepare Order").click()
+        expect(admin_detail.get_by_text("Begin Order preparation?")).to_be_visible()
+        expect(
+            admin_detail.get_by_text(
+                "This changes the Order from confirmed to preparing. "
+                "It does not dispatch, deliver, or settle Payment."
+            )
+        ).to_be_visible()
+        admin_detail.get_by_role("button", name="Confirm preparation").click()
+        expect(admin_detail.get_by_text("Order preparation started.")).to_be_visible(
+            timeout=15_000
+        )
+        expect(admin_detail.get_by_text("preparing", exact=True)).to_be_visible()
+        admin_context.close()
+        browser.close()
+    asyncio.run(_assert_prepared_order(order_id, reviewed_at))

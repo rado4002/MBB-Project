@@ -49,6 +49,7 @@ ROLE_CAPABILITIES = {
         "product_offer.read",
         "order.read",
         "order.cancel",
+        "order.prepare",
     },
     "operator": BASE_CAPABILITIES
     | {
