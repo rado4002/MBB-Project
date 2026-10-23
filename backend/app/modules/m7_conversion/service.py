@@ -4,14 +4,14 @@ app/modules/m7_conversion/service.py — Core M7 Conversion Engine.
 Entry points:
   initiate_payment()    — Fail-closed legacy payment task
   process_callback()    — Fail-closed legacy callback task
-  update_order_status() — Advance order through state machine
+  update_order_status() — Guard preparation and advance later fulfillment states
   credit_club_points()  — Auto-credit loyalty points on confirmed order
   sync_order_to_crm()   — Push order to Airtable CRM (idempotent)
 
-The generic path cannot establish verified Payment or Stock allocation.
-It rejects pending → confirmed and confirmed → preparing until their
-authoritative domain contracts exist. Cancellation belongs to
-order_cancellation.cancel_pending_order().
+The generic path cannot establish verified Payment or Stock allocation. It
+rejects pending → confirmed and delegates confirmed → preparing to the guarded
+fulfillment contract only when callers supply concurrency and audit evidence.
+Cancellation belongs to order_cancellation.cancel_pending_order().
 """
 from __future__ import annotations
 
@@ -54,12 +54,20 @@ async def update_order_status(
     *,
     order_id: uuid.UUID,
     new_status: str,
+    expected_updated_at: datetime | None = None,
+    idempotency_key: uuid.UUID | None = None,
+    actor_kind: str | None = None,
+    actor_display_name: str | None = None,
+    request_id: str | None = None,
+    actor_account_id: uuid.UUID | None = None,
+    actor_role: str | None = None,
 ) -> Order:
     """
     Advance an already prepared Order through the remaining legacy states.
 
-    Payment confirmation and preparation fail closed until their authoritative
-    prerequisites can be proved. Later transitions retain row locking.
+    Payment confirmation fails closed. Preparation delegates to the guarded
+    contract only when authoritative prerequisites can be proved. Later
+    transitions retain row locking.
 
     Cancellation is deliberately excluded. It requires the authorized,
     payment-aware, audited Order cancellation service.
@@ -76,9 +84,31 @@ async def update_order_status(
             "Order confirmation requires an authoritative verified Payment."
         )
     if new_status == "preparing":
-        raise PaymentPrerequisiteUnavailable(
-            "Order preparation requires a durable full Stock allocation."
+        if (
+            expected_updated_at is None
+            or idempotency_key is None
+            or actor_kind is None
+            or actor_display_name is None
+        ):
+            raise PaymentPrerequisiteUnavailable(
+                "Order preparation requires verified Payment and full Stock allocation proof."
+            )
+        from app.modules.m7_conversion.order_fulfillment import (
+            prepare_confirmed_order,
         )
+
+        result = await prepare_confirmed_order(
+            session,
+            order_id=order_id,
+            expected_updated_at=expected_updated_at,
+            idempotency_key=idempotency_key,
+            actor_kind=actor_kind,
+            actor_display_name=actor_display_name,
+            request_id=request_id,
+            actor_account_id=actor_account_id,
+            actor_role=actor_role,
+        )
+        return result.order
 
     result = await session.execute(
         select(Order)

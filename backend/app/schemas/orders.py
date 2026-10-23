@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, UUID4, field_validator
 
 from app.schemas.common import OrderStatus, PaymentMethod
 
@@ -39,6 +39,15 @@ class OrderStatusUpdate(BaseModel):
         )
     )
     note: str | None = Field(None, max_length=500)
+    expected_updated_at: datetime | None = None
+    idempotency_key: UUID4 | None = None
+
+    @field_validator("expected_updated_at")
+    @classmethod
+    def require_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("expected_updated_at must include a timezone")
+        return value
 
 
 class OrderStatusResponse(BaseModel):

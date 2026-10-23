@@ -208,6 +208,7 @@ def update_order_status(
     order_id: str,
     new_status: str,
     idempotency_key: str,
+    expected_updated_at: str | None = None,
 ) -> dict:
     """
     Advance a legacy Order only when the service can prove prerequisites.
@@ -216,22 +217,47 @@ def update_order_status(
     cancellation workflow.
     """
     import uuid as _uuid
+    from datetime import datetime as _datetime
 
     from app.modules.m7_conversion import service as conversion_svc  # type: ignore[import]
+    from app.modules.m7_conversion.order_fulfillment import (
+        OrderPreparationError,
+        OrderPreparationUnavailable,
+    )
 
     log.info("conversion.status_update.start", order_id=order_id, new_status=new_status)
     try:
         async def _run():
             from app.database import AsyncSessionLocal
             async with AsyncSessionLocal() as session:
+                parsed_updated_at = None
+                parsed_key = None
+                if expected_updated_at is not None:
+                    parsed_updated_at = _datetime.fromisoformat(
+                        expected_updated_at.replace("Z", "+00:00")
+                    )
+                    parsed_key = _uuid.UUID(idempotency_key)
                 return await conversion_svc.update_order_status(
-                    session, order_id=_uuid.UUID(order_id), new_status=new_status
+                    session,
+                    order_id=_uuid.UUID(order_id),
+                    new_status=new_status,
+                    expected_updated_at=parsed_updated_at,
+                    idempotency_key=parsed_key,
+                    actor_kind="service",
+                    actor_display_name="celery:conversion.update_order_status",
+                    request_id=getattr(self.request, "id", None),
                 )
 
         order = run_async(_run())
         log.info("conversion.status_update.done", order_id=order_id, status=order.status)
         return {"order_id": order_id, "status": order.status}
     except conversion_svc.PaymentPrerequisiteUnavailable as exc:
+        log.warning("conversion.status_update.blocked", order_id=order_id, reason=str(exc))
+        return {"order_id": order_id, "status": "blocked", "reason": str(exc)}
+    except OrderPreparationUnavailable as exc:
+        log.error("conversion.status_update.error", order_id=order_id, error=str(exc))
+        raise self.retry(exc=exc, countdown=2 ** self.request.retries * 30)
+    except OrderPreparationError as exc:
         log.warning("conversion.status_update.blocked", order_id=order_id, reason=str(exc))
         return {"order_id": order_id, "status": "blocked", "reason": str(exc)}
     except Exception as exc:

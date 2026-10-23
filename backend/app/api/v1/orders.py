@@ -8,12 +8,21 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 
-from app.api.deps import DBSession, get_current_role
+from app.api.deps import DBSession, get_current_role, get_request_id, require_role
 from app.models.order import Order
 from app.models.payment import Payment
 from app.modules.m7_conversion.service import (
     update_order_status as svc_update_order_status,
     InvalidOrderTransition,
+)
+from app.modules.m7_conversion.order_fulfillment import (
+    OrderPreparationAllocationRequired,
+    OrderPreparationError,
+    OrderPreparationIdempotencyConflict,
+    OrderPreparationNotFound,
+    OrderPreparationPaymentRequired,
+    OrderPreparationStale,
+    OrderPreparationUnavailable,
 )
 from app.schemas.common import PaymentMethod
 from app.schemas.orders import (
@@ -48,7 +57,7 @@ async def get_order(order_id: uuid.UUID, db: DBSession):
 @router.put(
     "/{order_id}/status",
     response_model=OrderStatusResponse,
-    dependencies=[Depends(get_current_role)],
+    dependencies=[Depends(require_role("admin", "orchestrator"))],
     responses={
         409: {
             "description": (
@@ -63,11 +72,37 @@ async def update_order_status(
     order_id: uuid.UUID,
     body: OrderStatusUpdate,
     db: DBSession,
+    current_role: str = Depends(get_current_role),
+    request_id: str = Depends(get_request_id),
 ):
     """Advance eligible legacy fulfillment; payment and Stock gates fail closed."""
     log.info("order.status.update", order_id=str(order_id), status=body.status)
     try:
-        order = await svc_update_order_status(db, order_id=order_id, new_status=body.status.value)
+        order = await svc_update_order_status(
+            db,
+            order_id=order_id,
+            new_status=body.status.value,
+            expected_updated_at=body.expected_updated_at,
+            idempotency_key=body.idempotency_key,
+            actor_kind="service",
+            actor_display_name=f"authenticated-order-api:{current_role}",
+            request_id=request_id,
+        )
+    except OrderPreparationNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found") from exc
+    except OrderPreparationUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Order preparation is temporarily unavailable",
+        ) from exc
+    except (
+        OrderPreparationAllocationRequired,
+        OrderPreparationIdempotencyConflict,
+        OrderPreparationPaymentRequired,
+        OrderPreparationStale,
+        OrderPreparationError,
+    ) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except InvalidOrderTransition as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ValueError as exc:
