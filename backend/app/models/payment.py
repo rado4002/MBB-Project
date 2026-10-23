@@ -22,12 +22,26 @@ class Payment(Base):
             name="chk_payment_status",
         ),
         CheckConstraint("amount > 0", name="chk_payment_amount"),
+        CheckConstraint(
+            "(intent_idempotency_key_digest IS NULL "
+            "AND intent_request_fingerprint IS NULL AND customer_id IS NULL) OR "
+            "(intent_idempotency_key_digest ~ '^[0-9a-f]{64}$' "
+            "AND intent_request_fingerprint ~ '^[0-9a-f]{64}$' "
+            "AND customer_id IS NOT NULL)",
+            name="chk_payment_intent_evidence",
+        ),
         Index("idx_payments_order", "order_id"),
         Index("idx_payments_status", "status"),
         Index(
             "idx_payments_provider",
             "provider_transaction_id",
             postgresql_where=text("provider_transaction_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_payments_intent_idempotency",
+            "intent_idempotency_key_digest",
+            unique=True,
+            postgresql_where=text("intent_idempotency_key_digest IS NOT NULL"),
         ),
         {"schema": "mbb"},
     )
@@ -42,6 +56,21 @@ class Payment(Base):
         ForeignKey("mbb.orders.order_id", ondelete="CASCADE"),
         nullable=False,
         unique=True,  # One payment per order
+    )
+    customer_id: Mapped[str | None] = mapped_column(
+        String(20),
+        ForeignKey(
+            "mbb.customers.phone_number",
+            name="fk_payments_customer_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    intent_idempotency_key_digest: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    intent_request_fingerprint: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
     )
     method: Mapped[str] = mapped_column(String(20), nullable=False)
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
