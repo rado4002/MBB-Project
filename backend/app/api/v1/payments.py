@@ -5,7 +5,7 @@ Legacy generic callback is disabled pending provider-specific verification.
 from fastapi import APIRouter, HTTPException, Request, status
 
 from app.api.deps import DBSession
-from app.schemas.payments import PaymentCallback, PaymentCallbackResponse
+from app.schemas.payments import PaymentCallbackResponse
 
 router = APIRouter(prefix="/payments", tags=["M7 — Payment"])
 
