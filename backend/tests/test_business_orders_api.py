@@ -272,6 +272,43 @@ async def test_administrator_cancels_once_with_atomic_audit_and_no_side_effects(
 
 
 @pytest.mark.asyncio
+async def test_cancellation_updated_at_advances_from_locked_future_value(
+    accepted_order,
+):
+    transport, factory, _seeded, order_id = accepted_order
+    async with factory() as db:
+        order = await db.get(Order, order_id)
+        reviewed_at = await db.scalar(
+            select(func.clock_timestamp() + timedelta(days=1))
+        )
+        assert reviewed_at is not None
+        order.updated_at = reviewed_at
+        await db.commit()
+
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        csrf = await _login(client, "commerce.admin", ADMIN_PASSWORD)
+        csrf = await _reauthenticate(client, csrf)
+        response = await client.post(
+            f"/api/v1/business/orders/{order_id}/cancel",
+            headers=_cancel_headers(csrf, uuid.uuid4()),
+            json=_cancel_body(reviewed_at),
+        )
+
+    assert response.status_code == 200
+    async with factory() as db:
+        stored = await db.get(Order, order_id)
+        audit = await db.scalar(
+            select(OperatorAuditEvent).where(
+                OperatorAuditEvent.action == "order.cancelled",
+                OperatorAuditEvent.target_id == str(order_id),
+            )
+        )
+        assert stored.status == "cancelled"
+        assert stored.updated_at == reviewed_at + timedelta(microseconds=1)
+        assert audit is not None and audit.occurred_at == stored.updated_at
+
+
+@pytest.mark.asyncio
 async def test_cancellation_requires_administrator_and_csrf(
     accepted_order,
 ):

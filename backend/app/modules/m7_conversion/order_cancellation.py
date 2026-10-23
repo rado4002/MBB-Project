@@ -7,7 +7,7 @@ import hmac
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
@@ -65,10 +65,6 @@ class OrderCancellationUnavailable(OrderCancellationError):
 class OrderCancellationResult:
     order: Order
     replayed: bool
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _digest(secret: str, purpose: bytes, value: bytes) -> str:
@@ -183,7 +179,10 @@ async def cancel_pending_order(
             return OrderCancellationResult(order=order, replayed=True)
 
         order = await session.scalar(
-            select(Order).where(Order.order_id == order_id).with_for_update()
+            select(Order)
+            .where(Order.order_id == order_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         if order is None:
             raise OrderNotFound
@@ -200,7 +199,18 @@ async def cancel_pending_order(
         if payment is not None:
             raise OrderCancellationPaymentConflict
 
-        now = _utcnow()
+        now = await session.scalar(
+            select(
+                func.greatest(
+                    func.clock_timestamp(),
+                    order.updated_at + timedelta(microseconds=1),
+                )
+            )
+        )
+        if now is None:
+            raise OrderCancellationUnavailable(
+                "Order cancellation timestamp is unavailable"
+            )
         order.status = "cancelled"
         order.updated_at = now
         await append_operator_audit_event(
