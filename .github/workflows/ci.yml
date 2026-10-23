@@ -219,7 +219,7 @@ jobs:
 
   products-stock-inbox-e2e:
     name: Products → Stock → Inbox E2E
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [frontend, lint-and-validate]
 
     steps:
