@@ -4,7 +4,7 @@ app/modules/m7_conversion/service.py — Core M7 Conversion Engine.
 Entry points:
   initiate_payment()    — Fail-closed legacy payment task
   process_callback()    — Fail-closed legacy callback task
-  update_order_status() — Guard preparation and advance later fulfillment states
+  update_order_status() — Guard preparation and reject protected lifecycle bypasses
   credit_club_points()  — Auto-credit loyalty points on confirmed order
   sync_order_to_crm()   — Push order to Airtable CRM (idempotent)
 
@@ -35,8 +35,8 @@ _POINTS_PER_CDF = 1 / 1000
 _VALID_TRANSITIONS: dict[str, set[str]] = {
     "pending": set(),
     "confirmed": set(),
-    "preparing": {"delivering"},
-    "delivering": {"delivered"},
+    "preparing": set(),
+    "delivering": set(),
     "delivered": set(),        # Terminal state
     "cancelled": set(),        # Terminal state
 }
@@ -47,6 +47,14 @@ class InvalidOrderTransition(ValueError):
 
 class PaymentPrerequisiteUnavailable(InvalidOrderTransition):
     """Payment/Stock proof cannot yet be established by this legacy path."""
+
+
+class DispatchPrerequisiteUnavailable(PaymentPrerequisiteUnavailable):
+    """Dispatch must use the guarded human handoff workflow."""
+
+
+class DeliveryConfirmationUnavailable(PaymentPrerequisiteUnavailable):
+    """Customer delivery confirmation is not implemented."""
 
 
 async def update_order_status(
@@ -63,11 +71,11 @@ async def update_order_status(
     actor_role: str | None = None,
 ) -> Order:
     """
-    Advance an already prepared Order through the remaining legacy states.
+    Delegate preparation and reject all other protected lifecycle writes.
 
     Payment confirmation fails closed. Preparation delegates to the guarded
-    contract only when authoritative prerequisites can be proved. Later
-    transitions retain row locking.
+    contract only when authoritative prerequisites can be proved. Dispatch and
+    delivery confirmation fail closed so legacy callers cannot bypass evidence.
 
     Cancellation is deliberately excluded. It requires the authorized,
     payment-aware, audited Order cancellation service.
@@ -109,6 +117,14 @@ async def update_order_status(
             actor_role=actor_role,
         )
         return result.order
+    if new_status == "delivering":
+        raise DispatchPrerequisiteUnavailable(
+            "Order dispatch requires the authorized handoff and Stock consumption workflow."
+        )
+    if new_status == "delivered":
+        raise DeliveryConfirmationUnavailable(
+            "Customer delivery confirmation requires a separate guarded workflow."
+        )
 
     result = await session.execute(
         select(Order)

@@ -29,6 +29,11 @@ const detail = {
     eligible: false, order_state: 'not_confirmed', payment_state: 'missing',
     allocation_state: 'missing', required_quantity: 2, allocated_quantity: null,
   },
+  dispatch: {
+    eligible: false, order_state: 'not_preparing', payment_state: 'missing',
+    allocation_state: 'missing', inventory_state: 'conflict',
+    delivery_method_state: 'supported', required_quantity: 2,
+  },
 }
 
 function setup(conversation: string | null = conversationId, role: 'operator' | 'administrator' = 'operator') {
@@ -56,8 +61,8 @@ describe('read-only Business Orders', () => {
     expect(within(region).getByText('CDF 309,400.00')).toBeInTheDocument()
     expect(within(region).getByText(/Accepted USD price USD 55.25/)).toBeInTheDocument()
     expect(within(region).getByText(/Accepted USD\/CDF rate 2800/)).toBeInTheDocument()
-    expect(within(region).getByText('No Payment recorded')).toBeInTheDocument()
-    expect(within(region).getByText('No durable Stock allocation recorded')).toBeInTheDocument()
+    expect(within(region).getAllByText('No Payment recorded')).toHaveLength(2)
+    expect(within(region).getAllByText('No durable Stock allocation recorded')).toHaveLength(2)
     expect(within(region).getByRole('link', { name: 'Open associated Inbox conversation' })).toHaveAttribute('href', `/inbox/${conversationId}`)
     expect(within(region).queryByRole('button')).not.toBeInTheDocument()
   })
@@ -175,6 +180,57 @@ describe('read-only Business Orders', () => {
     expect(await within(region).findByText(/Preparation was already recorded/)).toBeInTheDocument()
     expect(keys).toHaveLength(2)
     expect(keys[0]).toBe(keys[1])
+  })
+
+  it('lets an authorized Administrator attest and dispatch allocated Stock', async () => {
+    const submissions: { body: unknown; key: string | null; csrf: string | null }[] = []
+    setup(conversationId, 'administrator')
+    server.use(
+      http.get(`${base}/${orderId}`, () => HttpResponse.json({
+        ...detail,
+        status: 'preparing',
+        preparation: { ...detail.preparation, payment_state: 'verified' },
+        dispatch: {
+          eligible: true, order_state: 'preparing', payment_state: 'verified',
+          allocation_state: 'full_unconsumed', inventory_state: 'ready',
+          delivery_method_state: 'supported', required_quantity: 2,
+        },
+      })),
+      http.get('/api/v1/auth/csrf', () => HttpResponse.json({ csrf_token: 'dispatch-csrf', expires_at_epoch: 2_000_000_000 })),
+      http.post(`${base}/${orderId}/dispatch`, async ({ request }) => {
+        submissions.push({
+          body: await request.json(),
+          key: request.headers.get('Idempotency-Key'),
+          csrf: request.headers.get('X-CSRF-Token'),
+        })
+        return HttpResponse.json({
+          order_id: orderId, status: 'delivering',
+          updated_at: '2026-10-01T12:03:00Z', replayed: false,
+        })
+      }),
+    )
+    const user = userEvent.setup()
+    renderApp(`/business/orders/${orderId}`)
+    const region = await screen.findByRole('region', { name: 'Order detail' })
+    expect(await within(region).findByText('Ready to dispatch')).toBeInTheDocument()
+    expect(within(region).getByText('Full allocation ready · quantity 2')).toBeInTheDocument()
+    await user.click(within(region).getByRole('button', { name: 'Dispatch Order' }))
+    await user.type(within(region).getByLabelText('Internal handoff reference'), 'MBB-HANDOFF-1042')
+    await user.click(within(region).getByLabelText(/full allocated quantity physically left/))
+    await expectAccessible(document.body)
+    await user.click(within(region).getByRole('button', { name: 'Confirm dispatch' }))
+    expect(await within(region).findByText('Order dispatched. Customer delivery is not confirmed.')).toBeInTheDocument()
+    expect(within(region).getByText('delivering')).toBeInTheDocument()
+    expect(within(region).getByText('Allocation consumed at dispatch')).toBeInTheDocument()
+    expect(submissions[0]).toMatchObject({
+      body: {
+        expected_updated_at: detail.updated_at,
+        handoff_reference: 'MBB-HANDOFF-1042',
+        attested: true,
+      },
+      csrf: 'dispatch-csrf',
+    })
+    expect(submissions[0]?.key).toMatch(/^[0-9a-f-]{36}$/)
   })
 
   it('lets an Administrator cancel a reviewed pending Order with a structured reason', async () => {

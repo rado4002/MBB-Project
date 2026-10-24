@@ -33,7 +33,7 @@ class OrderStatusUpdate(BaseModel):
         description=(
             "Requested fulfillment status. The generic service blocks confirmed "
             "without verified Payment and preparing without full Stock allocation, "
-            "and rejects cancelled; "
+            "and rejects delivering, delivered and cancelled; "
             "use the authorized Order cancellation endpoint: "
             "POST /api/v1/business/orders/{order_id}/cancel."
         )

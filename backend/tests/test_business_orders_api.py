@@ -21,9 +21,11 @@ from app.models.order import Order
 from app.models.order_draft import OrderDraft
 from app.models.payment import Payment
 from app.models.stock_allocation import StockAllocation
+from app.models.stock_movement import StockMovement
 from app.models.pricing import SellableItemPrice
 from app.modules.m7_conversion import order_cancellation, service as conversion_service
 from app.modules.m7_conversion.order_allocation import allocate_paid_order_stock
+from app.modules.m7_conversion.order_fulfillment import prepare_confirmed_order
 from app.tasks import celery_app
 from test_commerce_admin_api import (
     ADMIN_PASSWORD,
@@ -118,6 +120,20 @@ async def _make_ready_for_preparation(factory, order_id: uuid.UUID):
         return order.updated_at
 
 
+async def _make_prepared_for_dispatch(factory, order_id: uuid.UUID):
+    reviewed_at = await _make_ready_for_preparation(factory, order_id)
+    async with factory() as db:
+        result = await prepare_confirmed_order(
+            db,
+            order_id=order_id,
+            expected_updated_at=reviewed_at,
+            idempotency_key=uuid.uuid4(),
+            actor_kind="service",
+            actor_display_name="business-orders-dispatch-fixture",
+        )
+        return result.order.updated_at
+
+
 @pytest.mark.asyncio
 async def test_authoritative_snapshot_survives_current_commercial_changes(
     accepted_order,
@@ -161,6 +177,15 @@ async def test_authoritative_snapshot_survives_current_commercial_changes(
             "allocation_state": "missing",
             "required_quantity": 2,
             "allocated_quantity": None,
+        }
+        assert body["dispatch"] == {
+            "eligible": False,
+            "order_state": "not_preparing",
+            "payment_state": "missing",
+            "allocation_state": "missing",
+            "inventory_state": "conflict",
+            "delivery_method_state": "supported",
+            "required_quantity": 2,
         }
         assert Decimal(body["items"][0]["usd_to_cdf_rate"]) == Decimal("2800.000000")
         assert (await client.get("/api/v1/business/orders?status=delivered")).json()[
@@ -272,6 +297,100 @@ async def test_preparation_browser_permissions_and_stale_write_are_enforced(
             select(func.count())
             .select_from(OperatorAuditEvent)
             .where(OperatorAuditEvent.action == "order.prepared")
+        ) == 0
+
+
+@pytest.mark.asyncio
+async def test_administrator_dispatch_requires_reauth_and_deducts_stock_once(
+    accepted_order,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    transport, factory, seeded, order_id = accepted_order
+    reviewed_at = await _make_prepared_for_dispatch(factory, order_id)
+    key = uuid.uuid4()
+    url = f"/api/v1/business/orders/{order_id}/dispatch"
+    body = {
+        "expected_updated_at": reviewed_at.isoformat(),
+        "handoff_reference": "MBB-HANDOFF-API-1",
+        "attested": True,
+    }
+
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        csrf = await _login(client, "commerce.admin", ADMIN_PASSWORD)
+        detail = await client.get(f"/api/v1/business/orders/{order_id}")
+        assert detail.status_code == 200
+        assert detail.json()["dispatch"] == {
+            "eligible": True,
+            "order_state": "preparing",
+            "payment_state": "verified",
+            "allocation_state": "full_unconsumed",
+            "inventory_state": "ready",
+            "delivery_method_state": "supported",
+            "required_quantity": 2,
+        }
+        future = datetime.now(timezone.utc).timestamp() + 1000
+        monkeypatch.setattr("app.api.browser_auth_deps.time.time", lambda: future)
+        reauth_required = await client.post(
+            url,
+            headers={**_headers(csrf), "Idempotency-Key": str(key)},
+            json=body,
+        )
+        assert reauth_required.status_code == 403
+        assert reauth_required.json()["error"]["code"] == "recent_reauthentication_required"
+        csrf = await _reauthenticate(client, csrf)
+        first = await client.post(
+            url,
+            headers={**_headers(csrf), "Idempotency-Key": str(key)},
+            json=body,
+        )
+        assert first.status_code == 200
+        assert first.json()["status"] == "delivering"
+        assert first.json()["replayed"] is False
+        replay = await client.post(
+            url,
+            headers={**_headers(csrf), "Idempotency-Key": str(key)},
+            json=body,
+        )
+        assert replay.status_code == 200 and replay.json()["replayed"] is True
+
+    async with factory() as db:
+        order = await db.get(Order, order_id)
+        inventory = await db.get(InventoryRecord, seeded.inventory_id)
+        movement = await db.scalar(
+            select(StockMovement).where(StockMovement.order_id == order_id)
+        )
+        assert order.status == "delivering" and order.delivered_at is None
+        assert inventory.quantity == 3 and inventory.allocated_quantity == 0
+        assert movement.handoff_reference == "MBB-HANDOFF-API-1"
+        assert await db.scalar(
+            select(func.count())
+            .select_from(OperatorAuditEvent)
+            .where(OperatorAuditEvent.action == "order.dispatched")
+        ) == 1
+
+
+@pytest.mark.asyncio
+async def test_operator_cannot_dispatch_prepared_order(accepted_order):
+    transport, factory, _seeded, order_id = accepted_order
+    reviewed_at = await _make_prepared_for_dispatch(factory, order_id)
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        csrf = await _login(client, "commerce.operator", OPERATOR_PASSWORD)
+        response = await client.post(
+            f"/api/v1/business/orders/{order_id}/dispatch",
+            headers={**_headers(csrf), "Idempotency-Key": str(uuid.uuid4())},
+            json={
+                "expected_updated_at": reviewed_at.isoformat(),
+                "handoff_reference": "MBB-HANDOFF-DENIED",
+                "attested": True,
+            },
+        )
+        assert response.status_code == 403
+    async with factory() as db:
+        assert (await db.get(Order, order_id)).status == "preparing"
+        assert await db.scalar(
+            select(func.count())
+            .select_from(StockMovement)
+            .where(StockMovement.operation_kind == "dispatch")
         ) == 0
 
 

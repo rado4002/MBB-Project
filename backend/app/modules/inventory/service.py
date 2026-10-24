@@ -59,6 +59,10 @@ class InventoryInsufficientStock(Exception):
         )
 
 
+class InventoryDispatchConflict(InventoryConflict):
+    """An Order allocation cannot be consumed exactly once as requested."""
+
+
 @dataclass(frozen=True)
 class InventoryStatusResult:
     sellable_item_id: uuid.UUID
@@ -293,6 +297,104 @@ async def allocate_order_quantity(
     session.add(allocation)
     await session.flush()
     return allocation
+
+
+async def consume_order_allocation(
+    session: AsyncSession,
+    *,
+    order_id: uuid.UUID,
+    sellable_item_id: uuid.UUID,
+    quantity: int,
+    operation_key: uuid.UUID,
+    request_fingerprint: str,
+    handoff_reference: str,
+    administrator: CommerceAdminContext,
+    event_time: datetime,
+) -> tuple[InventoryRecord, StockMovement]:
+    """Deduct one immutable allocation from physical and allocated Stock."""
+    if type(quantity) is not int or not 1 <= quantity <= 2147483647:
+        raise ValueError("dispatch quantity must be a positive integer")
+    if not isinstance(operation_key, uuid.UUID):
+        raise ValueError("dispatch operation key must be a UUID")
+    if not re.fullmatch(r"[0-9a-f]{64}", request_fingerprint):
+        raise ValueError("dispatch request fingerprint is invalid")
+    normalized_reference = handoff_reference.strip()
+    if not 1 <= len(normalized_reference) <= 100 or any(
+        ord(character) < 32 or ord(character) == 127
+        for character in normalized_reference
+    ):
+        raise ValueError("handoff reference is invalid")
+
+    actor = await require_commerce_administrator(session, administrator)
+    record = await _lock_item_and_inventory(session, sellable_item_id)
+    existing_key = await session.scalar(
+        select(StockMovement).where(
+            StockMovement.operation_kind == "dispatch",
+            StockMovement.operation_key == operation_key,
+        )
+    )
+    existing_order = await session.scalar(
+        select(StockMovement).where(
+            StockMovement.operation_kind == "dispatch",
+            StockMovement.order_id == order_id,
+        )
+    )
+    if existing_key is not None or existing_order is not None:
+        raise InventoryDispatchConflict("dispatch evidence already exists")
+    allocation = await session.scalar(
+        select(StockAllocation)
+        .where(StockAllocation.order_id == order_id)
+        .with_for_update()
+    )
+    if (
+        allocation is None
+        or allocation.sellable_item_id != sellable_item_id
+        or allocation.quantity != quantity
+    ):
+        raise InventoryDispatchConflict(
+            "a matching full Stock allocation is required for dispatch"
+        )
+    if (
+        record is None
+        or record.quantity is None
+        or record.quantity < quantity
+        or record.allocated_quantity < quantity
+    ):
+        raise InventoryDispatchConflict(
+            "physical and allocated Stock cannot satisfy dispatch"
+        )
+
+    before_updated_at = record.updated_at
+    occurred_at = event_time
+    if occurred_at <= before_updated_at:
+        occurred_at = before_updated_at + timedelta(microseconds=1)
+    before_quantity = record.quantity
+    record.quantity -= quantity
+    record.allocated_quantity -= quantity
+    record.status = availability_from_quantity(
+        record.quantity, record.allocated_quantity
+    )
+    record.updated_at = occurred_at
+    movement = StockMovement(
+        sellable_item_id=sellable_item_id,
+        operation_kind="dispatch",
+        order_id=order_id,
+        before_quantity=before_quantity,
+        before_updated_at=before_updated_at,
+        received_amount=None,
+        corrected_quantity=None,
+        dispatched_quantity=quantity,
+        after_quantity=record.quantity,
+        reason=None,
+        handoff_reference=normalized_reference,
+        dispatch_request_fingerprint=request_fingerprint,
+        actor_account_id=actor.account_id,
+        operation_key=operation_key,
+        occurred_at=occurred_at,
+    )
+    session.add(movement)
+    await session.flush()
+    return record, movement
 
 
 async def set_inventory_quantity(

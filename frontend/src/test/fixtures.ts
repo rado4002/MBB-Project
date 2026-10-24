@@ -32,7 +32,7 @@ export function sessionFixture(
             'escalation.create',
             'conversation.ownership.change',
           ]),
-      ...(role === 'administrator' ? ['operator_account.manage', 'commerce.manage', 'order.cancel', 'order.prepare'] : []),
+      ...(role === 'administrator' ? ['operator_account.manage', 'commerce.manage', 'order.cancel', 'order.prepare', 'order.dispatch'] : []),
     ],
     must_change_password: mustChangePassword,
     idle_expires_at_epoch: 1_900_000_000,

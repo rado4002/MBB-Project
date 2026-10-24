@@ -57,6 +57,16 @@ function allocationReadiness(preparation: OrderDetail['preparation']) {
   return 'Unsupported Order line structure'
 }
 
+function dispatchStockReadiness(dispatch: OrderDetail['dispatch']) {
+  if (dispatch.allocation_state === 'consumed') return 'Allocation consumed at dispatch'
+  if (dispatch.allocation_state === 'full_unconsumed' && dispatch.inventory_state === 'ready') {
+    return `Full allocation ready · quantity ${dispatch.required_quantity}`
+  }
+  if (dispatch.allocation_state === 'missing') return 'No durable Stock allocation recorded'
+  if (dispatch.allocation_state === 'unsupported') return 'Unsupported Order line structure'
+  return 'Allocated or physical Stock does not match this Order'
+}
+
 export function OrdersPage() {
   const auth = useAuth()
   const { orderId } = useParams()
@@ -80,14 +90,25 @@ export function OrdersPage() {
   const [prepareBusy, setPrepareBusy] = useState(false)
   const [prepareError, setPrepareError] = useState<string | null>(null)
   const [prepareNotice, setPrepareNotice] = useState<string | null>(null)
+  const [dispatchOpen, setDispatchOpen] = useState(false)
+  const [dispatchBusy, setDispatchBusy] = useState(false)
+  const [dispatchError, setDispatchError] = useState<string | null>(null)
+  const [dispatchNotice, setDispatchNotice] = useState<string | null>(null)
+  const [handoffReference, setHandoffReference] = useState('')
+  const [dispatchAttested, setDispatchAttested] = useState(false)
+  const [dispatchReauth, setDispatchReauth] = useState(false)
+  const [dispatchPassword, setDispatchPassword] = useState('')
   const [reauth, setReauth] = useState(false)
   const [password, setPassword] = useState('')
   const attempt = useRef<{ signature: string; key: string } | null>(null)
   const cancellation = useRef<AbortController | null>(null)
   const prepareAttempt = useRef<{ signature: string; key: string } | null>(null)
   const preparation = useRef<AbortController | null>(null)
+  const dispatchAttempt = useRef<{ signature: string; key: string } | null>(null)
+  const dispatchRequest = useRef<AbortController | null>(null)
   const canCancel = auth.session?.capabilities.includes('order.cancel') ?? false
   const canPrepare = auth.session?.capabilities.includes('order.prepare') ?? false
+  const canDispatch = auth.session?.capabilities.includes('order.dispatch') ?? false
 
   const loadList = useCallback(async (signal: AbortSignal) => {
     setList(null); setListError(null)
@@ -103,9 +124,12 @@ export function OrdersPage() {
     setDetail(null); setDetailError(null)
     cancellation.current?.abort(); attempt.current = null
     preparation.current?.abort(); prepareAttempt.current = null
+    dispatchRequest.current?.abort(); dispatchAttempt.current = null
     setCancelOpen(false); setCancelReason(''); setCancelError(null); setCancelNotice(null)
     setReauth(false); setPassword(''); setCancelBusy(false)
     setPrepareOpen(false); setPrepareBusy(false); setPrepareError(null); setPrepareNotice(null)
+    setDispatchOpen(false); setDispatchBusy(false); setDispatchError(null); setDispatchNotice(null)
+    setHandoffReference(''); setDispatchAttested(false); setDispatchReauth(false); setDispatchPassword('')
     if (!orderId) return
     try {
       const result = await client.detail(orderId, signal)
@@ -224,6 +248,14 @@ export function OrdersPage() {
         status: result.status,
         updated_at: result.updated_at,
         preparation: { ...detail.preparation, eligible: false, order_state: 'not_confirmed' },
+        dispatch: {
+          ...detail.dispatch,
+          eligible: detail.dispatch.payment_state === 'verified'
+            && detail.dispatch.allocation_state === 'full_unconsumed'
+            && detail.dispatch.inventory_state === 'ready'
+            && detail.dispatch.delivery_method_state === 'supported',
+          order_state: 'preparing',
+        },
       })
       setList((current) => current ? {
         ...current,
@@ -273,6 +305,107 @@ export function OrdersPage() {
     }
   }
 
+  const submitDispatch = async (event: FormEvent) => {
+    event.preventDefault()
+    const reference = handoffReference.trim()
+    if (!detail || !canDispatch || !detail.dispatch.eligible || !reference || !dispatchAttested || dispatchBusy) return
+    const expiry = auth.session?.recent_reauthentication_expires_at_epoch
+    if (expiry == null || expiry < Math.floor(Date.now() / 1000)) {
+      setDispatchReauth(true); return
+    }
+    const signature = `${detail.order_id}:${detail.updated_at}:${reference}`
+    if (!dispatchAttempt.current || dispatchAttempt.current.signature !== signature) {
+      dispatchAttempt.current = { signature, key: crypto.randomUUID() }
+    }
+    const controller = new AbortController()
+    dispatchRequest.current?.abort(); dispatchRequest.current = controller
+    setDispatchBusy(true); setDispatchError(null); setDispatchNotice(null)
+    try {
+      const csrf = await auth.getCsrfForMutation()
+      if (controller.signal.aborted) return
+      const result = await client.dispatch(
+        detail.order_id, detail.updated_at, reference,
+        dispatchAttempt.current.key, csrf, controller.signal,
+      )
+      if (controller.signal.aborted) return
+      setDetail({
+        ...detail,
+        status: result.status,
+        updated_at: result.updated_at,
+        dispatch: {
+          ...detail.dispatch,
+          eligible: false,
+          order_state: 'not_preparing',
+          allocation_state: 'consumed',
+          inventory_state: 'conflict',
+        },
+      })
+      setList((current) => current ? {
+        ...current,
+        items: current.items.map((item) => item.order_id === result.order_id
+          ? { ...item, status: result.status, updated_at: result.updated_at }
+          : item),
+      } : current)
+      setDispatchOpen(false); setHandoffReference(''); setDispatchAttested(false)
+      setDispatchReauth(false); setDispatchPassword('')
+      setDispatchNotice(result.replayed
+        ? 'Dispatch was already recorded. Showing the current Order.'
+        : 'Order dispatched. Customer delivery is not confirmed.')
+      dispatchAttempt.current = null
+    } catch (failure) {
+      if (controller.signal.aborted) return
+      const apiError = asApiError(failure)
+      if (apiError.code === 'recent_reauthentication_required') {
+        setDispatchReauth(true)
+      } else if (
+        apiError.code === 'ORDER_STALE' || apiError.code === 'ORDER_STATE_CONFLICT'
+        || apiError.code === 'ORDER_PAYMENT_REQUIRED' || apiError.code === 'ORDER_ALLOCATION_REQUIRED'
+        || apiError.code === 'ORDER_DISPATCH_METHOD_UNSUPPORTED' || apiError.code === 'ORDER_DISPATCH_UNSUPPORTED'
+      ) {
+        dispatchAttempt.current = null
+        setDispatchOpen(false)
+        try {
+          const fresh = await client.detail(detail.order_id, controller.signal)
+          if (!controller.signal.aborted) setDetail(fresh)
+        } catch {
+          // Preserve the reviewed snapshot and show the authoritative conflict.
+        }
+        if (!controller.signal.aborted) {
+          setDispatchError(apiError.code === 'ORDER_STALE' || apiError.code === 'ORDER_STATE_CONFLICT'
+            ? 'The Order changed since review. Its current dispatch state is shown.'
+            : apiError.code === 'ORDER_PAYMENT_REQUIRED'
+              ? 'Dispatch is blocked because matching verified Payment evidence is unavailable.'
+              : apiError.code === 'ORDER_ALLOCATION_REQUIRED'
+                ? 'Dispatch is blocked because full unconsumed allocated Stock is unavailable.'
+                : apiError.code === 'ORDER_DISPATCH_METHOD_UNSUPPORTED'
+                  ? 'Only moto taxi Orders can use this dispatch workflow.'
+                  : 'This Order is not supported by the dispatch workflow.')
+          void loadList(new AbortController().signal)
+        }
+      } else if (apiError.status === 0 || apiError.status >= 500) {
+        setDispatchError('The result could not be confirmed. Retry the same dispatch request.')
+      } else {
+        dispatchAttempt.current = null
+        setDispatchError(errorMessage(apiError))
+      }
+    } finally {
+      if (!controller.signal.aborted) setDispatchBusy(false)
+    }
+  }
+
+  const confirmDispatchPassword = async (event: FormEvent) => {
+    event.preventDefault(); setDispatchBusy(true); setDispatchError(null)
+    try {
+      await auth.reauthenticate(dispatchPassword)
+      setDispatchReauth(false)
+      setDispatchNotice('Password confirmed. Review the handoff evidence and confirm dispatch.')
+    } catch (failure) {
+      setDispatchError(errorMessage(asApiError(failure)))
+    } finally {
+      setDispatchPassword(''); setDispatchBusy(false)
+    }
+  }
+
   const listPath = `/business/orders?${new URLSearchParams({ status: status ?? 'all', offset: String(offset) })}`
   const chooseStatus = (value: string) => setParams({ status: value, offset: '0' })
   const chooseOffset = (value: number) => setParams({ status: status ?? 'all', offset: String(value) })
@@ -310,6 +443,8 @@ export function OrdersPage() {
         {cancelNotice && <p role="status">{cancelNotice}</p>}
         {prepareError && <p role="alert">{prepareError}</p>}
         {prepareNotice && <p role="status">{prepareNotice}</p>}
+        {dispatchError && <p role="alert">{dispatchError}</p>}
+        {dispatchNotice && <p role="status">{dispatchNotice}</p>}
         {detail && <>
           <h2>Order {detail.order_id.slice(0, 8)}</h2>
           <dl className="orders-facts">
@@ -339,6 +474,44 @@ export function OrdersPage() {
                   setPrepareOpen(false); setPrepareError(null); prepareAttempt.current = null
                 }}>Keep confirmed</button>
               </div>
+            </form>}
+          </section>
+          <section className="orders-dispatch" aria-labelledby="order-dispatch-heading">
+            <h3 id="order-dispatch-heading">Dispatch readiness</h3>
+            <dl className="orders-facts">
+              <div><dt>Payment verification</dt><dd>{paymentReadiness(detail.dispatch.payment_state)}</dd></div>
+              <div><dt>Allocated Stock</dt><dd>{dispatchStockReadiness(detail.dispatch)}</dd></div>
+              <div><dt>Delivery method</dt><dd>{detail.dispatch.delivery_method_state === 'supported' ? 'Moto taxi supported' : 'Not supported for dispatch'}</dd></div>
+              <div><dt>Eligibility</dt><dd>{detail.dispatch.eligible ? 'Ready to dispatch' : 'Not eligible'}</dd></div>
+            </dl>
+            {canDispatch && detail.dispatch.eligible && !dispatchOpen && <div className="orders-actions">
+              <button className="button button--primary" onClick={() => {
+                setDispatchOpen(true); setDispatchError(null); setDispatchNotice(null)
+              }}>Dispatch Order</button>
+            </div>}
+            {canDispatch && detail.dispatch.eligible && dispatchOpen && <form className="orders-dispatch-confirm" onSubmit={(event) => void submitDispatch(event)}>
+              <h3>Confirm physical dispatch</h3>
+              <p>This deducts the allocated items from physical Stock and changes the Order to delivering. It does not confirm customer receipt.</p>
+              <label htmlFor="order-handoff-reference">Internal handoff reference</label>
+              <input id="order-handoff-reference" required maxLength={100} value={handoffReference} disabled={dispatchBusy}
+                onChange={(event) => { setHandoffReference(event.target.value); dispatchAttempt.current = null }} />
+              <label className="orders-attestation">
+                <input type="checkbox" checked={dispatchAttested} disabled={dispatchBusy}
+                  onChange={(event) => { setDispatchAttested(event.target.checked); dispatchAttempt.current = null }} />
+                I confirm the full allocated quantity physically left MBB custody.
+              </label>
+              <div className="orders-actions">
+                <button className="button button--primary" disabled={dispatchBusy || !handoffReference.trim() || !dispatchAttested || dispatchReauth}>Confirm dispatch</button>
+                <button type="button" className="button button--secondary" disabled={dispatchBusy} onClick={() => {
+                  setDispatchOpen(false); setHandoffReference(''); setDispatchAttested(false)
+                  setDispatchError(null); setDispatchReauth(false); setDispatchPassword(''); dispatchAttempt.current = null
+                }}>Keep preparing</button>
+              </div>
+            </form>}
+            {canDispatch && dispatchOpen && dispatchReauth && <form className="orders-dispatch-confirm" onSubmit={(event) => void confirmDispatchPassword(event)}>
+              <PasswordField id="order-dispatch-password" label="Confirm Administrator password" autoComplete="current-password"
+                value={dispatchPassword} disabled={dispatchBusy} required onChange={(event) => setDispatchPassword(event.target.value)} />
+              <button className="button button--primary" disabled={dispatchBusy}>Confirm password</button>
             </form>}
           </section>
           <h3>Accepted commercial snapshot</h3>

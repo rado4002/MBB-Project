@@ -63,7 +63,8 @@ async def get_order(order_id: uuid.UUID, db: DBSession):
             "description": (
                 "Invalid lifecycle transition. Confirmation requires verified "
                 "Payment; preparation requires full Stock allocation. Cancellation "
-                "must use POST /api/v1/business/orders/{order_id}/cancel."
+                "and dispatch require their authorized browser workflows; delivery "
+                "confirmation is not implemented."
             )
         }
     },

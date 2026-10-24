@@ -31,6 +31,7 @@ export interface OrderDetail extends OrderQueueItem {
   items: OrderLineSnapshot[]
   delivery_zone: string
   preparation: OrderPreparationEligibility
+  dispatch: OrderDispatchEligibility
 }
 
 export interface OrderPreparationEligibility {
@@ -40,6 +41,16 @@ export interface OrderPreparationEligibility {
   allocation_state: 'full' | 'missing' | 'mismatch' | 'unsupported'
   required_quantity: number | null
   allocated_quantity: number | null
+}
+
+export interface OrderDispatchEligibility {
+  eligible: boolean
+  order_state: 'preparing' | 'not_preparing'
+  payment_state: 'verified' | 'missing' | 'not_verified' | 'mismatch'
+  allocation_state: 'full_unconsumed' | 'missing' | 'mismatch' | 'consumed' | 'unsupported'
+  inventory_state: 'ready' | 'conflict' | 'unsupported'
+  delivery_method_state: 'supported' | 'unsupported'
+  required_quantity: number | null
 }
 
 export type OrderCancellationReason =
@@ -58,6 +69,13 @@ export interface OrderCancellationResponse {
 export interface OrderPreparationResponse {
   order_id: string
   status: 'preparing'
+  updated_at: string
+  replayed: boolean
+}
+
+export interface OrderDispatchResponse {
+  order_id: string
+  status: 'delivering'
   updated_at: string
   replayed: boolean
 }
@@ -97,6 +115,24 @@ export function createBusinessOrdersClient(onSessionExpired: () => void) {
     ) => requestJson<OrderPreparationResponse>(`${base}/${encodeURIComponent(id)}/prepare`, {
       method: 'POST',
       body: { expected_updated_at: expectedUpdatedAt },
+      idempotencyKey,
+      csrfToken,
+      signal,
+    }, onSessionExpired),
+    dispatch: (
+      id: string,
+      expectedUpdatedAt: string,
+      handoffReference: string,
+      idempotencyKey: string,
+      csrfToken: string,
+      signal: AbortSignal,
+    ) => requestJson<OrderDispatchResponse>(`${base}/${encodeURIComponent(id)}/dispatch`, {
+      method: 'POST',
+      body: {
+        expected_updated_at: expectedUpdatedAt,
+        handoff_reference: handoffReference,
+        attested: true,
+      },
       idempotencyKey,
       csrfToken,
       signal,

@@ -202,24 +202,52 @@ async def _make_order_ready_for_preparation(order_id: uuid.UUID) -> datetime:
         await engine.dispose()
 
 
-async def _assert_prepared_order(order_id: uuid.UUID, reviewed_at: datetime) -> None:
+async def _assert_dispatched_order(
+    order_id: uuid.UUID, reviewed_at: datetime
+) -> None:
     try:
         async with async_session_factory() as session:
             order = await session.get(Order, order_id)
-            payment = await session.scalar(select(Payment).where(Payment.order_id == order_id))
             allocation = await session.get(StockAllocation, order_id)
+            movement = await session.scalar(
+                select(StockMovement).where(
+                    StockMovement.operation_kind == "dispatch",
+                    StockMovement.order_id == order_id,
+                )
+            )
             audit = await session.scalar(
+                select(OperatorAuditEvent).where(
+                    OperatorAuditEvent.action == "order.dispatched",
+                    OperatorAuditEvent.target_id == str(order_id),
+                )
+            )
+            preparation_audit = await session.scalar(
                 select(OperatorAuditEvent).where(
                     OperatorAuditEvent.action == "order.prepared",
                     OperatorAuditEvent.target_id == str(order_id),
                 )
             )
-            assert order is not None and order.status == "preparing"
-            assert order.updated_at > reviewed_at
-            assert payment is not None and payment.status == "completed"
+            payment = await session.scalar(
+                select(Payment).where(Payment.order_id == order_id)
+            )
             assert allocation is not None and allocation.quantity == 2
+            inventory = await session.scalar(
+                select(InventoryRecord).where(
+                    InventoryRecord.sellable_item_id == allocation.sellable_item_id
+                )
+            )
+            assert order is not None and order.status == "delivering"
+            assert order.updated_at > reviewed_at
+            assert order.delivered_at is None
+            assert payment is not None and payment.status == "completed"
+            assert movement is not None and movement.handoff_reference == "E2E-HANDOFF-001"
+            assert movement.before_quantity == 3 and movement.after_quantity == 1
+            assert inventory is not None and inventory.quantity == 1
+            assert inventory.allocated_quantity == 0
             assert audit is not None and audit.actor_kind == "human"
             assert audit.actor_display_name == "E2E Administrator"
+            assert preparation_audit is not None
+            assert preparation_audit.actor_kind == "human"
     finally:
         await engine.dispose()
 
@@ -268,7 +296,7 @@ async def _assert_order_acceptance(monkeypatch: pytest.MonkeyPatch) -> uuid.UUID
     factory = async_session_factory
     try:
         async with factory() as session:
-            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "f9a0b1c2d3e4"
+            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "a0b1c2d3e4f5"
             item = await session.scalar(select(SellableItem).where(SellableItem.sku == SKU))
             conversation = await session.get(Conversation, CONVERSATION_ID)
             lead = await session.scalar(select(Lead).where(Lead.conversation_id == CONVERSATION_ID))
@@ -725,7 +753,9 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
         admin_detail = admin_page.get_by_role("region", name="Order detail")
         expect(admin_detail.get_by_text("Ready to prepare")).to_be_visible(timeout=15_000)
         expect(
-            admin_detail.get_by_text("Verified completed Payment matches the accepted Order")
+            admin_detail.get_by_role("region", name="Preparation readiness").get_by_text(
+                "Verified completed Payment matches the accepted Order"
+            )
         ).to_be_visible()
         expect(admin_detail.get_by_text("Full allocation · 2 of 2")).to_be_visible()
         admin_page.set_viewport_size({"width": 390, "height": 844})
@@ -745,6 +775,25 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
             timeout=15_000
         )
         expect(admin_detail.get_by_text("preparing", exact=True)).to_be_visible()
+        expect(admin_detail.get_by_text("Ready to dispatch")).to_be_visible()
+        admin_page.set_viewport_size({"width": 390, "height": 844})
+        assert admin_page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        expect(admin_detail.get_by_role("button", name="Dispatch Order")).to_be_visible()
+        admin_page.set_viewport_size({"width": 1280, "height": 900})
+        admin_detail.get_by_role("button", name="Dispatch Order").click()
+        expect(admin_detail.get_by_text("Confirm physical dispatch")).to_be_visible()
+        admin_detail.get_by_label("Internal handoff reference").fill("E2E-HANDOFF-001")
+        admin_detail.get_by_label(
+            "I confirm the full allocated quantity physically left MBB custody."
+        ).check()
+        admin_detail.get_by_role("button", name="Confirm dispatch").click()
+        expect(
+            admin_detail.get_by_text(
+                "Order dispatched. Customer delivery is not confirmed."
+            )
+        ).to_be_visible(timeout=15_000)
+        expect(admin_detail.get_by_text("delivering", exact=True)).to_be_visible()
+        expect(admin_detail.get_by_text("Allocation consumed at dispatch")).to_be_visible()
         admin_context.close()
         browser.close()
-    asyncio.run(_assert_prepared_order(order_id, reviewed_at))
+    asyncio.run(_assert_dispatched_order(order_id, reviewed_at))

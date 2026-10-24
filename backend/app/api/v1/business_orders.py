@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Query, Request, Response
@@ -58,6 +58,20 @@ from app.modules.m7_conversion.order_fulfillment import (
     UnsupportedOrderPreparation,
     get_order_preparation_eligibility,
     prepare_confirmed_order,
+)
+from app.modules.m7_conversion.order_dispatch import (
+    OrderDispatchAllocationRequired,
+    OrderDispatchForbidden,
+    OrderDispatchIdempotencyConflict,
+    OrderDispatchMethodUnsupported,
+    OrderDispatchNotFound,
+    OrderDispatchPaymentRequired,
+    OrderDispatchStale,
+    OrderDispatchStateConflict,
+    OrderDispatchUnavailable,
+    UnsupportedOrderDispatch,
+    dispatch_prepared_order,
+    get_order_dispatch_eligibility,
 )
 from app.request_ids import normalize_or_generate_request_id
 from app.schemas.common import OrderStatus
@@ -118,10 +132,21 @@ class OrderPreparationEligibilityResponse(StrictOrderRead):
     allocated_quantity: int | None
 
 
+class OrderDispatchEligibilityResponse(StrictOrderRead):
+    eligible: bool
+    order_state: str
+    payment_state: str
+    allocation_state: str
+    inventory_state: str
+    delivery_method_state: str
+    required_quantity: int | None
+
+
 class OrderDetail(OrderQueueItem):
     items: list[OrderLineSnapshot]
     delivery_zone: str
     preparation: OrderPreparationEligibilityResponse
+    dispatch: OrderDispatchEligibilityResponse
 
 
 class OrderCancellationReason(str, Enum):
@@ -162,6 +187,37 @@ class OrderPreparationRequest(StrictOrderRead):
 
 
 class OrderPreparationResponse(StrictOrderRead):
+    order_id: UUID
+    status: OrderStatus
+    updated_at: datetime
+    replayed: bool
+
+
+class OrderDispatchRequest(StrictOrderRead):
+    expected_updated_at: datetime
+    handoff_reference: str = Field(min_length=1, max_length=100)
+    attested: Literal[True]
+
+    @field_validator("expected_updated_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("expected_updated_at must include a timezone")
+        return value
+
+    @field_validator("handoff_reference")
+    @classmethod
+    def normalize_reference(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or any(
+            ord(character) < 32 or ord(character) == 127
+            for character in normalized
+        ):
+            raise ValueError("handoff_reference is invalid")
+        return normalized
+
+
+class OrderDispatchResponse(StrictOrderRead):
     order_id: UUID
     status: OrderStatus
     updated_at: datetime
@@ -270,11 +326,13 @@ async def get_order(
         lines = _lines(order)
         summary = _summary(order, lines, links.get(order_id))
         eligibility = await get_order_preparation_eligibility(db, order=order)
+        dispatch = await get_order_dispatch_eligibility(db, order=order)
         detail = OrderDetail(
             **summary.model_dump(),
             items=lines,
             delivery_zone=order.delivery_zone,
             preparation=OrderPreparationEligibilityResponse(**eligibility.__dict__),
+            dispatch=OrderDispatchEligibilityResponse(**dispatch.__dict__),
         )
     except (SQLAlchemyError, OSError, ValidationError, TypeError, ValueError) as exc:
         raise _unavailable() from exc
@@ -415,6 +473,104 @@ async def prepare_order(
         raise _unavailable() from exc
     response.headers["Cache-Control"] = "no-store"
     return OrderPreparationResponse(
+        order_id=result.order.order_id,
+        status=OrderStatus(result.order.status),
+        updated_at=result.order.updated_at,
+        replayed=result.replayed,
+    )
+
+
+@router.post("/{order_id}/dispatch", response_model=OrderDispatchResponse)
+async def dispatch_order(
+    order_id: UUID,
+    body: OrderDispatchRequest,
+    request: Request,
+    response: Response,
+    principal: Annotated[BrowserPrincipal, Depends(require_capability("order.dispatch"))],
+    _csrf: Annotated[BrowserPrincipal, Depends(require_csrf)],
+    _recent: Annotated[BrowserPrincipal, Depends(require_recent_reauthentication)],
+    settings: Annotated[Settings, Depends(get_browser_settings)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[
+        UUID4, Header(alias="Idempotency-Key", include_in_schema=True)
+    ],
+) -> OrderDispatchResponse:
+    validate_state_changing_request(request, settings)
+    request_id = normalize_or_generate_request_id(
+        getattr(request.state, "request_id", None)
+        or request.headers.get("X-Request-ID")
+    )
+    try:
+        result = await dispatch_prepared_order(
+            db,
+            order_id=order_id,
+            expected_updated_at=body.expected_updated_at,
+            idempotency_key=idempotency_key,
+            handoff_reference=body.handoff_reference,
+            attested=body.attested,
+            actor_account_id=principal.account.account_id,
+            actor_display_name=principal.account.display_name,
+            actor_role=principal.account.role,
+            request_id=request_id,
+            source_network_fingerprint=principal.session.record.ip_prefix_fingerprint,
+            user_agent_fingerprint=principal.session.record.user_agent_fingerprint,
+        )
+    except OrderDispatchNotFound as exc:
+        raise BrowserAuthError(
+            status_code=404, code="ORDER_NOT_FOUND", message="Order not found."
+        ) from exc
+    except OrderDispatchForbidden as exc:
+        raise BrowserAuthError(
+            status_code=403,
+            code="FORBIDDEN",
+            message="Administrator permission is required.",
+        ) from exc
+    except OrderDispatchIdempotencyConflict as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="IDEMPOTENCY_CONFLICT",
+            message="The idempotency key was already used for another dispatch.",
+        ) from exc
+    except OrderDispatchStale as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_STALE",
+            message="The Order changed since it was reviewed.",
+        ) from exc
+    except OrderDispatchStateConflict as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_STATE_CONFLICT",
+            message="Only a prepared Order can be dispatched.",
+        ) from exc
+    except OrderDispatchPaymentRequired as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_PAYMENT_REQUIRED",
+            message="A matching verified completed Payment is required.",
+        ) from exc
+    except OrderDispatchAllocationRequired as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_ALLOCATION_REQUIRED",
+            message="Full unconsumed allocated Stock is required.",
+        ) from exc
+    except OrderDispatchMethodUnsupported as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_DISPATCH_METHOD_UNSUPPORTED",
+            message="Only moto taxi Orders can be dispatched here.",
+        ) from exc
+    except UnsupportedOrderDispatch as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_DISPATCH_UNSUPPORTED",
+            message="This Order cannot be dispatched in this workflow.",
+        ) from exc
+    except OrderDispatchUnavailable as exc:
+        raise _unavailable() from exc
+    response.headers["Cache-Control"] = "no-store"
+    return OrderDispatchResponse(
         order_id=result.order.order_id,
         status=OrderStatus(result.order.status),
         updated_at=result.order.updated_at,

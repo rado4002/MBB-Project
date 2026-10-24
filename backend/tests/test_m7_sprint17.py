@@ -64,9 +64,11 @@ from app.modules.m7_conversion.payment_handler import (
     check_idempotency,
 )
 from app.modules.m7_conversion.service import (
-    update_order_status,
     credit_club_points,
+    DeliveryConfirmationUnavailable,
+    DispatchPrerequisiteUnavailable,
     InvalidOrderTransition,
+    update_order_status,
 )
 from app.schemas.common import PaymentMethod
 
@@ -369,8 +371,8 @@ def test_valid_transitions_map():
     assert "confirmed" not in _VALID_TRANSITIONS["pending"]
     assert "cancelled" not in _VALID_TRANSITIONS["pending"]
     assert "preparing" not in _VALID_TRANSITIONS["confirmed"]
-    assert "delivering" in _VALID_TRANSITIONS["preparing"]
-    assert "delivered" in _VALID_TRANSITIONS["delivering"]
+    assert "delivering" not in _VALID_TRANSITIONS["preparing"]
+    assert "delivered" not in _VALID_TRANSITIONS["delivering"]
     assert len(_VALID_TRANSITIONS["delivered"]) == 0  # Terminal
     assert len(_VALID_TRANSITIONS["cancelled"]) == 0  # Terminal
 
@@ -535,7 +537,7 @@ async def _seed_historical_order(
 
 @pytest.mark.asyncio
 async def test_order_state_machine_valid_sequence():
-    """Payment/Stock gates reject early transitions; later states still advance."""
+    """Every protected lifecycle transition fails closed in the generic writer."""
     async with AsyncSessionLocal() as session:
         phone, lead_id = await _seed_customer_lead(session)
         order = await _seed_historical_order(
@@ -557,14 +559,16 @@ async def test_order_state_machine_valid_sequence():
         order.status = "preparing"  # Historical state fixture for later transitions.
         await session.commit()
 
-        # preparing → delivering
-        order = await update_order_status(session, order_id=order_id, new_status="delivering")
-        assert order.status == "delivering"
-
-        # delivering → delivered
-        order = await update_order_status(session, order_id=order_id, new_status="delivered")
-        assert order.status == "delivered"
-        assert order.delivered_at is not None
+        with pytest.raises(DispatchPrerequisiteUnavailable):
+            await update_order_status(
+                session, order_id=order_id, new_status="delivering"
+            )
+        order.status = "delivering"  # Historical state fixture only.
+        await session.commit()
+        with pytest.raises(DeliveryConfirmationUnavailable):
+            await update_order_status(
+                session, order_id=order_id, new_status="delivered"
+            )
 
 
 @pytest.mark.asyncio
