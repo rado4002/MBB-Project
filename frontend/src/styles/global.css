@@ -784,6 +784,17 @@ h2 { font-size: 1.125rem; }
 .orders-dispatch-confirm { display: grid; gap: var(--space-3); margin-top: var(--space-4); padding: var(--space-4); border: 1px solid #b8c7dd; border-radius: .5rem; background: #f8fafc; }
 .orders-dispatch-confirm h3, .orders-dispatch-confirm p { margin: 0; }
 .orders-dispatch-confirm > input { min-height: 2.75rem; padding: var(--space-2); border: 1px solid #dce3ee; border-radius: .5rem; font: inherit; }
+.orders-delivery { margin-top: var(--space-6); }
+.orders-delivery > h3 { margin-bottom: var(--space-3); }
+.orders-delivery-confirm { display: grid; gap: var(--space-3); margin-top: var(--space-4); padding: var(--space-4); border: 1px solid #b8c7dd; border-radius: .5rem; background: #f8fafc; }
+.orders-delivery-confirm h3, .orders-delivery-confirm p { margin: 0; }
+.orders-evidence-list { display: grid; gap: var(--space-3); margin-top: var(--space-4); }
+.orders-evidence-list h4, .orders-evidence-list p { margin: 0; }
+.orders-evidence-message { display: flex; align-items: start; gap: var(--space-3); min-width: 0; padding: var(--space-4); border: 1px solid #dce3ee; border-radius: .5rem; background: #fff; }
+.orders-evidence-message > input { width: 1.1rem; height: 1.1rem; margin-top: .2rem; flex: 0 0 auto; }
+.orders-evidence-message > div { min-width: 0; }
+.orders-evidence-message blockquote { margin: var(--space-2) 0; padding-left: var(--space-3); border-left: .2rem solid #b8c7dd; white-space: pre-wrap; }
+.orders-evidence-message p { color: #64748b; font-size: .85rem; }
 .orders-attestation { display: flex; align-items: start; gap: var(--space-2); }
 .orders-attestation input { width: 1.1rem; height: 1.1rem; margin-top: .15rem; flex: 0 0 auto; }
 .orders-cancellation select { min-height: 2.75rem; padding: var(--space-2); border: 1px solid #dce3ee; border-radius: .5rem; background: #fff; color: #0f172a; font: inherit; }

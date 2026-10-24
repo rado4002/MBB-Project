@@ -30,8 +30,10 @@ export interface OrderLineSnapshot {
 export interface OrderDetail extends OrderQueueItem {
   items: OrderLineSnapshot[]
   delivery_zone: string
+  delivered_at: string | null
   preparation: OrderPreparationEligibility
   dispatch: OrderDispatchEligibility
+  delivery: OrderDeliveryEligibility
 }
 
 export interface OrderPreparationEligibility {
@@ -51,6 +53,28 @@ export interface OrderDispatchEligibility {
   inventory_state: 'ready' | 'conflict' | 'unsupported'
   delivery_method_state: 'supported' | 'unsupported'
   required_quantity: number | null
+}
+
+export interface OrderDeliveryEvidenceMessage {
+  message_id: string
+  content_excerpt: string
+  content_truncated: boolean
+  received_at: string
+  inbound_receipt_order: number
+  provenance: 'inbound_whatsapp_customer_message'
+}
+
+export interface OrderDeliveryEligibility {
+  eligible: boolean
+  order_state: 'delivering' | 'delivered' | 'not_delivering'
+  delivery_method_state: 'supported' | 'unsupported'
+  line_state: 'single' | 'unsupported'
+  dispatch_state: 'matched' | 'missing'
+  association_state: 'verified' | 'missing' | 'ambiguous' | 'not_applicable'
+  evidence_state: 'available' | 'missing' | 'not_applicable'
+  dispatch_occurred_at: string | null
+  evidence_messages: OrderDeliveryEvidenceMessage[]
+  evidence_has_more: boolean
 }
 
 export type OrderCancellationReason =
@@ -76,6 +100,14 @@ export interface OrderPreparationResponse {
 export interface OrderDispatchResponse {
   order_id: string
   status: 'delivering'
+  updated_at: string
+  replayed: boolean
+}
+
+export interface OrderDeliveryConfirmationResponse {
+  order_id: string
+  status: 'delivered'
+  delivered_at: string
   updated_at: string
   replayed: boolean
 }
@@ -131,6 +163,24 @@ export function createBusinessOrdersClient(onSessionExpired: () => void) {
       body: {
         expected_updated_at: expectedUpdatedAt,
         handoff_reference: handoffReference,
+        attested: true,
+      },
+      idempotencyKey,
+      csrfToken,
+      signal,
+    }, onSessionExpired),
+    confirmDelivery: (
+      id: string,
+      expectedUpdatedAt: string,
+      evidenceMessageId: string,
+      idempotencyKey: string,
+      csrfToken: string,
+      signal: AbortSignal,
+    ) => requestJson<OrderDeliveryConfirmationResponse>(`${base}/${encodeURIComponent(id)}/confirm-delivery`, {
+      method: 'POST',
+      body: {
+        expected_updated_at: expectedUpdatedAt,
+        evidence_message_id: evidenceMessageId,
         attested: true,
       },
       idempotencyKey,

@@ -7,7 +7,7 @@ import os
 import re
 import sys
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
@@ -30,6 +30,7 @@ from app.models import (
 from app.models.catalog import SellableItem
 from app.models.inventory import InventoryRecord
 from app.models.order import Order
+from app.models.order_delivery_confirmation import OrderDeliveryConfirmation
 from app.models.order_draft import OrderDraft
 from app.models.payment import Payment
 from app.models.operator_audit import OperatorAuditEvent
@@ -248,6 +249,85 @@ async def _assert_dispatched_order(
             assert audit.actor_display_name == "E2E Administrator"
             assert preparation_audit is not None
             assert preparation_audit.actor_kind == "human"
+    finally:
+        await engine.dispose()
+
+
+async def _seed_customer_receipt(order_id: uuid.UUID) -> tuple[uuid.UUID, datetime]:
+    try:
+        async with async_session_factory() as session:
+            movement = await session.scalar(
+                select(StockMovement).where(
+                    StockMovement.operation_kind == "dispatch",
+                    StockMovement.order_id == order_id,
+                )
+            )
+            assert movement is not None
+            received_at = movement.occurred_at + timedelta(seconds=1)
+            message = Message(
+                conversation_id=CONVERSATION_ID,
+                timestamp=received_at,
+                created_at=received_at,
+                direction="inbound",
+                content="Commande reçue, matondo mingi — nimepokea vizuri.",
+                content_type="text",
+                language="french",
+                whatsapp_message_id="e2e-delivery-receipt-1",
+            )
+            session.add(message)
+            await session.commit()
+            await session.refresh(message)
+            return message.message_id, message.created_at
+    finally:
+        await engine.dispose()
+
+
+async def _assert_delivered_order(
+    order_id: uuid.UUID,
+    evidence_message_id: uuid.UUID,
+    evidence_received_at: datetime,
+) -> None:
+    try:
+        async with async_session_factory() as session:
+            order = await session.get(Order, order_id)
+            confirmation = await session.scalar(
+                select(OrderDeliveryConfirmation).where(
+                    OrderDeliveryConfirmation.order_id == order_id
+                )
+            )
+            audit = await session.scalar(
+                select(OperatorAuditEvent).where(
+                    OperatorAuditEvent.action == "order.delivered",
+                    OperatorAuditEvent.target_id == str(order_id),
+                )
+            )
+            payment = await session.scalar(
+                select(Payment).where(Payment.order_id == order_id)
+            )
+            allocation = await session.get(StockAllocation, order_id)
+            inventory = await session.scalar(
+                select(InventoryRecord).where(
+                    InventoryRecord.sellable_item_id == allocation.sellable_item_id
+                )
+            )
+            dispatch_count = await session.scalar(
+                select(func.count())
+                .select_from(StockMovement)
+                .where(
+                    StockMovement.order_id == order_id,
+                    StockMovement.operation_kind == "dispatch",
+                )
+            )
+            assert order is not None and order.status == "delivered"
+            assert order.delivered_at == evidence_received_at
+            assert confirmation is not None
+            assert confirmation.evidence_message_id == evidence_message_id
+            assert confirmation.evidence_received_at == evidence_received_at
+            assert audit is not None and audit.actor_display_name == "E2E Administrator"
+            assert payment is not None and payment.status == "completed"
+            assert inventory is not None and inventory.quantity == 1
+            assert inventory.allocated_quantity == 0
+            assert dispatch_count == 1
     finally:
         await engine.dispose()
 
@@ -797,3 +877,53 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
         admin_context.close()
         browser.close()
     asyncio.run(_assert_dispatched_order(order_id, reviewed_at))
+    evidence_message_id, evidence_received_at = asyncio.run(
+        _seed_customer_receipt(order_id)
+    )
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        admin_context = browser.new_context(ignore_https_errors=True)
+        admin_page = admin_context.new_page()
+        _login(admin_page, "e2e.admin", ADMIN_PASSWORD)
+        admin_page.goto(
+            f"{BASE_URL}/business/orders/{order_id}?status=delivering&offset=0",
+            wait_until="domcontentloaded",
+        )
+        admin_detail = admin_page.get_by_role("region", name="Order detail")
+        expect(
+            admin_detail.get_by_text(
+                "Customer receipt evidence is ready for Administrator review"
+            )
+        ).to_be_visible(timeout=15_000)
+        expect(
+            admin_detail.get_by_text(
+                "Commande reçue, matondo mingi — nimepokea vizuri."
+            )
+        ).to_be_visible()
+        expect(admin_detail.get_by_text("not the exact physical handoff time")).to_be_visible()
+        admin_page.set_viewport_size({"width": 390, "height": 844})
+        assert admin_page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        admin_detail.get_by_role("button", name="Confirm customer receipt").click()
+        admin_detail.get_by_label("Inbound WhatsApp customer message").check()
+        admin_detail.get_by_label(
+            "I reviewed the selected message and attest that the customer "
+            "unambiguously reported receiving this Order."
+        ).check()
+        admin_detail.get_by_role("button", name="Confirm delivery").click()
+        expect(
+            admin_detail.get_by_text(
+                "Customer-reported receipt recorded. This timestamp is not the exact "
+                "physical handoff time."
+            )
+        ).to_be_visible(timeout=15_000)
+        expect(admin_detail.get_by_text("delivered", exact=True)).to_be_visible()
+        expect(admin_detail.get_by_text("Customer message received")).to_be_visible()
+        admin_context.close()
+        browser.close()
+    asyncio.run(
+        _assert_delivered_order(
+            order_id,
+            evidence_message_id,
+            evidence_received_at,
+        )
+    )

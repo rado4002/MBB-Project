@@ -67,6 +67,20 @@ function dispatchStockReadiness(dispatch: OrderDetail['dispatch']) {
   return 'Allocated or physical Stock does not match this Order'
 }
 
+function deliveryReadiness(delivery: OrderDetail['delivery']) {
+  if (delivery.order_state === 'delivered') {
+    return 'Customer-reported receipt has already been recorded'
+  }
+  if (delivery.order_state !== 'delivering') return 'Dispatch the Order before confirming customer receipt'
+  if (delivery.delivery_method_state !== 'supported') return 'Only moto taxi Orders use this confirmation workflow'
+  if (delivery.line_state !== 'single') return 'Only single-line Orders are supported'
+  if (delivery.dispatch_state !== 'matched') return 'Matching immutable dispatch evidence is missing'
+  if (delivery.association_state === 'missing') return 'The verified customer conversation is unavailable'
+  if (delivery.association_state === 'ambiguous') return 'More than one delivering Order is associated with this conversation'
+  if (delivery.evidence_state === 'missing') return 'No eligible post-dispatch inbound customer text has been received'
+  return 'Customer receipt evidence is ready for Administrator review'
+}
+
 export function OrdersPage() {
   const auth = useAuth()
   const { orderId } = useParams()
@@ -98,6 +112,14 @@ export function OrdersPage() {
   const [dispatchAttested, setDispatchAttested] = useState(false)
   const [dispatchReauth, setDispatchReauth] = useState(false)
   const [dispatchPassword, setDispatchPassword] = useState('')
+  const [deliveryOpen, setDeliveryOpen] = useState(false)
+  const [deliveryBusy, setDeliveryBusy] = useState(false)
+  const [deliveryError, setDeliveryError] = useState<string | null>(null)
+  const [deliveryNotice, setDeliveryNotice] = useState<string | null>(null)
+  const [selectedEvidence, setSelectedEvidence] = useState('')
+  const [deliveryAttested, setDeliveryAttested] = useState(false)
+  const [deliveryReauth, setDeliveryReauth] = useState(false)
+  const [deliveryPassword, setDeliveryPassword] = useState('')
   const [reauth, setReauth] = useState(false)
   const [password, setPassword] = useState('')
   const attempt = useRef<{ signature: string; key: string } | null>(null)
@@ -106,9 +128,12 @@ export function OrdersPage() {
   const preparation = useRef<AbortController | null>(null)
   const dispatchAttempt = useRef<{ signature: string; key: string } | null>(null)
   const dispatchRequest = useRef<AbortController | null>(null)
+  const deliveryAttempt = useRef<{ signature: string; key: string } | null>(null)
+  const deliveryRequest = useRef<AbortController | null>(null)
   const canCancel = auth.session?.capabilities.includes('order.cancel') ?? false
   const canPrepare = auth.session?.capabilities.includes('order.prepare') ?? false
   const canDispatch = auth.session?.capabilities.includes('order.dispatch') ?? false
+  const canConfirmDelivery = auth.session?.capabilities.includes('order.delivery.confirm') ?? false
 
   const loadList = useCallback(async (signal: AbortSignal) => {
     setList(null); setListError(null)
@@ -125,11 +150,14 @@ export function OrdersPage() {
     cancellation.current?.abort(); attempt.current = null
     preparation.current?.abort(); prepareAttempt.current = null
     dispatchRequest.current?.abort(); dispatchAttempt.current = null
+    deliveryRequest.current?.abort(); deliveryAttempt.current = null
     setCancelOpen(false); setCancelReason(''); setCancelError(null); setCancelNotice(null)
     setReauth(false); setPassword(''); setCancelBusy(false)
     setPrepareOpen(false); setPrepareBusy(false); setPrepareError(null); setPrepareNotice(null)
     setDispatchOpen(false); setDispatchBusy(false); setDispatchError(null); setDispatchNotice(null)
     setHandoffReference(''); setDispatchAttested(false); setDispatchReauth(false); setDispatchPassword('')
+    setDeliveryOpen(false); setDeliveryBusy(false); setDeliveryError(null); setDeliveryNotice(null)
+    setSelectedEvidence(''); setDeliveryAttested(false); setDeliveryReauth(false); setDeliveryPassword('')
     if (!orderId) return
     try {
       const result = await client.detail(orderId, signal)
@@ -339,6 +367,17 @@ export function OrdersPage() {
           allocation_state: 'consumed',
           inventory_state: 'conflict',
         },
+        delivery: {
+          ...detail.delivery,
+          eligible: false,
+          order_state: 'delivering',
+          dispatch_state: 'matched',
+          association_state: detail.conversation_id ? 'verified' : 'missing',
+          evidence_state: detail.conversation_id ? 'missing' : 'not_applicable',
+          dispatch_occurred_at: result.updated_at,
+          evidence_messages: [],
+          evidence_has_more: false,
+        },
       })
       setList((current) => current ? {
         ...current,
@@ -406,6 +445,117 @@ export function OrdersPage() {
     }
   }
 
+  const submitDelivery = async (event: FormEvent) => {
+    event.preventDefault()
+    if (
+      !detail || !canConfirmDelivery || !detail.delivery.eligible || !selectedEvidence
+      || !deliveryAttested || deliveryBusy
+    ) return
+    const expiry = auth.session?.recent_reauthentication_expires_at_epoch
+    if (expiry == null || expiry < Math.floor(Date.now() / 1000)) {
+      setDeliveryReauth(true); return
+    }
+    const signature = `${detail.order_id}:${detail.updated_at}:${selectedEvidence}`
+    if (!deliveryAttempt.current || deliveryAttempt.current.signature !== signature) {
+      deliveryAttempt.current = { signature, key: crypto.randomUUID() }
+    }
+    const controller = new AbortController()
+    deliveryRequest.current?.abort(); deliveryRequest.current = controller
+    setDeliveryBusy(true); setDeliveryError(null); setDeliveryNotice(null)
+    try {
+      const csrf = await auth.getCsrfForMutation()
+      if (controller.signal.aborted) return
+      const result = await client.confirmDelivery(
+        detail.order_id, detail.updated_at, selectedEvidence,
+        deliveryAttempt.current.key, csrf, controller.signal,
+      )
+      if (controller.signal.aborted) return
+      setDetail({
+        ...detail,
+        status: result.status,
+        delivered_at: result.delivered_at,
+        updated_at: result.updated_at,
+        delivery: {
+          ...detail.delivery,
+          eligible: false,
+          order_state: 'delivered',
+          evidence_state: 'not_applicable',
+          evidence_messages: [],
+          evidence_has_more: false,
+        },
+      })
+      setList((current) => current ? {
+        ...current,
+        items: current.items.map((item) => item.order_id === result.order_id
+          ? { ...item, status: result.status, updated_at: result.updated_at }
+          : item),
+      } : current)
+      setDeliveryOpen(false); setSelectedEvidence(''); setDeliveryAttested(false)
+      setDeliveryReauth(false); setDeliveryPassword('')
+      setDeliveryNotice(result.replayed
+        ? 'Delivery confirmation was already recorded. Showing the current Order.'
+        : 'Customer-reported receipt recorded. This timestamp is not the exact physical handoff time.')
+      deliveryAttempt.current = null
+    } catch (failure) {
+      if (controller.signal.aborted) return
+      const apiError = asApiError(failure)
+      if (apiError.code === 'recent_reauthentication_required') {
+        setDeliveryReauth(true)
+      } else if (
+        apiError.code === 'ORDER_STALE' || apiError.code === 'ORDER_STATE_CONFLICT'
+        || apiError.code === 'ORDER_DELIVERY_METHOD_UNSUPPORTED'
+        || apiError.code === 'ORDER_DISPATCH_EVIDENCE_REQUIRED'
+        || apiError.code === 'ORDER_DELIVERY_EVIDENCE_MISSING'
+        || apiError.code === 'ORDER_DELIVERY_EVIDENCE_INVALID'
+        || apiError.code === 'ORDER_DELIVERY_EVIDENCE_AMBIGUOUS'
+        || apiError.code === 'ORDER_DELIVERY_EVIDENCE_REUSED'
+        || apiError.code === 'ORDER_DELIVERY_UNSUPPORTED'
+        || apiError.code === 'IDEMPOTENCY_CONFLICT'
+      ) {
+        deliveryAttempt.current = null
+        setDeliveryOpen(false); setSelectedEvidence(''); setDeliveryAttested(false)
+        try {
+          const fresh = await client.detail(detail.order_id, controller.signal)
+          if (!controller.signal.aborted) setDetail(fresh)
+        } catch {
+          // Preserve the reviewed snapshot and show the authoritative conflict.
+        }
+        if (!controller.signal.aborted) {
+          setDeliveryError(apiError.code === 'ORDER_STALE' || apiError.code === 'ORDER_STATE_CONFLICT'
+            ? 'The Order changed since review. Its current delivery state is shown.'
+            : apiError.code === 'ORDER_DELIVERY_EVIDENCE_MISSING'
+              ? 'The selected customer message is no longer available. Current evidence is shown.'
+              : apiError.code === 'ORDER_DELIVERY_EVIDENCE_AMBIGUOUS'
+                ? 'Delivery evidence is ambiguous between delivering Orders. No confirmation was recorded.'
+                : apiError.code === 'ORDER_DELIVERY_EVIDENCE_REUSED'
+                  ? 'That customer message was already used. Current evidence is shown.'
+                  : 'Delivery confirmation is blocked. The current eligibility is shown.')
+          void loadList(new AbortController().signal)
+        }
+      } else if (apiError.status === 0 || apiError.status >= 500) {
+        setDeliveryError('The result could not be confirmed. Retry the same delivery request.')
+      } else {
+        deliveryAttempt.current = null
+        setDeliveryError(errorMessage(apiError))
+      }
+    } finally {
+      if (!controller.signal.aborted) setDeliveryBusy(false)
+    }
+  }
+
+  const confirmDeliveryPassword = async (event: FormEvent) => {
+    event.preventDefault(); setDeliveryBusy(true); setDeliveryError(null)
+    try {
+      await auth.reauthenticate(deliveryPassword)
+      setDeliveryReauth(false)
+      setDeliveryNotice('Password confirmed. Review the customer message and confirm receipt.')
+    } catch (failure) {
+      setDeliveryError(errorMessage(asApiError(failure)))
+    } finally {
+      setDeliveryPassword(''); setDeliveryBusy(false)
+    }
+  }
+
   const listPath = `/business/orders?${new URLSearchParams({ status: status ?? 'all', offset: String(offset) })}`
   const chooseStatus = (value: string) => setParams({ status: value, offset: '0' })
   const chooseOffset = (value: number) => setParams({ status: status ?? 'all', offset: String(value) })
@@ -445,6 +595,8 @@ export function OrdersPage() {
         {prepareNotice && <p role="status">{prepareNotice}</p>}
         {dispatchError && <p role="alert">{dispatchError}</p>}
         {dispatchNotice && <p role="status">{dispatchNotice}</p>}
+        {deliveryError && <p role="alert">{deliveryError}</p>}
+        {deliveryNotice && <p role="status">{deliveryNotice}</p>}
         {detail && <>
           <h2>Order {detail.order_id.slice(0, 8)}</h2>
           <dl className="orders-facts">
@@ -452,6 +604,7 @@ export function OrdersPage() {
             <div><dt>Accepted total</dt><dd>{formatAmount(detail.total_cdf, detail.currency)}</dd></div>
             <div><dt>Created</dt><dd><time dateTime={detail.created_at}>{formatDate(detail.created_at)}</time></dd></div>
             <div><dt>Recorded zone</dt><dd>{detail.delivery_zone}</dd></div>
+            {detail.delivered_at && <div><dt>Customer message received</dt><dd><time dateTime={detail.delivered_at}>{formatDate(detail.delivered_at)}</time></dd></div>}
           </dl>
           <section className="orders-preparation" aria-labelledby="order-preparation-heading">
             <h3 id="order-preparation-heading">Preparation readiness</h3>
@@ -512,6 +665,69 @@ export function OrdersPage() {
               <PasswordField id="order-dispatch-password" label="Confirm Administrator password" autoComplete="current-password"
                 value={dispatchPassword} disabled={dispatchBusy} required onChange={(event) => setDispatchPassword(event.target.value)} />
               <button className="button button--primary" disabled={dispatchBusy}>Confirm password</button>
+            </form>}
+          </section>
+          <section className="orders-delivery" aria-labelledby="order-delivery-heading">
+            <h3 id="order-delivery-heading">Delivery confirmation</h3>
+            <p className="orders-current-note">Delivery confirmation records when MBB received the customer&apos;s message. It is not the exact physical handoff time.</p>
+            <dl className="orders-facts">
+              <div><dt>Dispatch evidence</dt><dd>{detail.delivery.dispatch_state === 'matched' ? 'Matched immutable dispatch record' : 'Not available'}</dd></div>
+              <div><dt>Customer association</dt><dd>{detail.delivery.association_state === 'verified' ? 'Verified Order conversation' : detail.delivery.association_state === 'ambiguous' ? 'Ambiguous between delivering Orders' : detail.delivery.association_state === 'missing' ? 'Verified conversation missing' : 'Not applicable'}</dd></div>
+              <div><dt>Eligibility</dt><dd>{deliveryReadiness(detail.delivery)}</dd></div>
+            </dl>
+            {detail.delivery.dispatch_occurred_at && <p>Dispatched <time dateTime={detail.delivery.dispatch_occurred_at}>{formatDate(detail.delivery.dispatch_occurred_at)}</time></p>}
+            {detail.delivery.evidence_messages.length > 0 && <div className="orders-evidence-list" aria-label="Eligible customer receipt messages">
+              <h4>Eligible customer messages</h4>
+              <p>These are authentic inbound WhatsApp text messages stored after dispatch. An Administrator must decide whether a message unambiguously confirms customer receipt.</p>
+              {detail.delivery.evidence_messages.map((message) => <article key={message.message_id} className="orders-evidence-message">
+                {canConfirmDelivery && deliveryOpen && <input
+                  type="radio"
+                  id={`delivery-evidence-${message.message_id}`}
+                  name="delivery-evidence"
+                  value={message.message_id}
+                  checked={selectedEvidence === message.message_id}
+                  disabled={deliveryBusy}
+                  onChange={() => {
+                    setSelectedEvidence(message.message_id)
+                    setDeliveryAttested(false)
+                    deliveryAttempt.current = null
+                  }}
+                />}
+                <div>
+                  {canConfirmDelivery && deliveryOpen
+                    ? <label htmlFor={`delivery-evidence-${message.message_id}`}><strong>Inbound WhatsApp customer message</strong></label>
+                    : <strong>Inbound WhatsApp customer message</strong>}
+                  <blockquote>{message.content_excerpt}{message.content_truncated ? '…' : ''}</blockquote>
+                  <p>Received by MBB <time dateTime={message.received_at}>{formatDate(message.received_at)}</time> · receipt sequence {message.inbound_receipt_order}</p>
+                </div>
+              </article>)}
+              {detail.delivery.evidence_has_more && <p>Only the 20 most recent eligible messages are shown. Open the associated Inbox conversation for full context.</p>}
+            </div>}
+            {canConfirmDelivery && detail.delivery.eligible && !deliveryOpen && <div className="orders-actions">
+              <button className="button button--primary" onClick={() => {
+                setDeliveryOpen(true); setDeliveryError(null); setDeliveryNotice(null)
+              }}>Confirm customer receipt</button>
+            </div>}
+            {canConfirmDelivery && detail.delivery.eligible && deliveryOpen && <form className="orders-delivery-confirm" onSubmit={(event) => void submitDelivery(event)}>
+              <h3>Confirm delivery from customer evidence</h3>
+              <p>Select one customer-originated message above. Do not infer receipt from dispatch or courier handoff.</p>
+              <label className="orders-attestation">
+                <input type="checkbox" checked={deliveryAttested} disabled={deliveryBusy || !selectedEvidence}
+                  onChange={(event) => { setDeliveryAttested(event.target.checked); deliveryAttempt.current = null }} />
+                I reviewed the selected message and attest that the customer unambiguously reported receiving this Order.
+              </label>
+              <div className="orders-actions">
+                <button className="button button--primary" disabled={deliveryBusy || !selectedEvidence || !deliveryAttested || deliveryReauth}>Confirm delivery</button>
+                <button type="button" className="button button--secondary" disabled={deliveryBusy} onClick={() => {
+                  setDeliveryOpen(false); setSelectedEvidence(''); setDeliveryAttested(false)
+                  setDeliveryError(null); setDeliveryReauth(false); setDeliveryPassword(''); deliveryAttempt.current = null
+                }}>Keep delivering</button>
+              </div>
+            </form>}
+            {canConfirmDelivery && deliveryOpen && deliveryReauth && <form className="orders-delivery-confirm" onSubmit={(event) => void confirmDeliveryPassword(event)}>
+              <PasswordField id="order-delivery-password" label="Confirm Administrator password" autoComplete="current-password"
+                value={deliveryPassword} disabled={deliveryBusy} required onChange={(event) => setDeliveryPassword(event.target.value)} />
+              <button className="button button--primary" disabled={deliveryBusy}>Confirm password</button>
             </form>}
           </section>
           <h3>Accepted commercial snapshot</h3>

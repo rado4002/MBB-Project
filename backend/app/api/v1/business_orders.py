@@ -88,6 +88,7 @@ from app.modules.m7_conversion.order_delivery import (
     OrderDeliveryUnavailable,
     UnsupportedOrderDelivery,
     confirm_delivered_order,
+    get_order_delivery_eligibility,
 )
 from app.request_ids import normalize_or_generate_request_id
 from app.schemas.common import OrderStatus
@@ -158,11 +159,37 @@ class OrderDispatchEligibilityResponse(StrictOrderRead):
     required_quantity: int | None
 
 
+class OrderDeliveryEvidenceMessageResponse(StrictOrderRead):
+    message_id: UUID
+    content_excerpt: str = Field(max_length=500)
+    content_truncated: bool
+    received_at: datetime
+    inbound_receipt_order: int = Field(gt=0)
+    provenance: Literal["inbound_whatsapp_customer_message"] = (
+        "inbound_whatsapp_customer_message"
+    )
+
+
+class OrderDeliveryEligibilityResponse(StrictOrderRead):
+    eligible: bool
+    order_state: str
+    delivery_method_state: str
+    line_state: str
+    dispatch_state: str
+    association_state: str
+    evidence_state: str
+    dispatch_occurred_at: datetime | None
+    evidence_messages: list[OrderDeliveryEvidenceMessageResponse] = Field(max_length=20)
+    evidence_has_more: bool
+
+
 class OrderDetail(OrderQueueItem):
     items: list[OrderLineSnapshot]
     delivery_zone: str
+    delivered_at: datetime | None
     preparation: OrderPreparationEligibilityResponse
     dispatch: OrderDispatchEligibilityResponse
+    delivery: OrderDeliveryEligibilityResponse
 
 
 class OrderCancellationReason(str, Enum):
@@ -364,12 +391,23 @@ async def get_order(
         summary = _summary(order, lines, links.get(order_id))
         eligibility = await get_order_preparation_eligibility(db, order=order)
         dispatch = await get_order_dispatch_eligibility(db, order=order)
+        delivery = await get_order_delivery_eligibility(db, order=order)
         detail = OrderDetail(
             **summary.model_dump(),
             items=lines,
             delivery_zone=order.delivery_zone,
+            delivered_at=order.delivered_at,
             preparation=OrderPreparationEligibilityResponse(**eligibility.__dict__),
             dispatch=OrderDispatchEligibilityResponse(**dispatch.__dict__),
+            delivery=OrderDeliveryEligibilityResponse(
+                **{
+                    **delivery.__dict__,
+                    "evidence_messages": [
+                        OrderDeliveryEvidenceMessageResponse(**message.__dict__)
+                        for message in delivery.evidence_messages
+                    ],
+                }
+            ),
         )
     except (SQLAlchemyError, OSError, ValidationError, TypeError, ValueError) as exc:
         raise _unavailable() from exc

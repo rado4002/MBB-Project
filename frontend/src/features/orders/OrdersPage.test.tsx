@@ -11,6 +11,7 @@ const orderId = '11111111-1111-4111-8111-111111111111'
 const conversationId = '22222222-2222-4222-8222-222222222222'
 const productId = '33333333-3333-4333-8333-333333333333'
 const itemId = '44444444-4444-4444-8444-444444444444'
+const evidenceId = '77777777-7777-4777-8777-777777777777'
 const base = '/api/v1/business/orders'
 const summary = {
   order_id: orderId, status: 'pending', created_at: '2026-10-01T12:00:00Z',
@@ -19,7 +20,7 @@ const summary = {
   first_product_name: 'Fictional Air Fryer', conversation_id: conversationId,
 }
 const detail = {
-  ...summary, delivery_zone: 'Kinshasa', items: [{
+  ...summary, delivery_zone: 'Kinshasa', delivered_at: null, items: [{
     product_id: productId, sellable_item_id: itemId, product_name: 'Fictional Air Fryer',
     model_label: '6L', quantity: 2, price_id: '55555555-5555-4555-8555-555555555555',
     unit_price_usd: '55.25', exchange_rate_id: '66666666-6666-4666-8666-666666666666',
@@ -33,6 +34,12 @@ const detail = {
     eligible: false, order_state: 'not_preparing', payment_state: 'missing',
     allocation_state: 'missing', inventory_state: 'conflict',
     delivery_method_state: 'supported', required_quantity: 2,
+  },
+  delivery: {
+    eligible: false, order_state: 'not_delivering', delivery_method_state: 'supported',
+    line_state: 'single', dispatch_state: 'missing', association_state: 'not_applicable',
+    evidence_state: 'not_applicable', dispatch_occurred_at: null,
+    evidence_messages: [], evidence_has_more: false,
   },
 }
 
@@ -231,6 +238,190 @@ describe('read-only Business Orders', () => {
       csrf: 'dispatch-csrf',
     })
     expect(submissions[0]?.key).toMatch(/^[0-9a-f-]{36}$/)
+  })
+
+  it('lets an Administrator select customer evidence and attest reported receipt', async () => {
+    const submissions: { body: unknown; key: string | null; csrf: string | null }[] = []
+    setup(conversationId, 'administrator')
+    server.use(
+      http.get(`${base}/${orderId}`, () => HttpResponse.json({
+        ...detail,
+        status: 'delivering', updated_at: '2026-10-01T12:03:00Z',
+        dispatch: { ...detail.dispatch, allocation_state: 'consumed' },
+        delivery: {
+          eligible: true, order_state: 'delivering', delivery_method_state: 'supported',
+          line_state: 'single', dispatch_state: 'matched', association_state: 'verified',
+          evidence_state: 'available', dispatch_occurred_at: '2026-10-01T12:03:00Z',
+          evidence_messages: [{
+            message_id: evidenceId,
+            content_excerpt: 'Commande reçue, matondo mingi — nimepokea vizuri.',
+            content_truncated: false,
+            received_at: '2026-10-01T12:14:00Z',
+            inbound_receipt_order: 8,
+            provenance: 'inbound_whatsapp_customer_message',
+          }],
+          evidence_has_more: false,
+        },
+      })),
+      http.get('/api/v1/auth/csrf', () => HttpResponse.json({ csrf_token: 'delivery-csrf', expires_at_epoch: 2_000_000_000 })),
+      http.post(`${base}/${orderId}/confirm-delivery`, async ({ request }) => {
+        submissions.push({
+          body: await request.json(),
+          key: request.headers.get('Idempotency-Key'),
+          csrf: request.headers.get('X-CSRF-Token'),
+        })
+        return HttpResponse.json({
+          order_id: orderId, status: 'delivered', delivered_at: '2026-10-01T12:14:00Z',
+          updated_at: '2026-10-01T12:15:00Z', replayed: false,
+        })
+      }),
+    )
+    const user = userEvent.setup()
+    renderApp(`/business/orders/${orderId}`)
+    const region = await screen.findByRole('region', { name: 'Order detail' })
+    expect(await within(region).findByText('Customer receipt evidence is ready for Administrator review')).toBeInTheDocument()
+    expect(within(region).getByText(/not the exact physical handoff time/i)).toBeInTheDocument()
+    expect(within(region).getByText(/Commande reçue, matondo mingi/)).toBeInTheDocument()
+    await user.click(within(region).getByRole('button', { name: 'Confirm customer receipt' }))
+    await user.click(within(region).getByLabelText('Inbound WhatsApp customer message'))
+    await user.click(within(region).getByLabelText(/attest that the customer unambiguously reported receiving/))
+    await expectAccessible(document.body)
+    await user.click(within(region).getByRole('button', { name: 'Confirm delivery' }))
+    expect(await within(region).findByText(/Customer-reported receipt recorded/)).toBeInTheDocument()
+    expect(within(region).getByText('delivered')).toBeInTheDocument()
+    expect(submissions[0]).toMatchObject({
+      body: {
+        expected_updated_at: '2026-10-01T12:03:00Z',
+        evidence_message_id: evidenceId,
+        attested: true,
+      },
+      csrf: 'delivery-csrf',
+    })
+    expect(submissions[0]?.key).toMatch(/^[0-9a-f-]{36}$/)
+  })
+
+  it('keeps delivery evidence read-only for Operators', async () => {
+    setup(conversationId, 'operator')
+    server.use(http.get(`${base}/${orderId}`, () => HttpResponse.json({
+      ...detail,
+      status: 'delivering',
+      delivery: {
+        eligible: true, order_state: 'delivering', delivery_method_state: 'supported',
+        line_state: 'single', dispatch_state: 'matched', association_state: 'verified',
+        evidence_state: 'available', dispatch_occurred_at: '2026-10-01T12:03:00Z',
+        evidence_messages: [{
+          message_id: evidenceId, content_excerpt: 'Nimepokea, merci.', content_truncated: false,
+          received_at: '2026-10-01T12:14:00Z', inbound_receipt_order: 8,
+          provenance: 'inbound_whatsapp_customer_message',
+        }],
+        evidence_has_more: false,
+      },
+    })))
+    renderApp(`/business/orders/${orderId}`)
+    const region = await screen.findByRole('region', { name: 'Order detail' })
+    expect(await within(region).findByText('Nimepokea, merci.')).toBeInTheDocument()
+    expect(within(region).queryByRole('button', { name: 'Confirm customer receipt' })).not.toBeInTheDocument()
+    expect(within(region).queryByRole('radio')).not.toBeInTheDocument()
+  })
+
+  it('preserves delivery review through reauthentication and reuses a retry key', async () => {
+    const keys: (string | null)[] = []
+    let writes = 0
+    setup(conversationId, 'administrator')
+    const delivering = {
+      ...detail,
+      status: 'delivering', updated_at: '2026-10-01T12:03:00Z',
+      delivery: {
+        eligible: true, order_state: 'delivering', delivery_method_state: 'supported',
+        line_state: 'single', dispatch_state: 'matched', association_state: 'verified',
+        evidence_state: 'available', dispatch_occurred_at: '2026-10-01T12:03:00Z',
+        evidence_messages: [{
+          message_id: evidenceId, content_excerpt: 'Oui, reçu. Asante sana.',
+          content_truncated: false, received_at: '2026-10-01T12:14:00Z',
+          inbound_receipt_order: 8, provenance: 'inbound_whatsapp_customer_message',
+        }],
+        evidence_has_more: false,
+      },
+    }
+    server.use(
+      http.get('/api/v1/auth/session', () => HttpResponse.json({
+        ...sessionFixture('administrator'), recent_reauthentication_expires_at_epoch: null,
+      })),
+      http.get(`${base}/${orderId}`, () => HttpResponse.json(delivering)),
+      http.get('/api/v1/auth/csrf', () => HttpResponse.json({ csrf_token: 'pre-reauth-csrf', expires_at_epoch: 2_000_000_000 })),
+      http.post('/api/v1/auth/reauthenticate', () => HttpResponse.json({
+        ...sessionFixture('administrator'), recent_reauthentication_expires_at_epoch: 2_000_000_000,
+        csrf_token: 'reauth-delivery-csrf',
+      })),
+      http.post(`${base}/${orderId}/confirm-delivery`, ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        writes += 1
+        if (writes === 1) return HttpResponse.json({}, { status: 503 })
+        return HttpResponse.json({
+          order_id: orderId, status: 'delivered', delivered_at: '2026-10-01T12:14:00Z',
+          updated_at: '2026-10-01T12:15:00Z', replayed: true,
+        })
+      }),
+    )
+    const user = userEvent.setup()
+    renderApp(`/business/orders/${orderId}`)
+    const region = await screen.findByRole('region', { name: 'Order detail' })
+    await user.click(await within(region).findByRole('button', { name: 'Confirm customer receipt' }))
+    await user.click(within(region).getByLabelText('Inbound WhatsApp customer message'))
+    await user.click(within(region).getByLabelText(/attest that the customer unambiguously reported receiving/))
+    await user.click(within(region).getByRole('button', { name: 'Confirm delivery' }))
+    await user.type(within(region).getByLabelText('Confirm Administrator password'), 'Administrator-Only-42!')
+    await user.click(within(region).getByRole('button', { name: 'Confirm password' }))
+    expect(await within(region).findByText(/Password confirmed/)).toBeInTheDocument()
+    await user.click(within(region).getByRole('button', { name: 'Confirm delivery' }))
+    expect(await within(region).findByRole('alert')).toHaveTextContent(/result could not be confirmed/)
+    await user.click(within(region).getByRole('button', { name: 'Confirm delivery' }))
+    expect(await within(region).findByText(/already recorded/)).toBeInTheDocument()
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).toBe(keys[1])
+  })
+
+  it('refreshes delivery eligibility after evidence conflict', async () => {
+    let detailReads = 0
+    setup(conversationId, 'administrator')
+    server.use(
+      http.get(`${base}/${orderId}`, () => {
+        detailReads += 1
+        return HttpResponse.json({
+          ...detail,
+          status: 'delivering', updated_at: '2026-10-01T12:03:00Z',
+          delivery: detailReads === 1 ? {
+            eligible: true, order_state: 'delivering', delivery_method_state: 'supported',
+            line_state: 'single', dispatch_state: 'matched', association_state: 'verified',
+            evidence_state: 'available', dispatch_occurred_at: '2026-10-01T12:03:00Z',
+            evidence_messages: [{
+              message_id: evidenceId, content_excerpt: 'Reçu, merci.', content_truncated: false,
+              received_at: '2026-10-01T12:14:00Z', inbound_receipt_order: 8,
+              provenance: 'inbound_whatsapp_customer_message',
+            }],
+            evidence_has_more: false,
+          } : {
+            ...detail.delivery, order_state: 'delivering', dispatch_state: 'matched',
+            association_state: 'verified', evidence_state: 'missing',
+            dispatch_occurred_at: '2026-10-01T12:03:00Z',
+          },
+        })
+      }),
+      http.get('/api/v1/auth/csrf', () => HttpResponse.json({ csrf_token: 'delivery-csrf', expires_at_epoch: 2_000_000_000 })),
+      http.post(`${base}/${orderId}/confirm-delivery`, () => HttpResponse.json({
+        error: { code: 'ORDER_DELIVERY_EVIDENCE_REUSED', message: 'Evidence reused.' },
+      }, { status: 409 })),
+    )
+    const user = userEvent.setup()
+    renderApp(`/business/orders/${orderId}`)
+    const region = await screen.findByRole('region', { name: 'Order detail' })
+    await user.click(await within(region).findByRole('button', { name: 'Confirm customer receipt' }))
+    await user.click(within(region).getByLabelText('Inbound WhatsApp customer message'))
+    await user.click(within(region).getByLabelText(/attest that the customer unambiguously reported receiving/))
+    await user.click(within(region).getByRole('button', { name: 'Confirm delivery' }))
+    expect(await within(region).findByRole('alert')).toHaveTextContent(/already used/)
+    expect(within(region).getByText('No eligible post-dispatch inbound customer text has been received')).toBeInTheDocument()
+    expect(within(region).queryByRole('button', { name: 'Confirm customer receipt' })).not.toBeInTheDocument()
   })
 
   it('lets an Administrator cancel a reviewed pending Order with a structured reason', async () => {

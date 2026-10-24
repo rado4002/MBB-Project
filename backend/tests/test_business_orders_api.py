@@ -318,6 +318,19 @@ async def test_authoritative_snapshot_survives_current_commercial_changes(
             "delivery_method_state": "supported",
             "required_quantity": 2,
         }
+        assert body["delivered_at"] is None
+        assert body["delivery"] == {
+            "eligible": False,
+            "order_state": "not_delivering",
+            "delivery_method_state": "supported",
+            "line_state": "single",
+            "dispatch_state": "missing",
+            "association_state": "not_applicable",
+            "evidence_state": "not_applicable",
+            "dispatch_occurred_at": None,
+            "evidence_messages": [],
+            "evidence_has_more": False,
+        }
         assert Decimal(body["items"][0]["usd_to_cdf_rate"]) == Decimal("2800.000000")
         assert (await client.get("/api/v1/business/orders?status=delivered")).json()[
             "items"
@@ -565,6 +578,25 @@ async def test_administrator_confirms_delivery_with_reauth_replay_and_no_commerc
 
     async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
         csrf = await _login(client, "commerce.admin", ADMIN_PASSWORD)
+        detail = await client.get(f"/api/v1/business/orders/{order_id}")
+        assert detail.status_code == 200
+        delivery = detail.json()["delivery"]
+        assert delivery["eligible"] is True
+        assert delivery["order_state"] == "delivering"
+        assert delivery["dispatch_state"] == "matched"
+        assert delivery["association_state"] == "verified"
+        assert delivery["evidence_state"] == "available"
+        assert delivery["evidence_has_more"] is False
+        assert delivery["evidence_messages"] == [
+            {
+                "message_id": str(evidence.message_id),
+                "content_excerpt": evidence.content,
+                "content_truncated": False,
+                "received_at": evidence.created_at.isoformat().replace("+00:00", "Z"),
+                "inbound_receipt_order": evidence.inbound_receipt_order,
+                "provenance": "inbound_whatsapp_customer_message",
+            }
+        ]
         future = datetime.now(timezone.utc).timestamp() + 1000
         monkeypatch.setattr("app.api.browser_auth_deps.time.time", lambda: future)
         denied = await client.post(
@@ -676,6 +708,47 @@ async def test_operator_cannot_confirm_delivery(accepted_order):
             await db.scalar(select(func.count()).select_from(OrderDeliveryConfirmation))
             == 0
         )
+
+
+@pytest.mark.asyncio
+async def test_delivery_evidence_read_is_bounded_ordered_and_truncated(accepted_order):
+    transport, factory, seeded, order_id = accepted_order
+    _reviewed_at, movement = await _make_delivering(factory, order_id)
+    async with factory() as db:
+        for index in range(21):
+            received_at = movement.occurred_at + timedelta(seconds=index + 1)
+            db.add(
+                Message(
+                    message_id=uuid.uuid4(),
+                    conversation_id=seeded.conversation_id,
+                    timestamp=received_at,
+                    created_at=received_at,
+                    direction="inbound",
+                    content=("x" * 501 if index == 20 else f"Receipt candidate {index}"),
+                    content_type="text",
+                    language="french",
+                    whatsapp_message_id=f"bounded-delivery-evidence-{index}",
+                )
+            )
+        await db.commit()
+
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        await _login(client, "commerce.operator", OPERATOR_PASSWORD)
+        response = await client.get(f"/api/v1/business/orders/{order_id}")
+        assert response.status_code == 200
+        delivery = response.json()["delivery"]
+        assert delivery["eligible"] is True
+        assert delivery["evidence_has_more"] is True
+        assert len(delivery["evidence_messages"]) == 20
+        newest = delivery["evidence_messages"][0]
+        assert newest["content_excerpt"] == "x" * 500
+        assert newest["content_truncated"] is True
+        assert newest["provenance"] == "inbound_whatsapp_customer_message"
+        receipt_orders = [
+            message["inbound_receipt_order"]
+            for message in delivery["evidence_messages"]
+        ]
+        assert receipt_orders == sorted(receipt_orders, reverse=True)
 
 
 @pytest.mark.asyncio

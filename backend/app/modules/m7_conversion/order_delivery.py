@@ -18,8 +18,10 @@ from app.models.order_delivery_confirmation import OrderDeliveryConfirmation
 from app.models.stock_movement import StockMovement
 from app.modules.m4_conversation.order_delivery_evidence import (
     CustomerReceiptEvidenceAmbiguous,
+    CustomerReceiptEvidencePreview,
     CustomerReceiptEvidenceInvalid,
     CustomerReceiptEvidenceMissing,
+    list_customer_receipt_evidence_candidates,
     read_customer_receipt_evidence,
 )
 from app.modules.m7_conversion.order_fulfillment import (
@@ -92,6 +94,97 @@ class OrderDeliveryResult:
     order: Order
     confirmation: OrderDeliveryConfirmation
     replayed: bool
+
+
+@dataclass(frozen=True)
+class OrderDeliveryEligibility:
+    eligible: bool
+    order_state: str
+    delivery_method_state: str
+    line_state: str
+    dispatch_state: str
+    association_state: str
+    evidence_state: str
+    dispatch_occurred_at: datetime | None
+    evidence_messages: tuple[CustomerReceiptEvidencePreview, ...]
+    evidence_has_more: bool
+
+
+async def get_order_delivery_eligibility(
+    session: AsyncSession,
+    *,
+    order: Order,
+) -> OrderDeliveryEligibility:
+    """Project delivery readiness; confirmation rechecks all facts under locks."""
+    order_state = (
+        "delivering"
+        if order.status == "delivering"
+        else "delivered"
+        if order.status == "delivered"
+        else "not_delivering"
+    )
+    method_state = (
+        "supported" if order.delivery_method == "moto_taxi" else "unsupported"
+    )
+    try:
+        sellable_item_id, quantity = _single_line(order)
+        line_state = "single"
+    except UnsupportedOrderPreparation:
+        sellable_item_id, quantity = None, None
+        line_state = "unsupported"
+    movement = await session.scalar(
+        select(StockMovement).where(
+            StockMovement.order_id == order.order_id,
+            StockMovement.operation_kind == "dispatch",
+        )
+    )
+    dispatch_state = (
+        "matched"
+        if movement is not None
+        and line_state == "single"
+        and movement.sellable_item_id == sellable_item_id
+        and movement.dispatched_quantity == quantity
+        else "missing"
+    )
+    if (
+        order_state != "delivering"
+        or method_state != "supported"
+        or line_state != "single"
+        or dispatch_state != "matched"
+    ):
+        return OrderDeliveryEligibility(
+            eligible=False,
+            order_state=order_state,
+            delivery_method_state=method_state,
+            line_state=line_state,
+            dispatch_state=dispatch_state,
+            association_state="not_applicable",
+            evidence_state="not_applicable",
+            dispatch_occurred_at=movement.occurred_at if movement is not None else None,
+            evidence_messages=(),
+            evidence_has_more=False,
+        )
+    candidates = await list_customer_receipt_evidence_candidates(
+        session,
+        order_id=order.order_id,
+        customer_id=order.customer_id,
+        dispatched_at=movement.occurred_at,
+    )
+    return OrderDeliveryEligibility(
+        eligible=(
+            candidates.association_state == "verified"
+            and candidates.evidence_state == "available"
+        ),
+        order_state=order_state,
+        delivery_method_state=method_state,
+        line_state=line_state,
+        dispatch_state=dispatch_state,
+        association_state=candidates.association_state,
+        evidence_state=candidates.evidence_state,
+        dispatch_occurred_at=movement.occurred_at,
+        evidence_messages=candidates.items,
+        evidence_has_more=candidates.has_more,
+    )
 
 
 def _digest(purpose: bytes, value: bytes) -> str:
