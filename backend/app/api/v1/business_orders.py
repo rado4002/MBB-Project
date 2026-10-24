@@ -73,6 +73,22 @@ from app.modules.m7_conversion.order_dispatch import (
     dispatch_prepared_order,
     get_order_dispatch_eligibility,
 )
+from app.modules.m7_conversion.order_delivery import (
+    OrderDeliveryDispatchEvidenceRequired,
+    OrderDeliveryEvidenceAmbiguous,
+    OrderDeliveryEvidenceInvalid,
+    OrderDeliveryEvidenceMissing,
+    OrderDeliveryEvidenceReused,
+    OrderDeliveryForbidden,
+    OrderDeliveryIdempotencyConflict,
+    OrderDeliveryMethodUnsupported,
+    OrderDeliveryNotFound,
+    OrderDeliveryStale,
+    OrderDeliveryStateConflict,
+    OrderDeliveryUnavailable,
+    UnsupportedOrderDelivery,
+    confirm_delivered_order,
+)
 from app.request_ids import normalize_or_generate_request_id
 from app.schemas.common import OrderStatus
 
@@ -220,6 +236,27 @@ class OrderDispatchRequest(StrictOrderRead):
 class OrderDispatchResponse(StrictOrderRead):
     order_id: UUID
     status: OrderStatus
+    updated_at: datetime
+    replayed: bool
+
+
+class OrderDeliveryConfirmationRequest(StrictOrderRead):
+    expected_updated_at: datetime
+    evidence_message_id: UUID4
+    attested: Literal[True]
+
+    @field_validator("expected_updated_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("expected_updated_at must include a timezone")
+        return value
+
+
+class OrderDeliveryConfirmationResponse(StrictOrderRead):
+    order_id: UUID
+    status: Literal[OrderStatus.delivered]
+    delivered_at: datetime
     updated_at: datetime
     replayed: bool
 
@@ -573,6 +610,128 @@ async def dispatch_order(
     return OrderDispatchResponse(
         order_id=result.order.order_id,
         status=OrderStatus(result.order.status),
+        updated_at=result.order.updated_at,
+        replayed=result.replayed,
+    )
+
+
+@router.post(
+    "/{order_id}/confirm-delivery",
+    response_model=OrderDeliveryConfirmationResponse,
+)
+async def confirm_order_delivery(
+    order_id: UUID,
+    body: OrderDeliveryConfirmationRequest,
+    request: Request,
+    response: Response,
+    principal: Annotated[
+        BrowserPrincipal, Depends(require_capability("order.delivery.confirm"))
+    ],
+    _csrf: Annotated[BrowserPrincipal, Depends(require_csrf)],
+    _recent: Annotated[BrowserPrincipal, Depends(require_recent_reauthentication)],
+    settings: Annotated[Settings, Depends(get_browser_settings)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[
+        UUID4, Header(alias="Idempotency-Key", include_in_schema=True)
+    ],
+) -> OrderDeliveryConfirmationResponse:
+    validate_state_changing_request(request, settings)
+    request_id = normalize_or_generate_request_id(
+        getattr(request.state, "request_id", None)
+        or request.headers.get("X-Request-ID")
+    )
+    try:
+        result = await confirm_delivered_order(
+            db,
+            order_id=order_id,
+            expected_updated_at=body.expected_updated_at,
+            evidence_message_id=body.evidence_message_id,
+            attested=body.attested,
+            idempotency_key=idempotency_key,
+            actor_account_id=principal.account.account_id,
+            actor_display_name=principal.account.display_name,
+            actor_role=principal.account.role,
+            request_id=request_id,
+            source_network_fingerprint=principal.session.record.ip_prefix_fingerprint,
+            user_agent_fingerprint=principal.session.record.user_agent_fingerprint,
+        )
+    except OrderDeliveryNotFound as exc:
+        raise BrowserAuthError(
+            status_code=404, code="ORDER_NOT_FOUND", message="Order not found."
+        ) from exc
+    except OrderDeliveryForbidden as exc:
+        raise BrowserAuthError(
+            status_code=403,
+            code="FORBIDDEN",
+            message="Administrator permission is required.",
+        ) from exc
+    except OrderDeliveryIdempotencyConflict as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="IDEMPOTENCY_CONFLICT",
+            message="The idempotency key was already used for another confirmation.",
+        ) from exc
+    except OrderDeliveryStale as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_STALE",
+            message="The Order changed since it was reviewed.",
+        ) from exc
+    except OrderDeliveryStateConflict as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_STATE_CONFLICT",
+            message="Only a delivering Order can be confirmed delivered.",
+        ) from exc
+    except OrderDeliveryMethodUnsupported as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_DELIVERY_METHOD_UNSUPPORTED",
+            message="Only moto taxi Orders can be confirmed here.",
+        ) from exc
+    except OrderDeliveryDispatchEvidenceRequired as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_DISPATCH_EVIDENCE_REQUIRED",
+            message="Matching dispatch evidence is required.",
+        ) from exc
+    except OrderDeliveryEvidenceMissing as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_DELIVERY_EVIDENCE_MISSING",
+            message="Customer receipt evidence was not found.",
+        ) from exc
+    except OrderDeliveryEvidenceInvalid as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_DELIVERY_EVIDENCE_INVALID",
+            message="An authentic post-dispatch inbound customer text is required.",
+        ) from exc
+    except OrderDeliveryEvidenceAmbiguous as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_DELIVERY_EVIDENCE_AMBIGUOUS",
+            message="The customer message is ambiguous between delivering Orders.",
+        ) from exc
+    except OrderDeliveryEvidenceReused as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_DELIVERY_EVIDENCE_REUSED",
+            message="The customer message was already used for another Order.",
+        ) from exc
+    except UnsupportedOrderDelivery as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_DELIVERY_UNSUPPORTED",
+            message="This Order cannot be confirmed in this workflow.",
+        ) from exc
+    except OrderDeliveryUnavailable as exc:
+        raise _unavailable() from exc
+    response.headers["Cache-Control"] = "no-store"
+    return OrderDeliveryConfirmationResponse(
+        order_id=result.order.order_id,
+        status=OrderStatus.delivered,
+        delivered_at=result.order.delivered_at,
         updated_at=result.order.updated_at,
         replayed=result.replayed,
     )

@@ -51,6 +51,7 @@ ROLE_CAPABILITIES = {
         "order.cancel",
         "order.prepare",
         "order.dispatch",
+        "order.delivery.confirm",
     },
     "operator": BASE_CAPABILITIES
     | {

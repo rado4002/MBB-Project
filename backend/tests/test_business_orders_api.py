@@ -9,23 +9,44 @@ from decimal import Decimal
 import httpx
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select, text
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy import func, select, text, update
+from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 
 from app import adapters
+from app.ai.commercial_state import read_commercial_state
 from app.api.v1 import business_orders
 from app.models.inventory import InventoryRecord
+from app.models.message import Message
 from app.models.operator_audit import OperatorAuditEvent
 from app.models.operator_account import OperatorAccount
 from app.models.order import Order
+from app.models.order_delivery_confirmation import OrderDeliveryConfirmation
 from app.models.order_draft import OrderDraft
 from app.models.payment import Payment
 from app.models.stock_allocation import StockAllocation
 from app.models.stock_movement import StockMovement
 from app.models.pricing import SellableItemPrice
-from app.modules.m7_conversion import order_cancellation, service as conversion_service
+from app.modules.m7_conversion import (
+    order_cancellation,
+    order_delivery,
+    service as conversion_service,
+)
 from app.modules.m7_conversion.order_allocation import allocate_paid_order_stock
+from app.modules.m7_conversion.order_delivery import (
+    OrderDeliveryEvidenceAmbiguous,
+    OrderDeliveryEvidenceInvalid,
+    OrderDeliveryEvidenceMissing,
+    OrderDeliveryEvidenceReused,
+    OrderDeliveryIdempotencyConflict,
+    OrderDeliveryResult,
+    OrderDeliveryStale,
+    OrderDeliveryStateConflict,
+    OrderDeliveryUnavailable,
+    confirm_delivered_order,
+)
+from app.modules.m7_conversion.order_dispatch import dispatch_prepared_order
 from app.modules.m7_conversion.order_fulfillment import prepare_confirmed_order
+from app.modules.m7_conversion.order_drafts import prepare_order_draft
 from app.tasks import celery_app
 from test_commerce_admin_api import (
     ADMIN_PASSWORD,
@@ -132,6 +153,116 @@ async def _make_prepared_for_dispatch(factory, order_id: uuid.UUID):
             actor_display_name="business-orders-dispatch-fixture",
         )
         return result.order.updated_at
+
+
+async def _make_delivering(factory, order_id: uuid.UUID):
+    reviewed_at = await _make_prepared_for_dispatch(factory, order_id)
+    async with factory() as db:
+        administrator = await db.scalar(
+            select(OperatorAccount).where(
+                OperatorAccount.username_normalized == "commerce.admin"
+            )
+        )
+        result = await dispatch_prepared_order(
+            db,
+            order_id=order_id,
+            expected_updated_at=reviewed_at,
+            idempotency_key=uuid.uuid4(),
+            handoff_reference=f"DELIVERY-TEST-{str(order_id)[:8]}",
+            attested=True,
+            actor_account_id=administrator.account_id,
+            actor_display_name=administrator.display_name,
+            actor_role=administrator.role,
+            request_id="delivery-test-dispatch",
+        )
+        return result.order.updated_at, result.movement
+
+
+async def _receipt_message(
+    factory,
+    conversation_id: uuid.UUID,
+    *,
+    content: str = "Commande reçue, matondo mingi — nimepokea vizuri.",
+    created_at: datetime | None = None,
+):
+    message_id = uuid.uuid4()
+    received_at = created_at or datetime.now(timezone.utc)
+    async with factory() as db:
+        values = dict(
+            message_id=message_id,
+            conversation_id=conversation_id,
+            timestamp=received_at,
+            direction="inbound",
+            content=content,
+            content_type="text",
+            language="french",
+            whatsapp_message_id=f"delivery-receipt-{message_id}",
+        )
+        if created_at is not None:
+            values["created_at"] = created_at
+        message = Message(**values)
+        db.add(message)
+        await db.commit()
+        await db.refresh(message)
+        return message
+
+
+async def _next_accepted_order(factory, seeded, *, quantity: int = 1):
+    source = await _receipt_message(
+        factory,
+        seeded.conversation_id,
+        content="Je veux une autre commande du même produit.",
+    )
+    async with factory() as db:
+        state = await read_commercial_state(db, seeded.conversation_id)
+        prepared = await prepare_order_draft(
+            db,
+            conversation_id=seeded.conversation_id,
+            source_message_id=source.message_id,
+            turn_id=uuid.uuid4(),
+            expected_ownership_version=1,
+            expected_commercial_state_revision=0 if state is None else state.revision,
+            sellable_item_id=seeded.sellable_item_id,
+            quantity=quantity,
+        )
+        await db.commit()
+    async with factory() as db:
+        code = await db.scalar(
+            select(OrderDraft.confirmation_code).where(
+                OrderDraft.draft_id == prepared.draft_id
+            )
+        )
+    result, _ = await _reply(factory, seeded, content=f"OUI {code}")
+    assert result is not None and result.order_id is not None
+    return result.order_id
+
+
+async def _confirm_delivery(
+    factory,
+    *,
+    order_id: uuid.UUID,
+    reviewed_at: datetime,
+    evidence_message_id: uuid.UUID,
+    key: uuid.UUID | None = None,
+):
+    async with factory() as db:
+        administrator = await db.scalar(
+            select(OperatorAccount).where(
+                OperatorAccount.username_normalized == "commerce.admin"
+            )
+        )
+        return await confirm_delivered_order(
+            db,
+            order_id=order_id,
+            expected_updated_at=reviewed_at,
+            evidence_message_id=evidence_message_id,
+            attested=True,
+            idempotency_key=key or uuid.uuid4(),
+            actor_account_id=administrator.account_id,
+            actor_display_name=administrator.display_name,
+            actor_role=administrator.role,
+            request_id="delivery-confirmation-test",
+        )
 
 
 @pytest.mark.asyncio
@@ -392,6 +523,358 @@ async def test_operator_cannot_dispatch_prepared_order(accepted_order):
             .select_from(StockMovement)
             .where(StockMovement.operation_kind == "dispatch")
         ) == 0
+
+
+@pytest.mark.asyncio
+async def test_administrator_confirms_delivery_with_reauth_replay_and_no_commerce_mutation(
+    accepted_order,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    transport, factory, seeded, order_id = accepted_order
+    reviewed_at, movement = await _make_delivering(factory, order_id)
+    evidence = await _receipt_message(
+        factory,
+        seeded.conversation_id,
+        created_at=movement.occurred_at + timedelta(microseconds=1),
+    )
+    key = uuid.uuid4()
+    url = f"/api/v1/business/orders/{order_id}/confirm-delivery"
+    body = {
+        "expected_updated_at": reviewed_at.isoformat(),
+        "evidence_message_id": str(evidence.message_id),
+        "attested": True,
+    }
+    async with factory() as db:
+        payment_before = await db.scalar(
+            select(Payment).where(Payment.order_id == order_id)
+        )
+        payment_snapshot = (
+            payment_before.status,
+            payment_before.amount,
+            payment_before.completed_at,
+        )
+        inventory_before = await db.get(InventoryRecord, seeded.inventory_id)
+        stock_snapshot = (
+            inventory_before.quantity,
+            inventory_before.allocated_quantity,
+            inventory_before.updated_at,
+        )
+        movement_count = await db.scalar(
+            select(func.count()).select_from(StockMovement)
+        )
+
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        csrf = await _login(client, "commerce.admin", ADMIN_PASSWORD)
+        future = datetime.now(timezone.utc).timestamp() + 1000
+        monkeypatch.setattr("app.api.browser_auth_deps.time.time", lambda: future)
+        denied = await client.post(
+            url,
+            headers={**_headers(csrf), "Idempotency-Key": str(key)},
+            json=body,
+        )
+        assert denied.status_code == 403
+        assert denied.json()["error"]["code"] == "recent_reauthentication_required"
+        csrf = await _reauthenticate(client, csrf)
+        first = await client.post(
+            url,
+            headers={**_headers(csrf), "Idempotency-Key": str(key)},
+            json=body,
+        )
+        assert first.status_code == 200, first.text
+        assert first.headers["cache-control"] == "no-store"
+        assert first.json()["status"] == "delivered"
+        assert first.json()["delivered_at"] == evidence.created_at.isoformat().replace(
+            "+00:00", "Z"
+        )
+        assert first.json()["replayed"] is False
+        replay = await client.post(
+            url,
+            headers={**_headers(csrf), "Idempotency-Key": str(key)},
+            json=body,
+        )
+        assert replay.status_code == 200 and replay.json()["replayed"] is True
+
+    async with factory() as db:
+        order = await db.get(Order, order_id)
+        confirmation = await db.scalar(
+            select(OrderDeliveryConfirmation).where(
+                OrderDeliveryConfirmation.order_id == order_id
+            )
+        )
+        audit = await db.scalar(
+            select(OperatorAuditEvent).where(
+                OperatorAuditEvent.action == "order.delivered",
+                OperatorAuditEvent.target_id == str(order_id),
+            )
+        )
+        payment_after = await db.scalar(
+            select(Payment).where(Payment.order_id == order_id)
+        )
+        inventory_after = await db.get(InventoryRecord, seeded.inventory_id)
+        assert order.status == "delivered" and order.delivered_at == evidence.created_at
+        assert confirmation.evidence_message_id == evidence.message_id
+        assert confirmation.dispatch_movement_id == movement.movement_id
+        assert audit.event_metadata["confirmation_id"] == str(
+            confirmation.confirmation_id
+        )
+        assert audit.event_metadata["evidence_message_id"] == str(evidence.message_id)
+        assert audit.event_metadata["attested"] is True
+        assert (
+            payment_after.status,
+            payment_after.amount,
+            payment_after.completed_at,
+        ) == payment_snapshot
+        assert (
+            inventory_after.quantity,
+            inventory_after.allocated_quantity,
+            inventory_after.updated_at,
+        ) == stock_snapshot
+        assert (
+            await db.scalar(select(func.count()).select_from(StockMovement))
+            == movement_count
+        )
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(OperatorAuditEvent)
+                .where(OperatorAuditEvent.action == "order.delivered")
+            )
+            == 1
+        )
+        with pytest.raises(DBAPIError, match="delivery confirmations are append-only"):
+            await db.execute(
+                update(OrderDeliveryConfirmation)
+                .where(OrderDeliveryConfirmation.order_id == order_id)
+                .values(evidence_fingerprint="0" * 64)
+            )
+
+
+@pytest.mark.asyncio
+async def test_operator_cannot_confirm_delivery(accepted_order):
+    transport, factory, seeded, order_id = accepted_order
+    reviewed_at, movement = await _make_delivering(factory, order_id)
+    evidence = await _receipt_message(
+        factory,
+        seeded.conversation_id,
+        created_at=movement.occurred_at + timedelta(microseconds=1),
+    )
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        csrf = await _login(client, "commerce.operator", OPERATOR_PASSWORD)
+        response = await client.post(
+            f"/api/v1/business/orders/{order_id}/confirm-delivery",
+            headers={**_headers(csrf), "Idempotency-Key": str(uuid.uuid4())},
+            json={
+                "expected_updated_at": reviewed_at.isoformat(),
+                "evidence_message_id": str(evidence.message_id),
+                "attested": True,
+            },
+        )
+        assert response.status_code == 403
+    async with factory() as db:
+        assert (await db.get(Order, order_id)).status == "delivering"
+        assert (
+            await db.scalar(select(func.count()).select_from(OrderDeliveryConfirmation))
+            == 0
+        )
+
+
+@pytest.mark.asyncio
+async def test_delivery_rejects_missing_and_pre_dispatch_evidence(accepted_order):
+    _transport, factory, seeded, order_id = accepted_order
+    reviewed_at, movement = await _make_delivering(factory, order_id)
+    with pytest.raises(OrderDeliveryEvidenceMissing):
+        await _confirm_delivery(
+            factory,
+            order_id=order_id,
+            reviewed_at=reviewed_at,
+            evidence_message_id=uuid.uuid4(),
+        )
+    pre_dispatch = await _receipt_message(
+        factory,
+        seeded.conversation_id,
+        created_at=movement.occurred_at - timedelta(seconds=1),
+    )
+    with pytest.raises(OrderDeliveryEvidenceInvalid):
+        await _confirm_delivery(
+            factory,
+            order_id=order_id,
+            reviewed_at=reviewed_at,
+            evidence_message_id=pre_dispatch.message_id,
+        )
+    async with factory() as db:
+        assert (await db.get(Order, order_id)).status == "delivering"
+        assert (
+            await db.scalar(select(func.count()).select_from(OrderDeliveryConfirmation))
+            == 0
+        )
+
+
+@pytest.mark.asyncio
+async def test_delivery_rejects_stale_write_and_changed_idempotent_request(
+    accepted_order,
+):
+    _transport, factory, seeded, order_id = accepted_order
+    reviewed_at, movement = await _make_delivering(factory, order_id)
+    evidence = await _receipt_message(
+        factory,
+        seeded.conversation_id,
+        created_at=movement.occurred_at + timedelta(microseconds=1),
+    )
+    with pytest.raises(OrderDeliveryStale):
+        await _confirm_delivery(
+            factory,
+            order_id=order_id,
+            reviewed_at=reviewed_at - timedelta(microseconds=1),
+            evidence_message_id=evidence.message_id,
+        )
+    key = uuid.uuid4()
+    await _confirm_delivery(
+        factory,
+        order_id=order_id,
+        reviewed_at=reviewed_at,
+        evidence_message_id=evidence.message_id,
+        key=key,
+    )
+    changed_evidence = await _receipt_message(factory, seeded.conversation_id)
+    with pytest.raises(OrderDeliveryIdempotencyConflict):
+        await _confirm_delivery(
+            factory,
+            order_id=order_id,
+            reviewed_at=reviewed_at,
+            evidence_message_id=changed_evidence.message_id,
+            key=key,
+        )
+
+
+@pytest.mark.asyncio
+async def test_delivery_serializes_competing_confirmations(accepted_order):
+    _transport, factory, seeded, order_id = accepted_order
+    reviewed_at, movement = await _make_delivering(factory, order_id)
+    evidence = await _receipt_message(
+        factory,
+        seeded.conversation_id,
+        created_at=movement.occurred_at + timedelta(microseconds=1),
+    )
+    results = await asyncio.gather(
+        _confirm_delivery(
+            factory,
+            order_id=order_id,
+            reviewed_at=reviewed_at,
+            evidence_message_id=evidence.message_id,
+        ),
+        _confirm_delivery(
+            factory,
+            order_id=order_id,
+            reviewed_at=reviewed_at,
+            evidence_message_id=evidence.message_id,
+        ),
+        return_exceptions=True,
+    )
+    assert sum(isinstance(result, OrderDeliveryResult) for result in results) == 1
+    assert any(isinstance(result, OrderDeliveryStateConflict) for result in results)
+    async with factory() as db:
+        assert (
+            await db.scalar(select(func.count()).select_from(OrderDeliveryConfirmation))
+            == 1
+        )
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(OperatorAuditEvent)
+                .where(OperatorAuditEvent.action == "order.delivered")
+            )
+            == 1
+        )
+
+
+@pytest.mark.asyncio
+async def test_delivery_rolls_back_order_evidence_and_audit_together(
+    accepted_order,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _transport, factory, seeded, order_id = accepted_order
+    reviewed_at, movement = await _make_delivering(factory, order_id)
+    evidence = await _receipt_message(
+        factory,
+        seeded.conversation_id,
+        created_at=movement.occurred_at + timedelta(microseconds=1),
+    )
+
+    async def fail_audit(*args, **kwargs):
+        raise RuntimeError("synthetic delivery audit failure")
+
+    monkeypatch.setattr(order_delivery, "append_operator_audit_event", fail_audit)
+    with pytest.raises(OrderDeliveryUnavailable):
+        await _confirm_delivery(
+            factory,
+            order_id=order_id,
+            reviewed_at=reviewed_at,
+            evidence_message_id=evidence.message_id,
+        )
+    async with factory() as db:
+        order = await db.get(Order, order_id)
+        assert order.status == "delivering" and order.delivered_at is None
+        assert (
+            await db.scalar(select(func.count()).select_from(OrderDeliveryConfirmation))
+            == 0
+        )
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(OperatorAuditEvent)
+                .where(OperatorAuditEvent.action == "order.delivered")
+            )
+            == 0
+        )
+
+
+@pytest.mark.asyncio
+async def test_delivery_rejects_ambiguous_and_reused_customer_evidence(accepted_order):
+    _transport, factory, seeded, first_order_id = accepted_order
+    first_reviewed_at, first_movement = await _make_delivering(factory, first_order_id)
+    second_order_id = await _next_accepted_order(factory, seeded)
+    second_reviewed_at, second_movement = await _make_delivering(factory, second_order_id)
+    first_evidence = await _receipt_message(
+        factory,
+        seeded.conversation_id,
+        created_at=max(first_movement.occurred_at, second_movement.occurred_at)
+        + timedelta(microseconds=1),
+    )
+
+    with pytest.raises(OrderDeliveryEvidenceAmbiguous):
+        await _confirm_delivery(
+            factory,
+            order_id=first_order_id,
+            reviewed_at=first_reviewed_at,
+            evidence_message_id=first_evidence.message_id,
+        )
+
+    async with factory() as db:
+        second = await db.get(Order, second_order_id)
+        second.status = "delivered"
+        second.delivered_at = datetime.now(timezone.utc)
+        second.updated_at = second.delivered_at
+        await db.commit()
+    await _confirm_delivery(
+        factory,
+        order_id=first_order_id,
+        reviewed_at=first_reviewed_at,
+        evidence_message_id=first_evidence.message_id,
+    )
+    async with factory() as db:
+        second = await db.get(Order, second_order_id)
+        second.status = "delivering"
+        second.delivered_at = None
+        second.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+        reused_reviewed_at = second.updated_at
+    with pytest.raises(OrderDeliveryEvidenceReused):
+        await _confirm_delivery(
+            factory,
+            order_id=second_order_id,
+            reviewed_at=reused_reviewed_at,
+            evidence_message_id=first_evidence.message_id,
+        )
 
 
 @pytest.mark.asyncio
