@@ -52,11 +52,14 @@ ROLE_CAPABILITIES = {
         "order.prepare",
         "order.dispatch",
         "order.delivery.confirm",
+        "order.delivery_issue.create",
+        "order.delivery_issue.close",
     },
     "operator": BASE_CAPABILITIES
     | {
         "product_offer.read",
         "order.read",
+        "order.delivery_issue.create",
         "conversation.read",
         "message.read",
         "message.reply",

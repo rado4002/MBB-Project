@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.order import Order
 from app.models.order_delivery_confirmation import OrderDeliveryConfirmation
+from app.models.order_delivery_issue import OrderDeliveryIssue
 from app.models.stock_movement import StockMovement
 from app.modules.m4_conversation.order_delivery_evidence import (
     CustomerReceiptEvidenceAmbiguous,
@@ -58,6 +59,10 @@ class OrderDeliveryMethodUnsupported(OrderDeliveryError):
 
 
 class OrderDeliveryDispatchEvidenceRequired(OrderDeliveryError):
+    pass
+
+
+class OrderDeliveryIssueOpen(OrderDeliveryError):
     pass
 
 
@@ -105,6 +110,7 @@ class OrderDeliveryEligibility:
     dispatch_state: str
     association_state: str
     evidence_state: str
+    issue_state: str
     dispatch_occurred_at: datetime | None
     evidence_messages: tuple[CustomerReceiptEvidencePreview, ...]
     evidence_has_more: bool
@@ -146,6 +152,13 @@ async def get_order_delivery_eligibility(
         and movement.dispatched_quantity == quantity
         else "missing"
     )
+    open_issue_id = await session.scalar(
+        select(OrderDeliveryIssue.issue_id).where(
+            OrderDeliveryIssue.order_id == order.order_id,
+            OrderDeliveryIssue.status == "open",
+        )
+    )
+    issue_state = "open" if open_issue_id is not None else "none"
     if (
         order_state != "delivering"
         or method_state != "supported"
@@ -160,6 +173,7 @@ async def get_order_delivery_eligibility(
             dispatch_state=dispatch_state,
             association_state="not_applicable",
             evidence_state="not_applicable",
+            issue_state=issue_state,
             dispatch_occurred_at=movement.occurred_at if movement is not None else None,
             evidence_messages=(),
             evidence_has_more=False,
@@ -174,6 +188,7 @@ async def get_order_delivery_eligibility(
         eligible=(
             candidates.association_state == "verified"
             and candidates.evidence_state == "available"
+            and issue_state == "none"
         ),
         order_state=order_state,
         delivery_method_state=method_state,
@@ -181,6 +196,7 @@ async def get_order_delivery_eligibility(
         dispatch_state=dispatch_state,
         association_state=candidates.association_state,
         evidence_state=candidates.evidence_state,
+        issue_state=issue_state,
         dispatch_occurred_at=movement.occurred_at,
         evidence_messages=candidates.items,
         evidence_has_more=candidates.has_more,
@@ -316,6 +332,16 @@ async def confirm_delivered_order(
         if order.status != "delivering" or order.delivered_at is not None:
             raise OrderDeliveryStateConflict(
                 "Order is not awaiting delivery confirmation"
+            )
+        open_issue_id = await session.scalar(
+            select(OrderDeliveryIssue.issue_id).where(
+                OrderDeliveryIssue.order_id == order_id,
+                OrderDeliveryIssue.status == "open",
+            )
+        )
+        if open_issue_id is not None:
+            raise OrderDeliveryIssueOpen(
+                "an unresolved delivery issue blocks delivery confirmation"
             )
         if order.updated_at != expected_updated_at:
             raise OrderDeliveryStale("Order changed since it was reviewed")

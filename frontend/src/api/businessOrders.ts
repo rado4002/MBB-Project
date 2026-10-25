@@ -34,6 +34,7 @@ export interface OrderDetail extends OrderQueueItem {
   preparation: OrderPreparationEligibility
   dispatch: OrderDispatchEligibility
   delivery: OrderDeliveryEligibility
+  delivery_issues: OrderDeliveryIssue[]
 }
 
 export interface OrderPreparationEligibility {
@@ -72,9 +73,48 @@ export interface OrderDeliveryEligibility {
   dispatch_state: 'matched' | 'missing'
   association_state: 'verified' | 'missing' | 'ambiguous' | 'not_applicable'
   evidence_state: 'available' | 'missing' | 'not_applicable'
+  issue_state: 'none' | 'open'
   dispatch_occurred_at: string | null
   evidence_messages: OrderDeliveryEvidenceMessage[]
   evidence_has_more: boolean
+}
+
+export type OrderDeliveryIssueType = 'failed' | 'disputed'
+export type OrderDeliveryIssueReason =
+  | 'recipient_unavailable'
+  | 'recipient_refused'
+  | 'address_problem'
+  | 'courier_problem'
+  | 'receipt_disputed'
+  | 'condition_disputed'
+  | 'item_disputed'
+  | 'other'
+export type OrderDeliveryIssueSource =
+  | 'customer_message'
+  | 'customer_call'
+  | 'courier_report'
+  | 'staff_observation'
+  | 'other'
+export type OrderDeliveryIssueResolution = 'false_alarm' | 'delivery_continuing'
+
+export interface OrderDeliveryIssue {
+  issue_id: string
+  order_id: string
+  issue_type: OrderDeliveryIssueType
+  reason_code: OrderDeliveryIssueReason
+  source: OrderDeliveryIssueSource
+  summary: string
+  evidence_message_id: string | null
+  status: 'open' | 'closed'
+  reported_by_account_id: string
+  reported_by_display_name: string
+  reported_at: string
+  resolution_code: OrderDeliveryIssueResolution | null
+  resolution_reason: string | null
+  closed_by_account_id: string | null
+  closed_by_display_name: string | null
+  closed_at: string | null
+  replayed: boolean
 }
 
 export type OrderCancellationReason =
@@ -187,5 +227,49 @@ export function createBusinessOrdersClient(onSessionExpired: () => void) {
       csrfToken,
       signal,
     }, onSessionExpired),
+    reportDeliveryIssue: (
+      id: string,
+      expectedOrderUpdatedAt: string,
+      issueType: OrderDeliveryIssueType,
+      reasonCode: OrderDeliveryIssueReason,
+      source: OrderDeliveryIssueSource,
+      summary: string,
+      evidenceMessageId: string | null,
+      idempotencyKey: string,
+      csrfToken: string,
+      signal: AbortSignal,
+    ) => requestJson<OrderDeliveryIssue>(`${base}/${encodeURIComponent(id)}/delivery-issues`, {
+      method: 'POST',
+      body: {
+        expected_order_updated_at: expectedOrderUpdatedAt,
+        issue_type: issueType,
+        reason_code: reasonCode,
+        source,
+        summary,
+        evidence_message_id: evidenceMessageId,
+      },
+      idempotencyKey,
+      csrfToken,
+      signal,
+    }, onSessionExpired),
+    closeDeliveryIssue: (
+      id: string,
+      issueId: string,
+      resolutionCode: OrderDeliveryIssueResolution,
+      resolutionReason: string,
+      idempotencyKey: string,
+      csrfToken: string,
+      signal: AbortSignal,
+    ) => requestJson<OrderDeliveryIssue>(
+      `${base}/${encodeURIComponent(id)}/delivery-issues/${encodeURIComponent(issueId)}/close`,
+      {
+        method: 'POST',
+        body: { resolution_code: resolutionCode, resolution_reason: resolutionReason },
+        idempotencyKey,
+        csrfToken,
+        signal,
+      },
+      onSessionExpired,
+    ),
   }
 }

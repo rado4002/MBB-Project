@@ -227,6 +227,8 @@ async def test_preauth_csrf_cookie_and_valid_login_are_opaque(harness) -> None:
             "internal_note.read",
             "message.read",
             "message.reply",
+            "order.delivery_issue.create",
+            "order.read",
             "product_offer.read",
         ]
     )

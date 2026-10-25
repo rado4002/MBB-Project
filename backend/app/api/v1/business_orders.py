@@ -16,6 +16,7 @@ from pydantic import (
     UUID4,
     ValidationError,
     field_validator,
+    model_validator,
 )
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -35,6 +36,7 @@ from app.database import get_db
 from app.models.conversation import Conversation
 from app.models.lead import Lead
 from app.models.order import Order
+from app.models.order_delivery_issue import OrderDeliveryIssue
 from app.models.order_draft import OrderDraft
 from app.modules.m7_conversion.order_cancellation import (
     OrderCancellationForbidden,
@@ -81,6 +83,7 @@ from app.modules.m7_conversion.order_delivery import (
     OrderDeliveryEvidenceReused,
     OrderDeliveryForbidden,
     OrderDeliveryIdempotencyConflict,
+    OrderDeliveryIssueOpen,
     OrderDeliveryMethodUnsupported,
     OrderDeliveryNotFound,
     OrderDeliveryStale,
@@ -89,6 +92,21 @@ from app.modules.m7_conversion.order_delivery import (
     UnsupportedOrderDelivery,
     confirm_delivered_order,
     get_order_delivery_eligibility,
+)
+from app.modules.m7_conversion.order_delivery_issues import (
+    OrderDeliveryIssueAlreadyOpen,
+    OrderDeliveryIssueDispatchRequired,
+    OrderDeliveryIssueEvidenceInvalid,
+    OrderDeliveryIssueEvidenceMissing,
+    OrderDeliveryIssueForbidden,
+    OrderDeliveryIssueIdempotencyConflict,
+    OrderDeliveryIssueNotFound,
+    OrderDeliveryIssueStale,
+    OrderDeliveryIssueStateConflict,
+    OrderDeliveryIssueUnavailable,
+    close_order_delivery_issue,
+    list_order_delivery_issues,
+    report_order_delivery_issue,
 )
 from app.request_ids import normalize_or_generate_request_id
 from app.schemas.common import OrderStatus
@@ -178,6 +196,7 @@ class OrderDeliveryEligibilityResponse(StrictOrderRead):
     dispatch_state: str
     association_state: str
     evidence_state: str
+    issue_state: Literal["none", "open"]
     dispatch_occurred_at: datetime | None
     evidence_messages: list[OrderDeliveryEvidenceMessageResponse] = Field(max_length=20)
     evidence_has_more: bool
@@ -190,6 +209,113 @@ class OrderDetail(OrderQueueItem):
     preparation: OrderPreparationEligibilityResponse
     dispatch: OrderDispatchEligibilityResponse
     delivery: OrderDeliveryEligibilityResponse
+    delivery_issues: list["OrderDeliveryIssueResponse"] = Field(max_length=20)
+
+
+class OrderDeliveryIssueType(str, Enum):
+    failed = "failed"
+    disputed = "disputed"
+
+
+class OrderDeliveryIssueReason(str, Enum):
+    recipient_unavailable = "recipient_unavailable"
+    recipient_refused = "recipient_refused"
+    address_problem = "address_problem"
+    courier_problem = "courier_problem"
+    receipt_disputed = "receipt_disputed"
+    condition_disputed = "condition_disputed"
+    item_disputed = "item_disputed"
+    other = "other"
+
+
+class OrderDeliveryIssueSource(str, Enum):
+    customer_message = "customer_message"
+    customer_call = "customer_call"
+    courier_report = "courier_report"
+    staff_observation = "staff_observation"
+    other = "other"
+
+
+class OrderDeliveryIssueResolution(str, Enum):
+    false_alarm = "false_alarm"
+    delivery_continuing = "delivery_continuing"
+
+
+class OrderDeliveryIssueReportRequest(StrictOrderRead):
+    expected_order_updated_at: datetime
+    issue_type: OrderDeliveryIssueType
+    reason_code: OrderDeliveryIssueReason
+    source: OrderDeliveryIssueSource
+    summary: str = Field(min_length=10, max_length=500)
+    evidence_message_id: UUID4 | None = None
+
+    @field_validator("expected_order_updated_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("expected_order_updated_at must include a timezone")
+        return value
+
+    @field_validator("summary")
+    @classmethod
+    def normalize_summary(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 10:
+            raise ValueError("summary must contain at least 10 characters")
+        return normalized
+
+    @model_validator(mode="after")
+    def reason_matches_type(self):
+        failed = {
+            OrderDeliveryIssueReason.recipient_unavailable,
+            OrderDeliveryIssueReason.recipient_refused,
+            OrderDeliveryIssueReason.address_problem,
+            OrderDeliveryIssueReason.courier_problem,
+            OrderDeliveryIssueReason.other,
+        }
+        disputed = {
+            OrderDeliveryIssueReason.receipt_disputed,
+            OrderDeliveryIssueReason.condition_disputed,
+            OrderDeliveryIssueReason.item_disputed,
+            OrderDeliveryIssueReason.other,
+        }
+        allowed = failed if self.issue_type == OrderDeliveryIssueType.failed else disputed
+        if self.reason_code not in allowed:
+            raise ValueError("reason_code does not match issue_type")
+        return self
+
+
+class OrderDeliveryIssueCloseRequest(StrictOrderRead):
+    resolution_code: OrderDeliveryIssueResolution
+    resolution_reason: str = Field(min_length=10, max_length=500)
+
+    @field_validator("resolution_reason")
+    @classmethod
+    def normalize_reason(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 10:
+            raise ValueError("resolution_reason must contain at least 10 characters")
+        return normalized
+
+
+class OrderDeliveryIssueResponse(StrictOrderRead):
+    issue_id: UUID
+    order_id: UUID
+    issue_type: OrderDeliveryIssueType
+    reason_code: OrderDeliveryIssueReason
+    source: OrderDeliveryIssueSource
+    summary: str
+    evidence_message_id: UUID | None
+    status: Literal["open", "closed"]
+    reported_by_account_id: UUID
+    reported_by_display_name: str
+    reported_at: datetime
+    resolution_code: OrderDeliveryIssueResolution | None
+    resolution_reason: str | None
+    closed_by_account_id: UUID | None
+    closed_by_display_name: str | None
+    closed_at: datetime | None
+    replayed: bool = False
 
 
 class OrderCancellationReason(str, Enum):
@@ -340,6 +466,39 @@ def _summary(
     )
 
 
+def _delivery_issue_response(
+    issue: OrderDeliveryIssue, *, replayed: bool = False
+) -> OrderDeliveryIssueResponse:
+    return OrderDeliveryIssueResponse(
+        issue_id=issue.issue_id,
+        order_id=issue.order_id,
+        issue_type=issue.issue_type,
+        reason_code=issue.reason_code,
+        source=issue.source,
+        summary=issue.summary,
+        evidence_message_id=issue.evidence_message_id,
+        status=issue.status,
+        reported_by_account_id=issue.reported_by_account_id,
+        reported_by_display_name=issue.reporter_display_name,
+        reported_at=issue.reported_at,
+        resolution_code=issue.resolution_code,
+        resolution_reason=issue.resolution_reason,
+        closed_by_account_id=issue.closed_by_account_id,
+        closed_by_display_name=issue.closed_by_display_name,
+        closed_at=issue.closed_at,
+        replayed=replayed,
+    )
+
+
+async def _delivery_issue_responses(
+    db: AsyncSession, *, order_id: UUID
+) -> list[OrderDeliveryIssueResponse]:
+    return [
+        _delivery_issue_response(issue)
+        for issue in await list_order_delivery_issues(db, order_id=order_id)
+    ]
+
+
 @router.get("", response_model=OrderQueueResponse)
 async def list_orders(
     params: Annotated[OrderListQuery, Query()],
@@ -392,6 +551,7 @@ async def get_order(
         eligibility = await get_order_preparation_eligibility(db, order=order)
         dispatch = await get_order_dispatch_eligibility(db, order=order)
         delivery = await get_order_delivery_eligibility(db, order=order)
+        delivery_issues = await _delivery_issue_responses(db, order_id=order_id)
         detail = OrderDetail(
             **summary.model_dump(),
             items=lines,
@@ -408,11 +568,187 @@ async def get_order(
                     ],
                 }
             ),
+            delivery_issues=delivery_issues,
         )
     except (SQLAlchemyError, OSError, ValidationError, TypeError, ValueError) as exc:
         raise _unavailable() from exc
     response.headers["Cache-Control"] = "no-store"
     return detail
+
+
+@router.post(
+    "/{order_id}/delivery-issues",
+    response_model=OrderDeliveryIssueResponse,
+    status_code=201,
+)
+async def report_delivery_issue(
+    order_id: UUID,
+    body: OrderDeliveryIssueReportRequest,
+    request: Request,
+    response: Response,
+    principal: Annotated[
+        BrowserPrincipal, Depends(require_capability("order.delivery_issue.create"))
+    ],
+    _csrf: Annotated[BrowserPrincipal, Depends(require_csrf)],
+    settings: Annotated[Settings, Depends(get_browser_settings)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[
+        UUID4, Header(alias="Idempotency-Key", include_in_schema=True)
+    ],
+) -> OrderDeliveryIssueResponse:
+    validate_state_changing_request(request, settings)
+    request_id = normalize_or_generate_request_id(
+        getattr(request.state, "request_id", None)
+        or request.headers.get("X-Request-ID")
+    )
+    try:
+        result = await report_order_delivery_issue(
+            db,
+            order_id=order_id,
+            expected_order_updated_at=body.expected_order_updated_at,
+            issue_type=body.issue_type.value,
+            reason_code=body.reason_code.value,
+            source=body.source.value,
+            summary=body.summary,
+            evidence_message_id=body.evidence_message_id,
+            idempotency_key=idempotency_key,
+            actor_account_id=principal.account.account_id,
+            actor_display_name=principal.account.display_name,
+            actor_role=principal.account.role,
+            request_id=request_id,
+            source_network_fingerprint=principal.session.record.ip_prefix_fingerprint,
+            user_agent_fingerprint=principal.session.record.user_agent_fingerprint,
+        )
+        item = _delivery_issue_response(result.issue, replayed=result.replayed)
+    except OrderDeliveryIssueNotFound as exc:
+        raise BrowserAuthError(
+            status_code=404, code="ORDER_NOT_FOUND", message="Order not found."
+        ) from exc
+    except OrderDeliveryIssueForbidden as exc:
+        raise BrowserAuthError(
+            status_code=403, code="FORBIDDEN", message="Permission is required."
+        ) from exc
+    except OrderDeliveryIssueIdempotencyConflict as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="IDEMPOTENCY_CONFLICT",
+            message="The idempotency key was already used.",
+        ) from exc
+    except OrderDeliveryIssueStale as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_STALE",
+            message="The Order changed since it was reviewed.",
+        ) from exc
+    except OrderDeliveryIssueAlreadyOpen as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="DELIVERY_ISSUE_ALREADY_OPEN",
+            message="An unresolved delivery issue already exists for this Order.",
+        ) from exc
+    except OrderDeliveryIssueStateConflict as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="DELIVERY_ISSUE_STATE_CONFLICT",
+            message="This Order is not eligible for that delivery issue.",
+        ) from exc
+    except OrderDeliveryIssueDispatchRequired as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_DISPATCH_EVIDENCE_REQUIRED",
+            message="Matching dispatch evidence is required.",
+        ) from exc
+    except OrderDeliveryIssueEvidenceMissing as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="DELIVERY_ISSUE_EVIDENCE_MISSING",
+            message="The selected customer evidence was not found.",
+        ) from exc
+    except OrderDeliveryIssueEvidenceInvalid as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="DELIVERY_ISSUE_EVIDENCE_INVALID",
+            message="Evidence must be an authentic post-dispatch customer text.",
+        ) from exc
+    except OrderDeliveryIssueUnavailable as exc:
+        raise _unavailable() from exc
+    response.status_code = 200 if result.replayed else 201
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Idempotent-Replayed"] = str(result.replayed).lower()
+    return item
+
+
+@router.post(
+    "/{order_id}/delivery-issues/{issue_id}/close",
+    response_model=OrderDeliveryIssueResponse,
+)
+async def close_delivery_issue(
+    order_id: UUID,
+    issue_id: UUID,
+    body: OrderDeliveryIssueCloseRequest,
+    request: Request,
+    response: Response,
+    principal: Annotated[
+        BrowserPrincipal, Depends(require_capability("order.delivery_issue.close"))
+    ],
+    _csrf: Annotated[BrowserPrincipal, Depends(require_csrf)],
+    _recent: Annotated[BrowserPrincipal, Depends(require_recent_reauthentication)],
+    settings: Annotated[Settings, Depends(get_browser_settings)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[
+        UUID4, Header(alias="Idempotency-Key", include_in_schema=True)
+    ],
+) -> OrderDeliveryIssueResponse:
+    validate_state_changing_request(request, settings)
+    request_id = normalize_or_generate_request_id(
+        getattr(request.state, "request_id", None)
+        or request.headers.get("X-Request-ID")
+    )
+    try:
+        result = await close_order_delivery_issue(
+            db,
+            order_id=order_id,
+            issue_id=issue_id,
+            resolution_code=body.resolution_code.value,
+            resolution_reason=body.resolution_reason,
+            idempotency_key=idempotency_key,
+            actor_account_id=principal.account.account_id,
+            actor_display_name=principal.account.display_name,
+            actor_role=principal.account.role,
+            request_id=request_id,
+            source_network_fingerprint=principal.session.record.ip_prefix_fingerprint,
+            user_agent_fingerprint=principal.session.record.user_agent_fingerprint,
+        )
+        item = _delivery_issue_response(result.issue, replayed=result.replayed)
+    except OrderDeliveryIssueNotFound as exc:
+        raise BrowserAuthError(
+            status_code=404,
+            code="DELIVERY_ISSUE_NOT_FOUND",
+            message="Delivery issue not found.",
+        ) from exc
+    except OrderDeliveryIssueForbidden as exc:
+        raise BrowserAuthError(
+            status_code=403,
+            code="FORBIDDEN",
+            message="Administrator permission is required.",
+        ) from exc
+    except OrderDeliveryIssueIdempotencyConflict as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="IDEMPOTENCY_CONFLICT",
+            message="The idempotency key was already used.",
+        ) from exc
+    except OrderDeliveryIssueStateConflict as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="DELIVERY_ISSUE_STATE_CONFLICT",
+            message=str(exc),
+        ) from exc
+    except OrderDeliveryIssueUnavailable as exc:
+        raise _unavailable() from exc
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Idempotent-Replayed"] = str(result.replayed).lower()
+    return item
 
 
 @router.post("/{order_id}/cancel", response_model=OrderCancellationResponse)
@@ -732,6 +1068,12 @@ async def confirm_order_delivery(
             status_code=409,
             code="ORDER_DISPATCH_EVIDENCE_REQUIRED",
             message="Matching dispatch evidence is required.",
+        ) from exc
+    except OrderDeliveryIssueOpen as exc:
+        raise BrowserAuthError(
+            status_code=409,
+            code="DELIVERY_ISSUE_OPEN",
+            message="Resolve the open delivery issue before confirming receipt.",
         ) from exc
     except OrderDeliveryEvidenceMissing as exc:
         raise BrowserAuthError(

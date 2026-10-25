@@ -3,6 +3,10 @@ import { Link, useParams, useSearchParams } from 'react-router-dom'
 import {
   createBusinessOrdersClient,
   type OrderCancellationReason,
+  type OrderDeliveryIssueReason,
+  type OrderDeliveryIssueResolution,
+  type OrderDeliveryIssueSource,
+  type OrderDeliveryIssueType,
   type OrderDetail,
   type OrderQueueItem,
   type OrderStatus,
@@ -19,6 +23,28 @@ const cancellationReasons: { value: OrderCancellationReason; label: string }[] =
   { value: 'commercial_terms_unavailable', label: 'Accepted commercial terms unavailable' },
   { value: 'other_operational', label: 'Other operational reason' },
 ]
+const issueReasons: Record<OrderDeliveryIssueType, { value: OrderDeliveryIssueReason; label: string }[]> = {
+  failed: [
+    { value: 'recipient_unavailable', label: 'Recipient unavailable' },
+    { value: 'recipient_refused', label: 'Recipient refused delivery' },
+    { value: 'address_problem', label: 'Address problem' },
+    { value: 'courier_problem', label: 'Courier problem' },
+    { value: 'other', label: 'Other documented failure' },
+  ],
+  disputed: [
+    { value: 'receipt_disputed', label: 'Receipt disputed' },
+    { value: 'condition_disputed', label: 'Delivered condition disputed' },
+    { value: 'item_disputed', label: 'Delivered item disputed' },
+    { value: 'other', label: 'Other documented dispute' },
+  ],
+}
+const issueSources: { value: OrderDeliveryIssueSource; label: string }[] = [
+  { value: 'customer_message', label: 'Customer message' },
+  { value: 'customer_call', label: 'Customer call' },
+  { value: 'courier_report', label: 'Courier report' },
+  { value: 'staff_observation', label: 'Staff observation' },
+  { value: 'other', label: 'Other identified source' },
+]
 
 function formatAmount(value: string, currency: string) {
   const number = Number(value)
@@ -30,6 +56,10 @@ function formatAmount(value: string, currency: string) {
 function formatDate(value: string) {
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? 'Time unavailable' : date.toLocaleString()
+}
+
+function humanize(value: string) {
+  return value.replaceAll('_', ' ')
 }
 
 function readError(failure: unknown) {
@@ -75,6 +105,7 @@ function deliveryReadiness(delivery: OrderDetail['delivery']) {
   if (delivery.delivery_method_state !== 'supported') return 'Only moto taxi Orders use this confirmation workflow'
   if (delivery.line_state !== 'single') return 'Only single-line Orders are supported'
   if (delivery.dispatch_state !== 'matched') return 'Matching immutable dispatch evidence is missing'
+  if (delivery.issue_state === 'open') return 'Resolve the open delivery issue before confirming customer receipt'
   if (delivery.association_state === 'missing') return 'The verified customer conversation is unavailable'
   if (delivery.association_state === 'ambiguous') return 'More than one delivering Order is associated with this conversation'
   if (delivery.evidence_state === 'missing') return 'No eligible post-dispatch inbound customer text has been received'
@@ -120,6 +151,20 @@ export function OrdersPage() {
   const [deliveryAttested, setDeliveryAttested] = useState(false)
   const [deliveryReauth, setDeliveryReauth] = useState(false)
   const [deliveryPassword, setDeliveryPassword] = useState('')
+  const [issueOpen, setIssueOpen] = useState(false)
+  const [issueType, setIssueType] = useState<OrderDeliveryIssueType>('failed')
+  const [issueReason, setIssueReason] = useState<OrderDeliveryIssueReason>('recipient_unavailable')
+  const [issueSource, setIssueSource] = useState<OrderDeliveryIssueSource>('courier_report')
+  const [issueSummary, setIssueSummary] = useState('')
+  const [issueEvidence, setIssueEvidence] = useState('')
+  const [issueBusy, setIssueBusy] = useState(false)
+  const [issueError, setIssueError] = useState<string | null>(null)
+  const [issueNotice, setIssueNotice] = useState<string | null>(null)
+  const [closingIssueId, setClosingIssueId] = useState<string | null>(null)
+  const [resolutionCode, setResolutionCode] = useState<OrderDeliveryIssueResolution>('false_alarm')
+  const [resolutionReason, setResolutionReason] = useState('')
+  const [issueCloseReauth, setIssueCloseReauth] = useState(false)
+  const [issueClosePassword, setIssueClosePassword] = useState('')
   const [reauth, setReauth] = useState(false)
   const [password, setPassword] = useState('')
   const attempt = useRef<{ signature: string; key: string } | null>(null)
@@ -130,10 +175,15 @@ export function OrdersPage() {
   const dispatchRequest = useRef<AbortController | null>(null)
   const deliveryAttempt = useRef<{ signature: string; key: string } | null>(null)
   const deliveryRequest = useRef<AbortController | null>(null)
+  const issueAttempt = useRef<{ signature: string; key: string } | null>(null)
+  const issueCloseAttempt = useRef<{ signature: string; key: string } | null>(null)
+  const issueRequest = useRef<AbortController | null>(null)
   const canCancel = auth.session?.capabilities.includes('order.cancel') ?? false
   const canPrepare = auth.session?.capabilities.includes('order.prepare') ?? false
   const canDispatch = auth.session?.capabilities.includes('order.dispatch') ?? false
   const canConfirmDelivery = auth.session?.capabilities.includes('order.delivery.confirm') ?? false
+  const canReportIssue = auth.session?.capabilities.includes('order.delivery_issue.create') ?? false
+  const canCloseIssue = auth.session?.capabilities.includes('order.delivery_issue.close') ?? false
 
   const loadList = useCallback(async (signal: AbortSignal) => {
     setList(null); setListError(null)
@@ -151,6 +201,7 @@ export function OrdersPage() {
     preparation.current?.abort(); prepareAttempt.current = null
     dispatchRequest.current?.abort(); dispatchAttempt.current = null
     deliveryRequest.current?.abort(); deliveryAttempt.current = null
+    issueRequest.current?.abort(); issueAttempt.current = null; issueCloseAttempt.current = null
     setCancelOpen(false); setCancelReason(''); setCancelError(null); setCancelNotice(null)
     setReauth(false); setPassword(''); setCancelBusy(false)
     setPrepareOpen(false); setPrepareBusy(false); setPrepareError(null); setPrepareNotice(null)
@@ -158,6 +209,10 @@ export function OrdersPage() {
     setHandoffReference(''); setDispatchAttested(false); setDispatchReauth(false); setDispatchPassword('')
     setDeliveryOpen(false); setDeliveryBusy(false); setDeliveryError(null); setDeliveryNotice(null)
     setSelectedEvidence(''); setDeliveryAttested(false); setDeliveryReauth(false); setDeliveryPassword('')
+    setIssueOpen(false); setIssueType('failed'); setIssueReason('recipient_unavailable')
+    setIssueSource('courier_report'); setIssueSummary(''); setIssueEvidence('')
+    setIssueBusy(false); setIssueError(null); setIssueNotice(null); setClosingIssueId(null)
+    setResolutionCode('false_alarm'); setResolutionReason(''); setIssueCloseReauth(false); setIssueClosePassword('')
     if (!orderId) return
     try {
       const result = await client.detail(orderId, signal)
@@ -556,6 +611,112 @@ export function OrdersPage() {
     }
   }
 
+  const submitDeliveryIssue = async (event: FormEvent) => {
+    event.preventDefault()
+    if (!detail || !canReportIssue || issueBusy || issueSummary.trim().length < 10) return
+    const signature = [detail.order_id, detail.updated_at, issueType, issueReason, issueSource,
+      issueSummary.trim(), issueEvidence].join(':')
+    if (!issueAttempt.current || issueAttempt.current.signature !== signature) {
+      issueAttempt.current = { signature, key: crypto.randomUUID() }
+    }
+    const controller = new AbortController()
+    issueRequest.current?.abort(); issueRequest.current = controller
+    setIssueBusy(true); setIssueError(null); setIssueNotice(null)
+    try {
+      const csrf = await auth.getCsrfForMutation()
+      if (controller.signal.aborted) return
+      const result = await client.reportDeliveryIssue(
+        detail.order_id, detail.updated_at, issueType, issueReason, issueSource,
+        issueSummary.trim(), issueEvidence || null, issueAttempt.current.key, csrf, controller.signal,
+      )
+      if (controller.signal.aborted) return
+      const refreshed = await client.detail(detail.order_id, controller.signal)
+      if (controller.signal.aborted) return
+      setDetail(refreshed)
+      setIssueOpen(false); setIssueSummary(''); setIssueEvidence('')
+      setIssueNotice(result.replayed
+        ? 'This delivery issue was already recorded. Showing current history.'
+        : 'Delivery issue recorded. Order, Payment and Stock facts were not changed.')
+      issueAttempt.current = null
+    } catch (failure) {
+      if (controller.signal.aborted) return
+      const apiError = asApiError(failure)
+      if (apiError.code === 'ORDER_STALE' || apiError.code === 'DELIVERY_ISSUE_ALREADY_OPEN') {
+        issueAttempt.current = null; setIssueOpen(false)
+        setIssueError('The Order or its delivery issues changed. Review the refreshed history.')
+        void loadDetail(new AbortController().signal)
+      } else if (apiError.status === 0 || apiError.status >= 500) {
+        setIssueError('The result could not be confirmed. Retry the same report request.')
+      } else {
+        issueAttempt.current = null; setIssueError(errorMessage(apiError))
+      }
+    } finally {
+      if (!controller.signal.aborted) setIssueBusy(false)
+    }
+  }
+
+  const submitIssueClosure = async (event: FormEvent) => {
+    event.preventDefault()
+    if (!detail || !closingIssueId || !canCloseIssue || issueBusy || resolutionReason.trim().length < 10) return
+    const expiry = auth.session?.recent_reauthentication_expires_at_epoch
+    if (expiry == null || expiry < Math.floor(Date.now() / 1000)) {
+      setIssueCloseReauth(true); return
+    }
+    const signature = [detail.order_id, closingIssueId, resolutionCode, resolutionReason.trim()].join(':')
+    if (!issueCloseAttempt.current || issueCloseAttempt.current.signature !== signature) {
+      issueCloseAttempt.current = { signature, key: crypto.randomUUID() }
+    }
+    const controller = new AbortController()
+    issueRequest.current?.abort(); issueRequest.current = controller
+    setIssueBusy(true); setIssueError(null); setIssueNotice(null)
+    try {
+      const csrf = await auth.getCsrfForMutation()
+      if (controller.signal.aborted) return
+      const result = await client.closeDeliveryIssue(
+        detail.order_id, closingIssueId, resolutionCode, resolutionReason.trim(),
+        issueCloseAttempt.current.key, csrf, controller.signal,
+      )
+      if (controller.signal.aborted) return
+      const refreshed = await client.detail(detail.order_id, controller.signal)
+      if (controller.signal.aborted) return
+      setDetail(refreshed)
+      setClosingIssueId(null); setResolutionReason(''); setIssueCloseReauth(false); setIssueClosePassword('')
+      setIssueNotice(result.replayed
+        ? 'This issue closure was already recorded. Showing current history.'
+        : 'Delivery issue closed with documented Administrator review.')
+      issueCloseAttempt.current = null
+    } catch (failure) {
+      if (controller.signal.aborted) return
+      const apiError = asApiError(failure)
+      if (apiError.code === 'recent_reauthentication_required') {
+        setIssueCloseReauth(true)
+      } else if (apiError.code === 'DELIVERY_ISSUE_STATE_CONFLICT') {
+        issueCloseAttempt.current = null; setClosingIssueId(null)
+        setIssueError('The issue changed since review. Review the refreshed history.')
+        void loadDetail(new AbortController().signal)
+      } else if (apiError.status === 0 || apiError.status >= 500) {
+        setIssueError('The result could not be confirmed. Retry the same closure request.')
+      } else {
+        issueCloseAttempt.current = null; setIssueError(errorMessage(apiError))
+      }
+    } finally {
+      if (!controller.signal.aborted) setIssueBusy(false)
+    }
+  }
+
+  const confirmIssueClosePassword = async (event: FormEvent) => {
+    event.preventDefault(); setIssueBusy(true); setIssueError(null)
+    try {
+      await auth.reauthenticate(issueClosePassword)
+      setIssueCloseReauth(false)
+      setIssueNotice('Password confirmed. Review the resolution and close the issue.')
+    } catch (failure) {
+      setIssueError(errorMessage(asApiError(failure)))
+    } finally {
+      setIssueClosePassword(''); setIssueBusy(false)
+    }
+  }
+
   const listPath = `/business/orders?${new URLSearchParams({ status: status ?? 'all', offset: String(offset) })}`
   const chooseStatus = (value: string) => setParams({ status: value, offset: '0' })
   const chooseOffset = (value: number) => setParams({ status: status ?? 'all', offset: String(value) })
@@ -597,6 +758,8 @@ export function OrdersPage() {
         {dispatchNotice && <p role="status">{dispatchNotice}</p>}
         {deliveryError && <p role="alert">{deliveryError}</p>}
         {deliveryNotice && <p role="status">{deliveryNotice}</p>}
+        {issueError && <p role="alert">{issueError}</p>}
+        {issueNotice && <p role="status">{issueNotice}</p>}
         {detail && <>
           <h2>Order {detail.order_id.slice(0, 8)}</h2>
           <dl className="orders-facts">
@@ -728,6 +891,102 @@ export function OrdersPage() {
               <PasswordField id="order-delivery-password" label="Confirm Administrator password" autoComplete="current-password"
                 value={deliveryPassword} disabled={deliveryBusy} required onChange={(event) => setDeliveryPassword(event.target.value)} />
               <button className="button button--primary" disabled={deliveryBusy}>Confirm password</button>
+            </form>}
+          </section>
+          <section className="orders-delivery-issues" aria-labelledby="order-delivery-issues-heading">
+            <h3 id="order-delivery-issues-heading">Delivery issues</h3>
+            <p className="orders-current-note">Issue reports and triage do not change Order, Payment, dispatch, delivery evidence or Stock facts.</p>
+            {detail.delivery_issues.length === 0 && <p>No delivery issues recorded.</p>}
+            {detail.delivery_issues.map((issue) => <article key={issue.issue_id} className="orders-evidence-message">
+              <div>
+                <strong>{issue.issue_type === 'failed' ? 'Failed delivery report' : 'Delivery dispute'} · {issue.status}</strong>
+                <p>{issue.summary}</p>
+                <p>{humanize(issue.reason_code)} · {humanize(issue.source)} · reported by {issue.reported_by_display_name} on <time dateTime={issue.reported_at}>{formatDate(issue.reported_at)}</time></p>
+                {issue.evidence_message_id && <p>Validated customer-message evidence: {issue.evidence_message_id}</p>}
+                {issue.status === 'closed' && <>
+                  <p><strong>Resolution:</strong> {humanize(issue.resolution_code ?? '')} — {issue.resolution_reason}</p>
+                  {issue.closed_at && <p>Closed by {issue.closed_by_display_name} on <time dateTime={issue.closed_at}>{formatDate(issue.closed_at)}</time></p>}
+                </>}
+                {issue.status === 'open' && canCloseIssue && closingIssueId !== issue.issue_id && <div className="orders-actions">
+                  <button className="button button--secondary" onClick={() => {
+                    setClosingIssueId(issue.issue_id); setResolutionCode('false_alarm'); setResolutionReason('')
+                    setIssueError(null); setIssueNotice(null); setIssueCloseReauth(false); issueCloseAttempt.current = null
+                  }}>Review and close</button>
+                </div>}
+                {issue.status === 'open' && canCloseIssue && closingIssueId === issue.issue_id && <form className="orders-delivery-confirm" onSubmit={(event) => void submitIssueClosure(event)}>
+                  <label htmlFor={`issue-resolution-${issue.issue_id}`}>Resolution</label>
+                  <select id={`issue-resolution-${issue.issue_id}`} value={resolutionCode} disabled={issueBusy}
+                    onChange={(event) => { setResolutionCode(event.target.value as OrderDeliveryIssueResolution); issueCloseAttempt.current = null }}>
+                    <option value="false_alarm">Documented false alarm</option>
+                    {detail.status === 'delivering' && <option value="delivery_continuing">Delivery is continuing</option>}
+                  </select>
+                  <label htmlFor={`issue-resolution-reason-${issue.issue_id}`}>Administrator reason</label>
+                  <textarea id={`issue-resolution-reason-${issue.issue_id}`} required minLength={10} maxLength={500}
+                    value={resolutionReason} disabled={issueBusy}
+                    onChange={(event) => { setResolutionReason(event.target.value); issueCloseAttempt.current = null }} />
+                  <p>Closing records triage only. It does not confirm delivery or change financial or Stock facts.</p>
+                  <div className="orders-actions">
+                    <button className="button button--primary" disabled={issueBusy || resolutionReason.trim().length < 10 || issueCloseReauth}>Close issue</button>
+                    <button type="button" className="button button--secondary" disabled={issueBusy} onClick={() => {
+                      setClosingIssueId(null); setResolutionReason(''); setIssueCloseReauth(false); setIssueClosePassword('')
+                      setIssueError(null); issueCloseAttempt.current = null
+                    }}>Keep open</button>
+                  </div>
+                </form>}
+                {issue.status === 'open' && canCloseIssue && closingIssueId === issue.issue_id && issueCloseReauth && <form className="orders-delivery-confirm" onSubmit={(event) => void confirmIssueClosePassword(event)}>
+                  <PasswordField id={`issue-close-password-${issue.issue_id}`} label="Confirm Administrator password" autoComplete="current-password"
+                    value={issueClosePassword} disabled={issueBusy} required onChange={(event) => setIssueClosePassword(event.target.value)} />
+                  <button className="button button--primary" disabled={issueBusy}>Confirm password</button>
+                </form>}
+              </div>
+            </article>)}
+            {canReportIssue && (detail.status === 'delivering' || detail.status === 'delivered')
+              && !detail.delivery_issues.some((issue) => issue.status === 'open') && !issueOpen && <div className="orders-actions">
+              <button className="button button--secondary" onClick={() => {
+                const type: OrderDeliveryIssueType = detail.status === 'delivered' ? 'disputed' : 'failed'
+                setIssueType(type); setIssueReason(issueReasons[type][0].value); setIssueOpen(true)
+                setIssueError(null); setIssueNotice(null)
+              }}>Report delivery problem</button>
+            </div>}
+            {canReportIssue && issueOpen && <form className="orders-delivery-confirm" onSubmit={(event) => void submitDeliveryIssue(event)}>
+              <label htmlFor="delivery-issue-type">Problem type</label>
+              <select id="delivery-issue-type" value={issueType} disabled={issueBusy || detail.status === 'delivered'}
+                onChange={(event) => {
+                  const type = event.target.value as OrderDeliveryIssueType
+                  setIssueType(type); setIssueReason(issueReasons[type][0].value); issueAttempt.current = null
+                }}>
+                {detail.status === 'delivering' && <option value="failed">Failed delivery</option>}
+                <option value="disputed">Disputed delivery</option>
+              </select>
+              <label htmlFor="delivery-issue-reason">Reason</label>
+              <select id="delivery-issue-reason" value={issueReason} disabled={issueBusy}
+                onChange={(event) => { setIssueReason(event.target.value as OrderDeliveryIssueReason); issueAttempt.current = null }}>
+                {issueReasons[issueType].map((reason) => <option key={reason.value} value={reason.value}>{reason.label}</option>)}
+              </select>
+              <label htmlFor="delivery-issue-source">Source</label>
+              <select id="delivery-issue-source" value={issueSource} disabled={issueBusy}
+                onChange={(event) => { setIssueSource(event.target.value as OrderDeliveryIssueSource); issueAttempt.current = null }}>
+                {issueSources.map((source) => <option key={source.value} value={source.value}>{source.label}</option>)}
+              </select>
+              <label htmlFor="delivery-issue-summary">Factual summary</label>
+              <textarea id="delivery-issue-summary" required minLength={10} maxLength={500} value={issueSummary} disabled={issueBusy}
+                onChange={(event) => { setIssueSummary(event.target.value); issueAttempt.current = null }} />
+              {detail.delivery.evidence_messages.length > 0 && <>
+                <label htmlFor="delivery-issue-evidence">Optional validated customer message</label>
+                <select id="delivery-issue-evidence" value={issueEvidence} disabled={issueBusy}
+                  onChange={(event) => { setIssueEvidence(event.target.value); issueAttempt.current = null }}>
+                  <option value="">No message evidence</option>
+                  {detail.delivery.evidence_messages.map((message) => <option key={message.message_id} value={message.message_id}>
+                    {message.content_excerpt.slice(0, 80)}
+                  </option>)}
+                </select>
+              </>}
+              <div className="orders-actions">
+                <button className="button button--primary" disabled={issueBusy || issueSummary.trim().length < 10}>Record issue</button>
+                <button type="button" className="button button--secondary" disabled={issueBusy} onClick={() => {
+                  setIssueOpen(false); setIssueSummary(''); setIssueEvidence(''); setIssueError(null); issueAttempt.current = null
+                }}>Cancel report</button>
+              </div>
             </form>}
           </section>
           <h3>Accepted commercial snapshot</h3>

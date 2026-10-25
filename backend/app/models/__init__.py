@@ -15,6 +15,7 @@ from app.models.whatsapp_relance_opt_in import WhatsAppRelanceOptIn
 from app.models.maps_tag import MapsTag
 from app.models.order import Order
 from app.models.order_delivery_confirmation import OrderDeliveryConfirmation
+from app.models.order_delivery_issue import OrderDeliveryIssue
 from app.models.order_draft import OrderDraft
 from app.models.payment import Payment
 from app.models.escalation_ticket import EscalationTicket
@@ -50,6 +51,7 @@ __all__ = [
     "MapsTag",
     "Order",
     "OrderDeliveryConfirmation",
+    "OrderDeliveryIssue",
     "OrderDraft",
     "Payment",
     "EscalationTicket",

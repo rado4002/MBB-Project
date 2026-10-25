@@ -21,6 +21,7 @@ from app.models.operator_audit import OperatorAuditEvent
 from app.models.operator_account import OperatorAccount
 from app.models.order import Order
 from app.models.order_delivery_confirmation import OrderDeliveryConfirmation
+from app.models.order_delivery_issue import OrderDeliveryIssue
 from app.models.order_draft import OrderDraft
 from app.models.payment import Payment
 from app.models.stock_allocation import StockAllocation
@@ -327,10 +328,12 @@ async def test_authoritative_snapshot_survives_current_commercial_changes(
             "dispatch_state": "missing",
             "association_state": "not_applicable",
             "evidence_state": "not_applicable",
+            "issue_state": "none",
             "dispatch_occurred_at": None,
             "evidence_messages": [],
             "evidence_has_more": False,
         }
+        assert body["delivery_issues"] == []
         assert Decimal(body["items"][0]["usd_to_cdf_rate"]) == Decimal("2800.000000")
         assert (await client.get("/api/v1/business/orders?status=delivered")).json()[
             "items"
@@ -1648,3 +1651,295 @@ async def test_legacy_transition_preserves_delivered_terminal_order(accepted_ord
             )
             == 0
         )
+
+
+@pytest.mark.asyncio
+async def test_operator_reports_one_delivery_issue_with_replay_and_no_commerce_mutation(
+    accepted_order,
+):
+    transport, factory, seeded, order_id = accepted_order
+    reviewed_at, movement = await _make_delivering(factory, order_id)
+    evidence = await _receipt_message(
+        factory,
+        seeded.conversation_id,
+        content="Le client signale que le moto ne peut pas livrer.",
+        created_at=movement.occurred_at + timedelta(seconds=1),
+    )
+    async with factory() as db:
+        order = await db.get(Order, order_id)
+        payment = await db.scalar(select(Payment).where(Payment.order_id == order_id))
+        inventory = await db.get(InventoryRecord, seeded.inventory_id)
+        before = (
+            order.status,
+            order.updated_at,
+            order.delivered_at,
+            payment.status,
+            payment.amount,
+            payment.completed_at,
+            inventory.quantity,
+            inventory.allocated_quantity,
+            inventory.updated_at,
+        )
+    body = {
+        "expected_order_updated_at": reviewed_at.isoformat(),
+        "issue_type": "failed",
+        "reason_code": "courier_problem",
+        "source": "customer_message",
+        "summary": "Customer reports that the courier could not complete delivery.",
+        "evidence_message_id": str(evidence.message_id),
+    }
+    first_key, second_key = uuid.uuid4(), uuid.uuid4()
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        csrf = await _login(client, "commerce.operator", OPERATOR_PASSWORD)
+
+        async def report(key):
+            return await client.post(
+                f"/api/v1/business/orders/{order_id}/delivery-issues",
+                headers=_cancel_headers(csrf, key),
+                json=body,
+            )
+
+        first, second = await asyncio.gather(report(first_key), report(second_key))
+        assert sorted((first.status_code, second.status_code)) == [201, 409]
+        created, created_key = (first, first_key) if first.status_code == 201 else (second, second_key)
+        assert created.json()["status"] == "open"
+        assert created.json()["reported_by_display_name"] == "Commerce.Operator"
+        replay = await report(created_key)
+        assert replay.status_code == 200
+        assert replay.headers["idempotent-replayed"] == "true"
+        assert replay.json()["issue_id"] == created.json()["issue_id"]
+
+    async with factory() as db:
+        order = await db.get(Order, order_id)
+        payment = await db.scalar(select(Payment).where(Payment.order_id == order_id))
+        inventory = await db.get(InventoryRecord, seeded.inventory_id)
+        after = (
+            order.status,
+            order.updated_at,
+            order.delivered_at,
+            payment.status,
+            payment.amount,
+            payment.completed_at,
+            inventory.quantity,
+            inventory.allocated_quantity,
+            inventory.updated_at,
+        )
+        issues = list(await db.scalars(select(OrderDeliveryIssue)))
+        audits = list(
+            await db.scalars(
+                select(OperatorAuditEvent).where(
+                    OperatorAuditEvent.action == "order.delivery_issue.reported"
+                )
+            )
+        )
+        issue_dispatch_movement_id = issues[0].dispatch_movement_id
+        issue_evidence_message_id = issues[0].evidence_message_id
+        with pytest.raises(DBAPIError, match="report evidence is immutable"):
+            await db.execute(
+                update(OrderDeliveryIssue)
+                .where(OrderDeliveryIssue.issue_id == issues[0].issue_id)
+                .values(summary="Rewritten report")
+            )
+            await db.commit()
+        await db.rollback()
+    assert after == before
+    assert len(issues) == 1 and len(audits) == 1
+    assert issue_dispatch_movement_id == movement.movement_id
+    assert issue_evidence_message_id == evidence.message_id
+
+
+@pytest.mark.asyncio
+async def test_open_issue_blocks_confirmation_until_administrator_closes_it(
+    accepted_order,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    transport, factory, seeded, order_id = accepted_order
+    reviewed_at, movement = await _make_delivering(factory, order_id)
+    evidence = await _receipt_message(
+        factory,
+        seeded.conversation_id,
+        created_at=movement.occurred_at + timedelta(seconds=1),
+    )
+    report_body = {
+        "expected_order_updated_at": reviewed_at.isoformat(),
+        "issue_type": "failed",
+        "reason_code": "recipient_unavailable",
+        "source": "courier_report",
+        "summary": "Courier reported that the recipient was not available at the address.",
+        "evidence_message_id": None,
+    }
+    async with factory() as db:
+        payment = await db.scalar(select(Payment).where(Payment.order_id == order_id))
+        inventory = await db.get(InventoryRecord, seeded.inventory_id)
+        commerce_before = (
+            payment.status,
+            payment.amount,
+            payment.completed_at,
+            inventory.quantity,
+            inventory.allocated_quantity,
+            inventory.updated_at,
+        )
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        csrf = await _login(client, "commerce.admin", ADMIN_PASSWORD)
+        reported = await client.post(
+            f"/api/v1/business/orders/{order_id}/delivery-issues",
+            headers=_cancel_headers(csrf, uuid.uuid4()),
+            json=report_body,
+        )
+        assert reported.status_code == 201
+        issue_id = reported.json()["issue_id"]
+        close_url = f"/api/v1/business/orders/{order_id}/delivery-issues/{issue_id}/close"
+        close_body = {
+            "resolution_code": "delivery_continuing",
+            "resolution_reason": "Courier reached the customer and delivery is continuing safely.",
+        }
+        async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as operator_client:
+            operator_csrf = await _login(
+                operator_client, "commerce.operator", OPERATOR_PASSWORD
+            )
+            forbidden = await operator_client.post(
+                close_url,
+                headers=_cancel_headers(operator_csrf, uuid.uuid4()),
+                json=close_body,
+            )
+            assert forbidden.status_code == 403
+        future = datetime.now(timezone.utc).timestamp() + 1000
+        monkeypatch.setattr("app.api.browser_auth_deps.time.time", lambda: future)
+        reauth_required = await client.post(
+            close_url,
+            headers=_cancel_headers(csrf, uuid.uuid4()),
+            json=close_body,
+        )
+        assert reauth_required.status_code == 403
+        csrf = await _reauthenticate(client, csrf)
+        blocked = await client.post(
+            f"/api/v1/business/orders/{order_id}/confirm-delivery",
+            headers=_cancel_headers(csrf, uuid.uuid4()),
+            json={
+                "expected_updated_at": reviewed_at.isoformat(),
+                "evidence_message_id": str(evidence.message_id),
+                "attested": True,
+            },
+        )
+        assert blocked.status_code == 409
+        assert blocked.json()["error"]["code"] == "DELIVERY_ISSUE_OPEN"
+        close_key = uuid.uuid4()
+        closed = await client.post(
+            close_url,
+            headers=_cancel_headers(csrf, close_key),
+            json=close_body,
+        )
+        assert closed.status_code == 200
+        assert closed.json()["status"] == "closed"
+        assert closed.json()["resolution_code"] == "delivery_continuing"
+        close_replay = await client.post(
+            close_url,
+            headers=_cancel_headers(csrf, close_key),
+            json=close_body,
+        )
+        assert close_replay.status_code == 200
+        assert close_replay.headers["idempotent-replayed"] == "true"
+        assert close_replay.json()["issue_id"] == issue_id
+        confirmed = await client.post(
+            f"/api/v1/business/orders/{order_id}/confirm-delivery",
+            headers=_cancel_headers(csrf, uuid.uuid4()),
+            json={
+                "expected_updated_at": reviewed_at.isoformat(),
+                "evidence_message_id": str(evidence.message_id),
+                "attested": True,
+            },
+        )
+        assert confirmed.status_code == 200
+
+    async with factory() as db:
+        payment = await db.scalar(select(Payment).where(Payment.order_id == order_id))
+        inventory = await db.get(InventoryRecord, seeded.inventory_id)
+        commerce_after = (
+            payment.status,
+            payment.amount,
+            payment.completed_at,
+            inventory.quantity,
+            inventory.allocated_quantity,
+            inventory.updated_at,
+        )
+        close_audit = await db.scalar(
+            select(OperatorAuditEvent).where(
+                OperatorAuditEvent.action == "order.delivery_issue.closed"
+            )
+        )
+    assert commerce_after == commerce_before
+    assert close_audit is not None and close_audit.reason_code == "delivery_continuing"
+
+
+@pytest.mark.asyncio
+async def test_operator_disputes_delivered_order_without_reversing_evidence(
+    accepted_order,
+):
+    transport, factory, seeded, order_id = accepted_order
+    reviewed_at, movement = await _make_delivering(factory, order_id)
+    receipt = await _receipt_message(
+        factory,
+        seeded.conversation_id,
+        created_at=movement.occurred_at + timedelta(seconds=1),
+    )
+    delivery = await _confirm_delivery(
+        factory,
+        order_id=order_id,
+        reviewed_at=reviewed_at,
+        evidence_message_id=receipt.message_id,
+    )
+    async with factory() as db:
+        payment = await db.scalar(select(Payment).where(Payment.order_id == order_id))
+        inventory = await db.get(InventoryRecord, seeded.inventory_id)
+        before = (
+            payment.status,
+            payment.amount,
+            payment.completed_at,
+            inventory.quantity,
+            inventory.allocated_quantity,
+            inventory.updated_at,
+        )
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        csrf = await _login(client, "commerce.operator", OPERATOR_PASSWORD)
+        response = await client.post(
+            f"/api/v1/business/orders/{order_id}/delivery-issues",
+            headers=_cancel_headers(csrf, uuid.uuid4()),
+            json={
+                "expected_order_updated_at": delivery.order.updated_at.isoformat(),
+                "issue_type": "disputed",
+                "reason_code": "receipt_disputed",
+                "source": "customer_call",
+                "summary": "Customer later called and disputed receipt of the delivered Order.",
+                "evidence_message_id": str(receipt.message_id),
+            },
+        )
+        assert response.status_code == 201
+        detail = await client.get(f"/api/v1/business/orders/{order_id}")
+        assert detail.status_code == 200
+        assert detail.json()["status"] == "delivered"
+        assert detail.json()["delivery"]["issue_state"] == "open"
+        assert detail.json()["delivery_issues"][0]["status"] == "open"
+
+    async with factory() as db:
+        order = await db.get(Order, order_id)
+        confirmation = await db.scalar(
+            select(OrderDeliveryConfirmation).where(
+                OrderDeliveryConfirmation.order_id == order_id
+            )
+        )
+        issue = await db.scalar(select(OrderDeliveryIssue))
+        payment = await db.scalar(select(Payment).where(Payment.order_id == order_id))
+        inventory = await db.get(InventoryRecord, seeded.inventory_id)
+        after = (
+            payment.status,
+            payment.amount,
+            payment.completed_at,
+            inventory.quantity,
+            inventory.allocated_quantity,
+            inventory.updated_at,
+        )
+    assert order.status == "delivered" and order.delivered_at == receipt.created_at
+    assert confirmation.confirmation_id == issue.delivery_confirmation_id
+    assert confirmation.dispatch_movement_id == movement.movement_id
+    assert issue.evidence_message_id == receipt.message_id
+    assert after == before

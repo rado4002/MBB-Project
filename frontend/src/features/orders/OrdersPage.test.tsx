@@ -38,9 +38,10 @@ const detail = {
   delivery: {
     eligible: false, order_state: 'not_delivering', delivery_method_state: 'supported',
     line_state: 'single', dispatch_state: 'missing', association_state: 'not_applicable',
-    evidence_state: 'not_applicable', dispatch_occurred_at: null,
+    evidence_state: 'not_applicable', issue_state: 'none', dispatch_occurred_at: null,
     evidence_messages: [], evidence_has_more: false,
   },
+  delivery_issues: [],
 }
 
 function setup(conversation: string | null = conversationId, role: 'operator' | 'administrator' = 'operator') {
@@ -323,6 +324,76 @@ describe('read-only Business Orders', () => {
     expect(within(region).queryByRole('button', { name: 'Confirm customer receipt' })).not.toBeInTheDocument()
     expect(within(region).queryByRole('radio')).not.toBeInTheDocument()
   })
+
+  it('reports and triages a delivery issue without presenting commerce reversal actions', async () => {
+    let phase = 0
+    const issue = {
+      issue_id: '88888888-8888-4888-8888-888888888888', order_id: orderId,
+      issue_type: 'failed', reason_code: 'courier_problem', source: 'courier_report',
+      summary: 'Courier could not safely complete the delivery at the supplied address.',
+      evidence_message_id: null, status: 'open',
+      reported_by_account_id: 'account-test-only', reported_by_display_name: 'Ada Admin',
+      reported_at: '2026-10-01T12:20:00Z', resolution_code: null, resolution_reason: null,
+      closed_by_account_id: null, closed_by_display_name: null, closed_at: null, replayed: false,
+    }
+    const delivering = () => ({
+      ...detail, status: 'delivering', updated_at: '2026-10-01T12:03:00Z',
+      delivery: {
+        ...detail.delivery, order_state: 'delivering', dispatch_state: 'matched',
+        association_state: 'verified', evidence_state: 'missing', issue_state: phase === 1 ? 'open' : 'none',
+        dispatch_occurred_at: '2026-10-01T12:03:00Z',
+      },
+      delivery_issues: phase === 0 ? [] : [{
+        ...issue,
+        ...(phase === 2 ? {
+          status: 'closed', resolution_code: 'delivery_continuing',
+          resolution_reason: 'Courier contacted the customer and delivery can continue.',
+          closed_by_account_id: 'account-test-only', closed_by_display_name: 'Ada Admin',
+          closed_at: '2026-10-01T12:25:00Z',
+        } : {}),
+      }],
+    })
+    setup(conversationId, 'administrator')
+    server.use(
+      http.get(`${base}/${orderId}`, () => HttpResponse.json(delivering())),
+      http.get('/api/v1/auth/csrf', () => HttpResponse.json({ csrf_token: 'issue-csrf', expires_at_epoch: 2_000_000_000 })),
+      http.post(`${base}/${orderId}/delivery-issues`, async ({ request }) => {
+        const body = await request.json() as Record<string, unknown>
+        expect(body).toMatchObject({
+          issue_type: 'failed', reason_code: 'courier_problem', source: 'courier_report',
+          summary: issue.summary, expected_order_updated_at: '2026-10-01T12:03:00Z',
+        })
+        phase = 1
+        return HttpResponse.json(issue, { status: 201 })
+      }),
+      http.post(`${base}/${orderId}/delivery-issues/${issue.issue_id}/close`, async ({ request }) => {
+        expect(await request.json()).toMatchObject({
+          resolution_code: 'delivery_continuing',
+          resolution_reason: 'Courier contacted the customer and delivery can continue.',
+        })
+        phase = 2
+        return HttpResponse.json(delivering().delivery_issues[0])
+      }),
+    )
+    const user = userEvent.setup()
+    renderApp(`/business/orders/${orderId}`)
+    const region = await screen.findByRole('region', { name: 'Order detail' })
+    await user.click(await within(region).findByRole('button', { name: 'Report delivery problem' }))
+    await user.selectOptions(within(region).getByLabelText('Reason'), 'courier_problem')
+    await user.type(within(region).getByLabelText('Factual summary'), issue.summary)
+    await user.click(within(region).getByRole('button', { name: 'Record issue' }))
+    expect(await within(region).findByText(/Delivery issue recorded/)).toBeInTheDocument()
+    expect(within(region).getByText(issue.summary)).toBeInTheDocument()
+    expect(within(region).getByText(/Resolve the open delivery issue/)).toBeInTheDocument()
+    await user.click(within(region).getByRole('button', { name: 'Review and close' }))
+    await user.selectOptions(within(region).getByLabelText('Resolution'), 'delivery_continuing')
+    await user.type(within(region).getByLabelText('Administrator reason'), 'Courier contacted the customer and delivery can continue.')
+    await user.click(within(region).getByRole('button', { name: 'Close issue' }))
+    expect(await within(region).findByText(/closed with documented Administrator review/)).toBeInTheDocument()
+    expect(within(region).getByText(/delivery continuing/)).toBeInTheDocument()
+    expect(within(region).queryByText(/restock|refund|reverse/i)).not.toBeInTheDocument()
+    await expectAccessible(document.body)
+  }, 15_000)
 
   it('preserves delivery review through reauthentication and reuses a retry key', async () => {
     const keys: (string | null)[] = []

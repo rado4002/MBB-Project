@@ -253,3 +253,56 @@ async def read_customer_receipt_evidence(
         message=message,
         conversation_id=conversation_id,
     )
+
+
+async def read_order_delivery_issue_evidence(
+    session: AsyncSession,
+    *,
+    order_id: uuid.UUID,
+    customer_id: str,
+    evidence_message_id: uuid.UUID,
+    dispatched_at: datetime,
+) -> CustomerReceiptEvidence:
+    """Validate optional issue evidence without interpreting or consuming it.
+
+    Unlike receipt confirmation, issue reporting remains valid after delivery and
+    does not require a unique currently-delivering Order. The message must still
+    be authentic, customer-originated, post-dispatch, and from the verified Order
+    conversation.
+    """
+    conversation_id = await _verified_conversation_id(
+        session,
+        order_id=order_id,
+        customer_id=customer_id,
+    )
+    if conversation_id is None:
+        raise CustomerReceiptEvidenceMissing(
+            "Order has no verified customer conversation"
+        )
+    message = await session.scalar(
+        select(Message)
+        .where(
+            Message.message_id == evidence_message_id,
+            Message.conversation_id == conversation_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if message is None:
+        raise CustomerReceiptEvidenceMissing("delivery issue message was not found")
+    if (
+        message.direction != "inbound"
+        or message.content_type != "text"
+        or message.inbound_receipt_order is None
+        or message.inbound_receipt_order <= 0
+        or not message.content.strip()
+        or not (message.whatsapp_message_id or "").strip()
+    ):
+        raise CustomerReceiptEvidenceInvalid(
+            "delivery issue evidence is not an authentic inbound text message"
+        )
+    if message.created_at <= dispatched_at:
+        raise CustomerReceiptEvidenceInvalid(
+            "delivery issue evidence must be persisted after dispatch"
+        )
+    return CustomerReceiptEvidence(message=message, conversation_id=conversation_id)
