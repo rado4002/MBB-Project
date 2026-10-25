@@ -7,7 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.schemas.common import ContentType, ConversationStatus, Language
+from app.schemas.common import ContentType, ConversationStatus, Language, OrderStatus
 
 
 class OperatorCustomerSummary(BaseModel):
@@ -131,6 +131,38 @@ class OperatorConversationDetail(BaseModel):
     ownership: OperatorConversationOwnership
     commercial_context: OperatorCommercialContext | None = None
     follow_up: OperatorFollowUpSummary | None = None
+
+
+class OperatorCustomerActivityIdentity(BaseModel):
+    display_name: str | None = None
+    phone_masked: str
+    city: str
+    preferred_language: Language
+    opted_out: bool
+    consent_given: bool
+
+
+class OperatorCustomerActivityConversation(BaseModel):
+    conversation_id: UUID
+    status: ConversationStatus
+    language: Language
+    last_activity_at: datetime
+    ownership: OperatorConversationOwnership
+    communication_channel: Literal["whatsapp"] | None = None
+    acquisition_source: str | None = Field(default=None, max_length=50)
+    is_current: bool
+
+
+class OperatorCustomerActivityOrder(BaseModel):
+    order_id: UUID
+    status: OrderStatus
+    created_at: datetime
+
+
+class OperatorCustomerActivityResponse(BaseModel):
+    customer: OperatorCustomerActivityIdentity
+    conversations: list[OperatorCustomerActivityConversation] = Field(max_length=5)
+    orders: list[OperatorCustomerActivityOrder] = Field(max_length=5)
 
 
 class OperatorOwnershipTransitionRequest(BaseModel):

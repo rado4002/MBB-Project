@@ -62,6 +62,7 @@ from app.models.relance_candidate import RelanceCandidate
 from app.models.relance_delivery import RelanceDelivery
 from app.models.whatsapp_relance_opt_in import WhatsAppRelanceOptIn
 from app.modules.m6_relance.readiness import _configured_template
+from app.modules.m7_conversion.order_reads import read_customer_order_summaries
 from app.modules.m4_conversation.ownership import (
     ConversationNotFound as OwnershipConversationNotFound,
     IdempotencyConflict as OwnershipIdempotencyConflict,
@@ -105,6 +106,10 @@ from app.modules.m8_maps.operator_escalation import (
 from app.request_ids import normalize_or_generate_request_id
 from app.schemas.common import ConversationStatus, Language
 from app.schemas.operator_conversations import (
+    OperatorCustomerActivityConversation,
+    OperatorCustomerActivityIdentity,
+    OperatorCustomerActivityOrder,
+    OperatorCustomerActivityResponse,
     OperatorConversationDetail,
     OperatorCommercialConcern,
     OperatorCommercialContext,
@@ -1419,6 +1424,131 @@ async def get_operator_timeline(
     return OperatorTimelineResponse(
         items=items,
         next_older_cursor=next_older_cursor,
+    )
+
+
+@router.get(
+    "/{conversation_id}/customer-activity",
+    response_model=OperatorCustomerActivityResponse,
+)
+async def get_operator_customer_activity(
+    conversation_id: UUID,
+    response: Response,
+    principal: Annotated[
+        BrowserPrincipal, Depends(require_capability("conversation.read"))
+    ],
+    _order_principal: Annotated[
+        BrowserPrincipal, Depends(require_capability("order.read"))
+    ],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> OperatorCustomerActivityResponse:
+    verified_whatsapp_message = exists(
+        select(Message.message_id).where(
+            Message.conversation_id == Conversation.conversation_id,
+            Message.whatsapp_message_id.is_not(None),
+            func.btrim(Message.whatsapp_message_id) != "",
+        )
+    ).correlate(Conversation)
+    seed_statement = (
+        select(
+            Conversation.customer_id,
+            Customer.name.label("customer_display_name"),
+            _masked_phone_expression().label("customer_phone_masked"),
+            Customer.city.label("customer_city"),
+            Customer.preferred_language.label("customer_preferred_language"),
+            Customer.opt_out_flag.label("customer_opted_out"),
+            Customer.consent_given.label("customer_consent_given"),
+        )
+        .join(Customer, Customer.phone_number == Conversation.customer_id)
+        .where(
+            Conversation.conversation_id == conversation_id,
+            _operator_access_predicate(principal),
+        )
+    )
+    try:
+        seed = (await db.execute(seed_statement)).mappings().one_or_none()
+        if seed is None:
+            raise BrowserAuthError(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code="CONVERSATION_NOT_FOUND",
+                message="The conversation was not found.",
+            )
+        conversation_statement = (
+            select(
+                Conversation.conversation_id,
+                Conversation.status,
+                Conversation.language_detected,
+                Conversation.last_message_time,
+                Conversation.owner_type,
+                Conversation.human_owner_account_id,
+                Conversation.ai_execution_state,
+                Conversation.ownership_version,
+                Conversation.ownership_updated_at,
+                OperatorAccount.display_name.label("human_owner_display_name"),
+                verified_whatsapp_message.label("has_verified_whatsapp_message"),
+                Lead.source.label("acquisition_source"),
+            )
+            .outerjoin(
+                OperatorAccount,
+                OperatorAccount.account_id == Conversation.human_owner_account_id,
+            )
+            .outerjoin(Lead, Lead.conversation_id == Conversation.conversation_id)
+            .where(
+                Conversation.customer_id == seed["customer_id"],
+                _operator_access_predicate(principal),
+            )
+            .order_by(
+                Conversation.last_message_time.desc(),
+                Conversation.conversation_id.desc(),
+            )
+            .limit(5)
+        )
+        conversation_rows = (
+            (await db.execute(conversation_statement)).mappings().all()
+        )
+        order_rows = await read_customer_order_summaries(
+            db,
+            customer_id=seed["customer_id"],
+            limit=5,
+        )
+    except BrowserAuthError:
+        raise
+    except (SQLAlchemyError, OSError, ConnectionError, TimeoutError) as exc:
+        raise _service_unavailable(exc) from exc
+
+    response.headers["Cache-Control"] = "no-store"
+    return OperatorCustomerActivityResponse(
+        customer=OperatorCustomerActivityIdentity(
+            display_name=seed["customer_display_name"],
+            phone_masked=seed["customer_phone_masked"],
+            city=seed["customer_city"],
+            preferred_language=seed["customer_preferred_language"],
+            opted_out=seed["customer_opted_out"],
+            consent_given=seed["customer_consent_given"],
+        ),
+        conversations=[
+            OperatorCustomerActivityConversation(
+                conversation_id=row["conversation_id"],
+                status=row["status"],
+                language=row["language_detected"],
+                last_activity_at=row["last_message_time"],
+                ownership=_ownership_from_row(row),
+                communication_channel=(
+                    "whatsapp" if row["has_verified_whatsapp_message"] else None
+                ),
+                acquisition_source=row["acquisition_source"],
+                is_current=row["conversation_id"] == conversation_id,
+            )
+            for row in conversation_rows
+        ],
+        orders=[
+            OperatorCustomerActivityOrder(
+                order_id=order.order_id,
+                status=order.status,
+                created_at=order.created_at,
+            )
+            for order in order_rows
+        ],
     )
 
 

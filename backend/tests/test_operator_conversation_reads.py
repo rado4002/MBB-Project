@@ -401,6 +401,20 @@ async def test_analyst_jwt_and_disabled_account_are_denied() -> None:
         await analyst.aclose()
         await analyst_redis.aclose()
 
+    analyst, analyst_db, _account_value, analyst_redis = (
+        await _authenticated_client(role="analyst")
+    )
+    try:
+        denied = await analyst.get(
+            f"/api/v1/operator/conversations/{uuid.uuid4()}/customer-activity"
+        )
+        assert denied.status_code == 403
+        assert denied.json()["error"]["code"] == "FORBIDDEN"
+        assert analyst_db.execute_count == 0
+    finally:
+        await analyst.aclose()
+        await analyst_redis.aclose()
+
     jwt_client, jwt_db, _account_value, jwt_redis = await _authenticated_client()
     jwt_client.cookies.clear()
     token = create_access_token("dashboard", "admin")

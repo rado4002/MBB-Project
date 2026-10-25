@@ -113,6 +113,28 @@ describe('E1 conversation queue client', () => {
     expect(new Headers(init?.headers).has('X-CSRF-Token')).toBe(false)
   })
 
+  it('loads customer activity lazily through the conversation-scoped route', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ customer: {}, conversations: [], orders: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await createConversationApiClient().getCustomerActivity('conversation/id')
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe(
+      '/api/v1/operator/conversations/conversation%2Fid/customer-activity',
+    )
+    expect(init).toMatchObject({
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store',
+    })
+  })
+
   it('keeps the stable older-message cursor in the API request only', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(JSON.stringify({ items: [], next_older_cursor: null }), {

@@ -18,6 +18,7 @@ import type {
   ConversationOwnership,
   MessageSenderType,
   OperatorConversationDetail,
+  OperatorCustomerActivityResponse,
   OperatorInternalNoteItem,
   OperatorMessageItem,
   OperatorTimelineItem,
@@ -245,12 +246,140 @@ function ConversationHeader({
   )
 }
 
+function CustomerActivity({
+  client,
+  conversationId,
+  headingLevel = 'h4',
+}: {
+  client: ConversationApiClient
+  conversationId: string
+  headingLevel?: 'h3' | 'h4'
+}) {
+  const [activity, setActivity] = useState<OperatorCustomerActivityResponse | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(false)
+  const controller = useRef<AbortController | null>(null)
+  const ActivityHeading = headingLevel
+
+  useEffect(() => () => controller.current?.abort(), [])
+
+  const load = useCallback(async () => {
+    controller.current?.abort()
+    const activeController = new AbortController()
+    controller.current = activeController
+    setLoading(true)
+    setError(false)
+    try {
+      const response = await client.getCustomerActivity(
+        conversationId,
+        activeController.signal,
+      )
+      if (!activeController.signal.aborted) setActivity(response)
+    } catch {
+      if (!activeController.signal.aborted) setError(true)
+    } finally {
+      if (!activeController.signal.aborted) setLoading(false)
+    }
+  }, [client, conversationId])
+
+  const requestWhenOpened = (open: boolean) => {
+    if (open && !activity && !loading && !error) void load()
+  }
+
+  return (
+    <details
+      className="customer-activity"
+      onToggle={(event) => requestWhenOpened(event.currentTarget.open)}
+    >
+      <summary>Customer activity</summary>
+      <div className="customer-activity__body">
+        {loading ? <p role="status">Loading customer activity…</p> : null}
+        {error ? (
+          <div className="customer-activity__error" role="alert">
+            <p>Customer activity is unavailable.</p>
+            <button className="button button--secondary" type="button" onClick={() => void load()}>
+              Retry
+            </button>
+          </div>
+        ) : null}
+        {activity ? (
+          <>
+            <dl className="context-details customer-activity__identity">
+              <div><dt>Preferred language</dt><dd>{label(activity.customer.preferred_language)}</dd></div>
+              <div><dt>City</dt><dd>{activity.customer.city}</dd></div>
+              <div>
+                <dt>Messaging preference</dt>
+                <dd>{activity.customer.opted_out ? 'Opted out' : 'Not opted out'}</dd>
+              </div>
+              <div>
+                <dt>Consent on record</dt>
+                <dd>{activity.customer.consent_given ? 'Yes' : 'No'}</dd>
+              </div>
+            </dl>
+            <ActivityHeading>Recent conversations</ActivityHeading>
+            {activity.conversations.length ? (
+              <ul className="customer-activity__list">
+                {activity.conversations.map((conversation) => (
+                  <li key={conversation.conversation_id}>
+                    {conversation.is_current ? (
+                      <strong aria-current="page">Current conversation</strong>
+                    ) : (
+                      <Link to={`/inbox/${encodeURIComponent(conversation.conversation_id)}`}>
+                        Open conversation
+                      </Link>
+                    )}
+                    <span>{label(conversation.status)} · {label(conversation.language)}</span>
+                    <time dateTime={conversation.last_activity_at}>
+                      {formatTimestamp(conversation.last_activity_at)}
+                    </time>
+                    <span>
+                      Channel: {conversation.communication_channel
+                        ? 'WhatsApp'
+                        : 'Not verified'}
+                    </span>
+                    <span>
+                      Control: {conversation.ownership.owner_type === 'ai'
+                        ? 'MBB AI Assistant'
+                        : conversation.ownership.human_owner?.display_name || 'Human Operator'}
+                    </span>
+                    {conversation.acquisition_source ? (
+                      <span>Acquisition source: {label(conversation.acquisition_source)}</span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            ) : <p>No accessible conversations found.</p>}
+            <ActivityHeading>Recent Orders</ActivityHeading>
+            {activity.orders.length ? (
+              <ul className="customer-activity__list">
+                {activity.orders.map((order) => (
+                  <li key={order.order_id}>
+                    <Link to={`/business/orders/${encodeURIComponent(order.order_id)}`}>
+                      Order {order.order_id.slice(0, 8)}
+                    </Link>
+                    <span>{label(order.status)}</span>
+                    <time dateTime={order.created_at}>{formatTimestamp(order.created_at)}</time>
+                  </li>
+                ))}
+              </ul>
+            ) : <p>No recent Orders.</p>}
+          </>
+        ) : null}
+      </div>
+    </details>
+  )
+}
+
 function ContextBody({
+  client,
+  conversationId,
   detail,
   loading,
   error,
   productHeadingLevel = 'h4',
 }: {
+  client: ConversationApiClient
+  conversationId: string
   detail: OperatorConversationDetail | null
   loading: boolean
   error: ApiError | null
@@ -296,6 +425,12 @@ function ContextBody({
         {commercial?.current_goal ? <div><dt>Current goal</dt><dd>{commercial.current_goal}</dd></div> : null}
       </dl>
       <FollowUpContext detail={detail} />
+      <CustomerActivity
+        key={conversationId}
+        client={client}
+        conversationId={conversationId}
+        headingLevel={productHeadingLevel}
+      />
       {hasMoreContext ? (
         <details className="context-more">
           <summary>Voir plus de contexte</summary>
@@ -354,10 +489,14 @@ function ContextBody({
 }
 
 function ContextPanel({
+  client,
+  conversationId,
   detail,
   loading,
   error,
 }: {
+  client: ConversationApiClient
+  conversationId: string
   detail: OperatorConversationDetail | null
   loading: boolean
   error: ApiError | null
@@ -369,7 +508,13 @@ function ContextPanel({
       tabIndex={0}
     >
       <h3 id="context-heading">Context</h3>
-      <ContextBody detail={detail} loading={loading} error={error} />
+      <ContextBody
+        client={client}
+        conversationId={conversationId}
+        detail={detail}
+        loading={loading}
+        error={error}
+      />
     </aside>
   )
 }
@@ -478,6 +623,8 @@ function ContextDrawer({
         </header>
         <div className="context-drawer__content">
           <ContextBody
+            client={client}
+            conversationId={conversationId}
             detail={detail}
             loading={loading}
             error={error}
@@ -1126,7 +1273,13 @@ export function ConversationWorkspace({
             await Promise.all([detail.refresh(), onOwnershipChanged()])
           }}
         />
-        <ContextPanel detail={detail.detail} loading={detail.loading} error={detail.error} />
+        <ContextPanel
+          client={client}
+          conversationId={conversationId}
+          detail={detail.detail}
+          loading={detail.loading}
+          error={detail.error}
+        />
       </div>
       <ContextDrawer
         open={contextOpen}

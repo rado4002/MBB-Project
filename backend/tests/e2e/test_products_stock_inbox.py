@@ -817,6 +817,23 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
         )
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         assert not detail.get_by_role("button").count()
+
+        detail.get_by_role("link", name="Open associated Inbox conversation").click()
+        expect(page).to_have_url(re.compile(rf"/inbox/{CONVERSATION_ID}"))
+        page.get_by_role("button", name="Details").click()
+        activity_dialog = page.get_by_role("dialog", name="Conversation details")
+        activity_dialog.get_by_text("Customer activity", exact=True).click()
+        expect(activity_dialog.get_by_text("Channel: WhatsApp")).to_be_visible(
+            timeout=15_000
+        )
+        expect(activity_dialog.get_by_text("Control: MBB AI Assistant")).to_be_visible()
+        expect(activity_dialog.get_by_text("Acquisition source: E2e")).to_be_visible()
+        expect(activity_dialog.get_by_text("Not opted out")).to_be_visible()
+        expect(
+            activity_dialog.get_by_role("link", name=f"Order {str(order_id)[:8]}")
+        ).to_have_attribute("href", f"/business/orders/{order_id}")
+        assert "+243812345678" not in activity_dialog.inner_text()
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         context.close()
         browser.close()
 

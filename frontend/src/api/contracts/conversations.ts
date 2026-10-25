@@ -136,6 +136,32 @@ export interface OperatorConversationDetail {
   follow_up?: OperatorFollowUpSummary | null
 }
 
+export interface OperatorCustomerActivityResponse {
+  customer: {
+    display_name: string | null
+    phone_masked: string
+    city: string
+    preferred_language: ConversationLanguage
+    opted_out: boolean
+    consent_given: boolean
+  }
+  conversations: Array<{
+    conversation_id: string
+    status: ConversationStatus
+    language: ConversationLanguage
+    last_activity_at: string
+    ownership: ConversationOwnership
+    communication_channel: 'whatsapp' | null
+    acquisition_source: string | null
+    is_current: boolean
+  }>
+  orders: Array<{
+    order_id: string
+    status: 'pending' | 'confirmed' | 'preparing' | 'delivering' | 'delivered' | 'cancelled'
+    created_at: string
+  }>
+}
+
 export interface ConversationOwnership {
   owner_type: 'ai' | 'human'
   human_owner: {

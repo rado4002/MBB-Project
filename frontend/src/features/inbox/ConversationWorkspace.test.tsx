@@ -160,6 +160,150 @@ describe('read-only conversation workspace', () => {
       .getByText('MBB AI Assistant')).toBeInTheDocument()
   })
 
+  it('lazy-loads bounded customer activity and keeps channel separate from acquisition source', async () => {
+    let activityReads = 0
+    server.use(
+      authenticated(),
+      ...successfulWorkspace(),
+      http.get(
+        '/api/v1/operator/conversations/:conversationId/customer-activity',
+        async () => {
+          activityReads += 1
+          await delay(40)
+          return HttpResponse.json({
+            customer: {
+              display_name: 'Marie Client',
+              phone_masked: '***5678',
+              city: 'Kinshasa',
+              preferred_language: 'french',
+              opted_out: false,
+              consent_given: true,
+            },
+            conversations: [
+              {
+                conversation_id: firstId,
+                status: 'active',
+                language: 'french',
+                last_activity_at: '2026-08-02T12:30:00Z',
+                ownership: conversationDetailFixture().ownership,
+                communication_channel: 'whatsapp',
+                acquisition_source: 'referral_partner',
+                is_current: true,
+              },
+              {
+                conversation_id: secondId,
+                status: 'dormant',
+                language: 'swahili',
+                last_activity_at: '2026-07-01T12:30:00Z',
+                ownership: conversationDetailFixture().ownership,
+                communication_channel: null,
+                acquisition_source: 'social_campaign',
+                is_current: false,
+              },
+            ],
+            orders: [{
+              order_id: '33333333-3333-4333-8333-333333333333',
+              status: 'confirmed',
+              created_at: '2026-08-01T10:00:00Z',
+            }],
+          })
+        },
+      ),
+    )
+    const user = userEvent.setup()
+    renderApp(`/inbox/${firstId}`)
+
+    await screen.findByText('Solar starter kit')
+    expect(activityReads).toBe(0)
+    await user.click(screen.getByText('Customer activity'))
+    expect(screen.getByText('Loading customer activity…')).toBeInTheDocument()
+
+    expect(await screen.findByText('Recent conversations')).toBeInTheDocument()
+    expect(activityReads).toBe(1)
+    expect(screen.getByText('Channel: WhatsApp')).toBeInTheDocument()
+    expect(screen.getByText('Channel: Not verified')).toBeInTheDocument()
+    expect(screen.getAllByText('Control: MBB AI Assistant')).toHaveLength(2)
+    expect(screen.getByText('Acquisition source: Referral Partner')).toBeInTheDocument()
+    expect(screen.getByText('Acquisition source: Social Campaign')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Open conversation' })).toHaveAttribute(
+      'href',
+      `/inbox/${secondId}`,
+    )
+    expect(screen.getByRole('link', { name: 'Order 33333333' })).toHaveAttribute(
+      'href',
+      '/business/orders/33333333-3333-4333-8333-333333333333',
+    )
+    expect(screen.queryByText('+243990005678')).not.toBeInTheDocument()
+  })
+
+  it('shows customer activity empty states', async () => {
+    server.use(
+      authenticated(),
+      ...successfulWorkspace(),
+      http.get('/api/v1/operator/conversations/:conversationId/customer-activity', () =>
+        HttpResponse.json({
+          customer: {
+            display_name: null,
+            phone_masked: '***5678',
+            city: 'Kinshasa',
+            preferred_language: 'french',
+            opted_out: true,
+            consent_given: false,
+          },
+          conversations: [],
+          orders: [],
+        }),
+      ),
+    )
+    const user = userEvent.setup()
+    renderApp(`/inbox/${firstId}`)
+
+    await screen.findByText('Solar starter kit')
+    await user.click(screen.getByText('Customer activity'))
+    expect(await screen.findByText('No accessible conversations found.')).toBeInTheDocument()
+    expect(screen.getByText('No recent Orders.')).toBeInTheDocument()
+    expect(screen.getByText('Opted out')).toBeInTheDocument()
+  })
+
+  it('keeps the conversation usable when customer activity fails and retries', async () => {
+    let reads = 0
+    server.use(
+      authenticated(),
+      ...successfulWorkspace(),
+      http.get('/api/v1/operator/conversations/:conversationId/customer-activity', () => {
+        reads += 1
+        if (reads === 1) {
+          return HttpResponse.json(
+            { error: { code: 'SERVICE_UNAVAILABLE', request_id: 'activity-failed' } },
+            { status: 503 },
+          )
+        }
+        return HttpResponse.json({
+          customer: {
+            display_name: 'Marie Client',
+            phone_masked: '***5678',
+            city: 'Kinshasa',
+            preferred_language: 'french',
+            opted_out: false,
+            consent_given: true,
+          },
+          conversations: [],
+          orders: [],
+        })
+      }),
+    )
+    const user = userEvent.setup()
+    renderApp(`/inbox/${firstId}`)
+
+    expect(await screen.findByText('Solar starter kit')).toBeInTheDocument()
+    await user.click(screen.getByText('Customer activity'))
+    expect(await screen.findByText('Customer activity is unavailable.')).toBeInTheDocument()
+    expect(screen.getByText('Bonjour, je souhaite des informations.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByText('No recent Orders.')).toBeInTheDocument()
+    expect(reads).toBe(2)
+  })
+
   it('loads history independently without hiding available conversation details', async () => {
     server.use(
       authenticated(),

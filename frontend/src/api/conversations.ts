@@ -4,6 +4,7 @@ import type {
   OperatorEscalationRequest,
   OperatorEscalationResponse,
   OperatorConversationDetail,
+  OperatorCustomerActivityResponse,
   OperatorConversationQueueResponse,
   OperatorMessageHistoryResponse,
   OperatorMessageItem,
@@ -31,6 +32,10 @@ export interface ConversationApiClient {
   ): Promise<OperatorEscalationResponse>
   listConversations(request: ConversationQueueRequest): Promise<OperatorConversationQueueResponse>
   getConversation(conversationId: string, signal?: AbortSignal): Promise<OperatorConversationDetail>
+  getCustomerActivity(
+    conversationId: string,
+    signal?: AbortSignal,
+  ): Promise<OperatorCustomerActivityResponse>
   getMessages(
     conversationId: string,
     before?: string,
@@ -95,6 +100,12 @@ export function createConversationApiClient(
     getConversation: (conversationId, signal) =>
       requestJson<OperatorConversationDetail>(
         conversationPath(conversationId),
+        { signal },
+        onSessionExpired,
+      ),
+    getCustomerActivity: (conversationId, signal) =>
+      requestJson<OperatorCustomerActivityResponse>(
+        `${conversationPath(conversationId)}/customer-activity`,
         { signal },
         onSessionExpired,
       ),

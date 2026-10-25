@@ -33,11 +33,8 @@ from app.api.browser_auth_deps import (
 from app.api.browser_auth_errors import BrowserAuthError
 from app.config import Settings
 from app.database import get_db
-from app.models.conversation import Conversation
-from app.models.lead import Lead
 from app.models.order import Order
 from app.models.order_delivery_issue import OrderDeliveryIssue
-from app.models.order_draft import OrderDraft
 from app.modules.m7_conversion.order_cancellation import (
     OrderCancellationForbidden,
     OrderCancellationIdempotencyConflict,
@@ -61,6 +58,7 @@ from app.modules.m7_conversion.order_fulfillment import (
     get_order_preparation_eligibility,
     prepare_confirmed_order,
 )
+from app.modules.m7_conversion.order_reads import verified_order_conversations
 from app.modules.m7_conversion.order_dispatch import (
     OrderDispatchAllocationRequired,
     OrderDispatchForbidden,
@@ -422,28 +420,6 @@ def _unavailable() -> BrowserAuthError:
     )
 
 
-async def _verified_conversations(
-    db: AsyncSession,
-    order_ids: list[UUID],
-) -> dict[UUID, UUID]:
-    if not order_ids:
-        return {}
-    rows = await db.execute(
-        select(OrderDraft.order_id, OrderDraft.conversation_id)
-        .join(Order, Order.order_id == OrderDraft.order_id)
-        .join(Conversation, Conversation.conversation_id == OrderDraft.conversation_id)
-        .join(Lead, Lead.lead_id == Order.lead_id)
-        .where(
-            OrderDraft.order_id.in_(order_ids),
-            OrderDraft.status == "confirmed",
-            Lead.conversation_id == OrderDraft.conversation_id,
-            Lead.customer_id == Order.customer_id,
-            Conversation.customer_id == Order.customer_id,
-        )
-    )
-    return {order_id: conversation_id for order_id, conversation_id in rows.all()}
-
-
 def _lines(order: Order) -> list[OrderLineSnapshot]:
     return [OrderLineSnapshot.model_validate(item) for item in (order.items or [])]
 
@@ -520,7 +496,7 @@ async def list_orders(
             ).all()
         )
         shown = orders[: params.limit]
-        links = await _verified_conversations(db, [order.order_id for order in shown])
+        links = await verified_order_conversations(db, [order.order_id for order in shown])
         items = [
             _summary(order, _lines(order), links.get(order.order_id)) for order in shown
         ]
@@ -545,7 +521,7 @@ async def get_order(
                 code="ORDER_NOT_FOUND",
                 message="Order not found.",
             )
-        links = await _verified_conversations(db, [order_id])
+        links = await verified_order_conversations(db, [order_id])
         lines = _lines(order)
         summary = _summary(order, lines, links.get(order_id))
         eligibility = await get_order_preparation_eligibility(db, order=order)
