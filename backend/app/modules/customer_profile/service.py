@@ -15,6 +15,7 @@ from app.models.customer import Customer
 from app.models.lead import Lead
 from app.models.message import Message
 from app.modules.m1_gateway.language_detector import is_opt_out
+from app.modules.m6_relance.candidates import cancel_active_candidates
 from app.modules.m6_relance.service import cancel_all_relances
 from app.operator_identity.audit import append_operator_audit_event
 
@@ -61,6 +62,7 @@ class OptOutMutationResult:
     customer: Customer
     changed: bool
     relances_cancelled: int
+    relance_candidates_cancelled: int
 
 
 def _values(customer: Customer) -> ProfileValues:
@@ -180,7 +182,10 @@ async def opt_out_customer(
         if customer.opt_out_flag:
             await session.commit()
             return OptOutMutationResult(
-                customer=customer, changed=False, relances_cancelled=0
+                customer=customer,
+                changed=False,
+                relances_cancelled=0,
+                relance_candidates_cancelled=0,
             )
 
         now = datetime.now(timezone.utc)
@@ -194,6 +199,12 @@ async def opt_out_customer(
         cancelled = 0
         for lead_id in lead_ids:
             cancelled += await cancel_all_relances(session, lead_id=lead_id)
+        candidates_cancelled = await cancel_active_candidates(
+            session,
+            conversation_id=conversation_id,
+            opted_out_customer_id=customer.phone_number,
+            now=now,
+        )
         await append_operator_audit_event(
             session,
             category="business",
@@ -211,6 +222,7 @@ async def opt_out_customer(
                 "evidence_message_id": str(evidence_message_id),
                 "evidence_provenance": "inbound_whatsapp_customer_message",
                 "relances_cancelled": cancelled,
+                "relance_candidates_cancelled": candidates_cancelled,
             },
             source_network_fingerprint=source_network_fingerprint,
             user_agent_fingerprint=user_agent_fingerprint,
@@ -218,7 +230,10 @@ async def opt_out_customer(
         )
         await session.commit()
         return OptOutMutationResult(
-            customer=customer, changed=True, relances_cancelled=cancelled
+            customer=customer,
+            changed=True,
+            relances_cancelled=cancelled,
+            relance_candidates_cancelled=candidates_cancelled,
         )
     except CustomerProfileError:
         raise

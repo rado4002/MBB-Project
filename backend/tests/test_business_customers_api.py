@@ -15,6 +15,8 @@ from app.models.customer import Customer
 from app.models.lead import Lead
 from app.models.message import Message
 from app.models.operator_audit import OperatorAuditEvent
+from app.models.relance import Relance
+from app.models.relance_candidate import RelanceCandidate
 from test_commerce_admin_api import (
     ADMIN_PASSWORD,
     OPERATOR_PASSWORD,
@@ -39,6 +41,7 @@ async def customer_workspace(harness):  # noqa: F811
     conversation_id = uuid.uuid4()
     other_conversation_id = uuid.uuid4()
     evidence_id = uuid.uuid4()
+    lead_id = uuid.uuid4()
     now = datetime.now(timezone.utc)
     async with factory() as db:
         await db.execute(text("TRUNCATE TABLE mbb.customers RESTART IDENTITY CASCADE"))
@@ -106,6 +109,7 @@ async def customer_workspace(harness):  # noqa: F811
         )
         db.add(
             Lead(
+                lead_id=lead_id,
                 customer_id=customer_phone,
                 conversation_id=conversation_id,
                 score="warm",
@@ -115,6 +119,24 @@ async def customer_workspace(harness):  # noqa: F811
                 product_interest=[],
                 source="referral_partner",
             )
+        )
+        await db.flush()
+        db.add_all(
+            [
+                Relance(
+                    lead_id=lead_id,
+                    attempt_number=1,
+                    scheduled_at=now + timedelta(hours=1),
+                    value_hook="Offline legacy follow-up",
+                    hook_type="reciprocity",
+                ),
+                RelanceCandidate(
+                    lead_id=lead_id,
+                    source_message_id=evidence_id,
+                    attempt_number=1,
+                    scheduled_at=now + timedelta(hours=1),
+                ),
+            ]
         )
         await db.commit()
     try:
@@ -268,6 +290,18 @@ async def test_opt_out_requires_customer_owned_verified_signal_and_is_audited(
         customer = await db.get(Customer, "+243810005101")
         assert customer.opt_out_flag is True and customer.opt_out_at is not None
         assert customer.consent_given is False and customer.consent_timestamp is None
+        legacy_relance = await db.scalar(
+            select(Relance)
+            .join(Lead, Lead.lead_id == Relance.lead_id)
+            .where(Lead.customer_id == "+243810005101")
+        )
+        candidate = await db.scalar(
+            select(RelanceCandidate)
+            .join(Lead, Lead.lead_id == RelanceCandidate.lead_id)
+            .where(Lead.customer_id == "+243810005101")
+        )
+        assert legacy_relance is not None and legacy_relance.cancelled is True
+        assert candidate is not None and candidate.cancelled_at is not None
         audits = (
             await db.scalars(
                 select(OperatorAuditEvent).where(
@@ -278,4 +312,6 @@ async def test_opt_out_requires_customer_owned_verified_signal_and_is_audited(
         assert len(audits) == 1
         assert audits[0].actor_account_id == administrator_id
         assert audits[0].event_metadata["evidence_message_id"] == str(evidence_id)
+        assert audits[0].event_metadata["relances_cancelled"] == 1
+        assert audits[0].event_metadata["relance_candidates_cancelled"] == 1
         assert "+243" not in str(audits[0].event_metadata)
