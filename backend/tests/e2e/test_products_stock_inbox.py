@@ -178,6 +178,54 @@ async def _database_state(sku: str) -> dict:
         await engine.dispose()
 
 
+async def _seed_customer_opt_out_request() -> uuid.UUID:
+    message_id = uuid.uuid4()
+    try:
+        async with async_session_factory() as session:
+            session.add(Message(
+                message_id=message_id,
+                conversation_id=CONVERSATION_ID,
+                direction="inbound",
+                content="Arrête, ne plus contacter s'il vous plaît.",
+                content_type="text",
+                language="french",
+                whatsapp_message_id=f"e2e-customer-opt-out-{message_id}",
+            ))
+            await session.commit()
+        return message_id
+    finally:
+        await engine.dispose()
+
+
+async def _assert_customer_profile_change(evidence_message_id: uuid.UUID) -> None:
+    try:
+        async with async_session_factory() as session:
+            customer = await session.get(Customer, "+243812345678")
+            assert customer is not None
+            assert (customer.name, customer.city, customer.preferred_language) == (
+                "E2E Customer Updated", "Matadi", "lingala",
+            )
+            assert customer.opt_out_flag is True and customer.opt_out_at is not None
+            audits = (await session.scalars(
+                select(OperatorAuditEvent).where(OperatorAuditEvent.action.in_((
+                    "customer.profile.update", "customer.contact.opt_out",
+                ))).order_by(
+                    OperatorAuditEvent.occurred_at, OperatorAuditEvent.event_id,
+                )
+            )).all()
+            assert [event.action for event in audits] == [
+                "customer.profile.update", "customer.contact.opt_out",
+            ]
+            assert audits[1].event_metadata["evidence_message_id"] == str(
+                evidence_message_id
+            )
+            assert "+243812345678" not in str(
+                [event.event_metadata for event in audits]
+            )
+    finally:
+        await engine.dispose()
+
+
 async def _make_order_ready_for_preparation(order_id: uuid.UUID) -> datetime:
     try:
         async with async_session_factory() as session:
@@ -833,9 +881,61 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
             activity_dialog.get_by_role("link", name=f"Order {str(order_id)[:8]}")
         ).to_have_attribute("href", f"/business/orders/{order_id}")
         assert "+243812345678" not in activity_dialog.inner_text()
+        activity_dialog.get_by_role("link", name="Open Customer profile").click()
+        expect(page).to_have_url(re.compile(rf"/business/customers/{CONVERSATION_ID}"))
+        customer_profile = page.locator(".customer-profile-page")
+        expect(customer_profile.get_by_role(
+            "heading", name="Profile & contact preferences"
+        )).to_be_visible(timeout=15_000)
+        expect(customer_profile.get_by_text("***5678", exact=True)).to_be_visible(
+            timeout=15_000
+        )
+        expect(page.get_by_text("WhatsApp · verified provider message")).to_be_visible()
+        expect(customer_profile.get_by_text("E2e", exact=True)).to_be_visible()
+        expect(page.get_by_text(
+            "Administrator permission is required to edit Customer details."
+        )).to_be_visible()
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         context.close()
         browser.close()
+
+    opt_out_message_id = asyncio.run(_seed_customer_opt_out_request())
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        admin_context = browser.new_context(ignore_https_errors=True)
+        admin_page = admin_context.new_page()
+        _login(admin_page, "e2e.admin", ADMIN_PASSWORD)
+        admin_page.goto(
+            f"{BASE_URL}/business/customers/{CONVERSATION_ID}",
+            wait_until="domcontentloaded",
+        )
+        expect(admin_page.locator(".customer-profile-page").get_by_text(
+            "***5678", exact=True
+        )).to_be_visible(timeout=15_000)
+        admin_page.get_by_label("Name").fill("E2E Customer Updated")
+        admin_page.get_by_label("City").fill("Matadi")
+        admin_page.get_by_label("Preferred language").select_option("lingala")
+        admin_page.get_by_label("Reason").select_option("operator_correction")
+        admin_page.get_by_role("button", name="Save profile").click()
+        expect(admin_page.get_by_text(
+            "Customer profile updated and audited."
+        )).to_be_visible(timeout=15_000)
+        admin_page.get_by_label("Customer opt-out message").select_option(
+            str(opt_out_message_id)
+        )
+        admin_page.get_by_label(
+            "I confirm this message is the Customer’s opt-out request."
+        ).check()
+        admin_page.get_by_role("button", name="Record opt-out").click()
+        expect(admin_page.get_by_text(
+            "Customer opt-out recorded with message evidence. "
+            "Pending follow-ups were stopped."
+        )).to_be_visible(timeout=15_000)
+        expect(admin_page.get_by_text(re.compile(r"Recorded ·"))).to_be_visible()
+        assert admin_page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        admin_context.close()
+        browser.close()
+    asyncio.run(_assert_customer_profile_change(opt_out_message_id))
 
     reviewed_at = asyncio.run(_make_order_ready_for_preparation(order_id))
     with sync_playwright() as playwright:

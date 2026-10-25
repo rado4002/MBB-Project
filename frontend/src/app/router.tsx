@@ -16,6 +16,7 @@ import { BusinessWorkspace } from '../features/business/BusinessWorkspace'
 import { StockPage } from '../features/stock/StockPage'
 import { OrdersPage } from '../features/orders/OrdersPage'
 import { FxPage } from '../features/fx/FxPage'
+import { CustomerProfilePage } from '../features/customers/CustomerProfilePage'
 
 function EntryRoute() {
   const auth = useAuth()
@@ -61,6 +62,12 @@ function FxRoute() {
     ? <FxPage /> : <Navigate to="/inbox" replace />
 }
 
+function CustomerRoute() {
+  const auth = useAuth()
+  return auth.session?.capabilities.includes('customer.read')
+    ? <CustomerProfilePage /> : <Navigate to="/inbox" replace />
+}
+
 export function AppRouter() {
   return (
     <Routes>
@@ -94,6 +101,7 @@ export function AppRouter() {
           <Route path="orders" element={<OrdersRoute />} />
           <Route path="orders/:orderId" element={<OrdersRoute />} />
           <Route path="fx" element={<FxRoute />} />
+          <Route path="customers/:conversationId" element={<CustomerRoute />} />
         </Route>
       </Route>
       <Route path="*" element={<NotFoundPage />} />

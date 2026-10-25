@@ -54,6 +54,8 @@ ROLE_CAPABILITIES = {
         "order.delivery.confirm",
         "order.delivery_issue.create",
         "order.delivery_issue.close",
+        "customer.read",
+        "customer.manage",
     },
     "operator": BASE_CAPABILITIES
     | {
@@ -67,6 +69,7 @@ ROLE_CAPABILITIES = {
         "internal_note.create",
         "escalation.create",
         "conversation.ownership.change",
+        "customer.read",
     },
     "analyst": BASE_CAPABILITIES,
 }

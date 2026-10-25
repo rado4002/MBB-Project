@@ -525,6 +525,20 @@ h2 { font-size: 1.125rem; }
 .customer-activity__list li { min-width: 0; display: grid; gap: var(--space-1); padding: var(--space-3); color: var(--color-text-muted); background: var(--color-surface-subtle); border: 1px solid var(--color-border); border-radius: var(--radius-sm); font-size: 0.76rem; overflow-wrap: anywhere; }
 .customer-activity__list a, .customer-activity__list strong { color: var(--color-text); font-size: 0.8rem; font-weight: 700; }
 .customer-activity__list a { min-height: 2.75rem; display: flex; align-items: center; color: var(--color-primary-hover); }
+.customer-profile-page { display: grid; gap: var(--space-4); min-width: 0; }
+.customer-profile-page .business-page-header { display: flex; gap: var(--space-3); align-items: start; justify-content: space-between; flex-wrap: wrap; }
+.customer-profile-page h1, .customer-profile-page h2 { margin: 0; }
+.customer-profile-page .eyebrow { margin: 0 0 var(--space-1); color: var(--color-text-muted); font-size: 0.76rem; font-weight: 700; text-transform: uppercase; }
+.customer-profile-page .business-card { display: grid; gap: var(--space-3); padding: var(--space-4); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); }
+.customer-profile-form { display: grid; gap: var(--space-2); max-width: 38rem; }
+.customer-profile-form input:not([type="checkbox"]), .customer-profile-form select { min-height: 2.75rem; width: 100%; }
+.customer-profile-form .button { width: fit-content; min-height: 2.75rem; margin-top: var(--space-2); }
+.supporting-copy { margin: 0; color: var(--color-text-muted); font-size: 0.82rem; }
+.checkbox-row { display: flex; gap: var(--space-2); align-items: start; min-height: 2.75rem; padding-top: var(--space-2); }
+.checkbox-row input { margin-top: 0.2rem; }
+@media (max-width: 42rem) {
+  .customer-profile-page .business-page-header .button, .customer-profile-form .button { width: 100%; }
+}
 @media (min-width: 48rem) {
   .inbox-page .inbox-layout { grid-template-columns: minmax(16rem, 27fr) minmax(0, 73fr); }
   .inbox-page .queue-panel { height: 100%; }

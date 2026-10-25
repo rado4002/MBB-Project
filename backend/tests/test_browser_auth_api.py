@@ -222,6 +222,7 @@ async def test_preauth_csrf_cookie_and_valid_login_are_opaque(harness) -> None:
             "auth.session.read",
             "conversation.ownership.change",
             "conversation.read",
+            "customer.read",
             "escalation.create",
             "internal_note.create",
             "internal_note.read",
