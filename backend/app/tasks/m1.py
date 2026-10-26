@@ -553,6 +553,98 @@ async def _process(
                 "conversation_id": conv_id,
                 "send_status": "skipped",
             }
+
+        # Exact code-bound confirm/cancel replies are application-owned. Use
+        # the ownership version captured with this inbound message so an
+        # operator-owned draft can resolve while autonomous AI remains paused.
+        expected_ownership_version = claim.ownership_version
+        from app.modules.m7_conversion.order_drafts import (
+            StaleOrderDraftAuthority,
+            handle_order_draft_reply,
+        )
+
+        with ops.observe(
+            "persistence", boundary="draft_reply", source_message_id=inbound.message_id,
+        ) as observation:
+            try:
+                draft_reply = await handle_order_draft_reply(
+                    session,
+                    conversation_id=inbound.conversation_id,
+                    source_message_id=inbound.message_id,
+                    expected_ownership_version=expected_ownership_version,
+                    customer_text=content,
+                )
+                if draft_reply is not None:
+                    await mark_outcome_committed(
+                        session,
+                        source_message_id=inbound.message_id,
+                        outbound_message_id=draft_reply.outbound_message_id,
+                        outcome_type="draft_reply",
+                    )
+                    if draft_reply.order_id is not None:
+                        await mark_skipped_in_session(
+                            session,
+                            source_message_id=inbound.message_id,
+                            disposition_code="order_committed_no_send",
+                        )
+                    await session.commit()
+                    observation.set(
+                        "committed", transaction_outcome="committed",
+                        draft_state=draft_reply.state,
+                        outbound_message_id=draft_reply.outbound_message_id,
+                    )
+                else:
+                    observation.set("not_applicable")
+            except StaleOrderDraftAuthority:
+                await session.rollback()
+                observation.set(
+                    "stale", reason="stale_draft_authority", transaction_outcome="rolled_back",
+                )
+                log.info("m1.order_draft.stale_authority", conv_id=conv_id)
+                return {
+                    "status": "stale_order_draft_authority",
+                    "conversation_id": conv_id,
+                    "send_status": "skipped",
+                }
+            except Exception as exc:
+                await session.rollback()
+                observation.set(
+                    "rolled_back", reason="persistence_failed", transaction_outcome="rolled_back",
+                )
+                log.error(
+                    "m1.order_draft.persistence_failed",
+                    conv_id=conv_id,
+                    error_type=type(exc).__name__,
+                )
+                return _persistence_failure_result(conv_id)
+        if draft_reply is not None:
+            if draft_reply.order_id is None:
+                send_result = await _send_safe(
+                    customer_phone,
+                    draft_reply.customer_text,
+                    idempotency_key=str(draft_reply.outbound_message_id),
+                    conversation_id=inbound.conversation_id,
+                    expected_ownership_version=expected_ownership_version,
+                    source_message_id=inbound.message_id,
+                )
+            else:
+                log.info(
+                    "m1.order_draft.order_reply_send_skipped",
+                    order_id=str(draft_reply.order_id),
+                )
+                send_result = {"status": "skipped"}
+            result = {
+                "status": f"order_draft_{draft_reply.state}",
+                "conversation_id": conv_id,
+                "draft_id": str(draft_reply.draft_id),
+                "draft_version": draft_reply.draft_version,
+                "outbound_message_id": str(draft_reply.outbound_message_id),
+                "send_status": send_result["status"],
+            }
+            if draft_reply.order_id is not None:
+                result["order_id"] = str(draft_reply.order_id)
+            return result
+
         expected_ownership_version = await _ai_reply_ownership_version(
             session,
             inbound.conversation_id,
@@ -651,96 +743,6 @@ async def _process(
                 "outbound_message_id": str(outbound_id),
                 "send_status": send_result["status"],
             }
-
-        # ── Confirmable order draft reply ────────────────────────────────────
-        # Exact code-bound confirm/cancel replies are application-owned and
-        # resolved before any provider inference.
-        from app.modules.m7_conversion.order_drafts import (
-            StaleOrderDraftAuthority,
-            handle_order_draft_reply,
-        )
-
-        with ops.observe(
-            "persistence", boundary="draft_reply", source_message_id=inbound.message_id,
-        ) as observation:
-            try:
-                draft_reply = await handle_order_draft_reply(
-                    session,
-                    conversation_id=inbound.conversation_id,
-                    source_message_id=inbound.message_id,
-                    expected_ownership_version=expected_ownership_version,
-                    customer_text=content,
-                )
-                if draft_reply is not None:
-                    await mark_outcome_committed(
-                        session,
-                        source_message_id=inbound.message_id,
-                        outbound_message_id=draft_reply.outbound_message_id,
-                        outcome_type="draft_reply",
-                    )
-                    if draft_reply.order_id is not None:
-                        await mark_skipped_in_session(
-                            session,
-                            source_message_id=inbound.message_id,
-                            disposition_code="order_committed_no_send",
-                        )
-                    await session.commit()
-                    observation.set(
-                        "committed", transaction_outcome="committed",
-                        draft_state=draft_reply.state,
-                        outbound_message_id=draft_reply.outbound_message_id,
-                    )
-                else:
-                    observation.set("not_applicable")
-            except StaleOrderDraftAuthority:
-                await session.rollback()
-                observation.set(
-                    "stale", reason="stale_ai_authority", transaction_outcome="rolled_back",
-                )
-                log.info("m1.order_draft.stale_authority", conv_id=conv_id)
-                return {
-                    "status": "stale_order_draft_authority",
-                    "conversation_id": conv_id,
-                    "send_status": "skipped",
-                }
-            except Exception as exc:
-                await session.rollback()
-                observation.set(
-                    "rolled_back", reason="persistence_failed", transaction_outcome="rolled_back",
-                )
-                log.error(
-                    "m1.order_draft.persistence_failed",
-                    conv_id=conv_id,
-                    error_type=type(exc).__name__,
-                )
-                return _persistence_failure_result(conv_id)
-        if draft_reply is not None:
-            if draft_reply.order_id is None:
-                send_result = await _send_safe(
-                    customer_phone,
-                    draft_reply.customer_text,
-                    idempotency_key=str(draft_reply.outbound_message_id),
-                    conversation_id=inbound.conversation_id,
-                    expected_ownership_version=expected_ownership_version,
-                    source_message_id=inbound.message_id,
-                )
-            else:
-                log.info(
-                    "m1.order_draft.order_reply_send_skipped",
-                    order_id=str(draft_reply.order_id),
-                )
-                send_result = {"status": "skipped"}
-            result = {
-                "status": f"order_draft_{draft_reply.state}",
-                "conversation_id": conv_id,
-                "draft_id": str(draft_reply.draft_id),
-                "draft_version": draft_reply.draft_version,
-                "outbound_message_id": str(draft_reply.outbound_message_id),
-                "send_status": send_result["status"],
-            }
-            if draft_reply.order_id is not None:
-                result["order_id"] = str(draft_reply.order_id)
-            return result
 
         # ── Step 5: Load Redis session cache ──────────────────────────────────
         session_state = await get_session(conv_id)

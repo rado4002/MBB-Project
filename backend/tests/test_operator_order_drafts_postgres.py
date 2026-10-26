@@ -8,6 +8,7 @@ import asyncio
 import os
 import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select
@@ -29,7 +30,11 @@ from app.modules.m7_conversion.order_drafts import (
     prepare_operator_order_draft,
 )
 from app.operator_identity.passwords import hash_password
-from test_order_drafts_postgres import _seed, engine as postgres_engine  # noqa: F401
+from test_order_drafts_postgres import (  # noqa: F401
+    _block_m1_external_effects,
+    _seed,
+    engine as postgres_engine,
+)
 
 
 DATABASE_URL = os.environ.get("AI6B_TEST_DATABASE_URL")
@@ -204,3 +209,52 @@ async def test_operator_prepare_rejects_stale_offer_stock_conflicts_and_key_reus
         await _prepare(factory, seeded, operator, key=key, quantity=3)
     with pytest.raises(OperatorOrderDraftActiveConflict):
         await _prepare(factory, seeded, operator, quantity=3)
+
+
+@pytest.mark.asyncio
+async def test_m1_resolves_operator_draft_before_human_control_gate(
+    postgres_engine, monkeypatch
+):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.tasks import m1
+
+    factory = async_sessionmaker(postgres_engine, expire_on_commit=False)
+    seeded = await _seed(factory)
+    operator = await _operator_context(factory, seeded)
+    prepared = await _prepare(factory, seeded, operator)
+    external_calls = _block_m1_external_effects(
+        monkeypatch, factory, whatsapp_send_enabled=True
+    )
+
+    class TaskStub:
+        request = SimpleNamespace(retries=0)
+
+        def retry(self, **_kwargs):
+            raise AssertionError("M1 unexpectedly requested a retry")
+
+    async def confirm(message_id, provider_id):
+        return await m1._process(
+            task=TaskStub(),
+            message_id=str(message_id),
+            customer_phone="+243810006001",
+            content=f"OUI {prepared.draft.confirmation_code}",
+            content_type="text",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            whatsapp_message_id=provider_id,
+        )
+
+    first_id = uuid.uuid4()
+    first = await confirm(first_id, f"operator-confirm-{first_id}")
+    replay = await confirm(uuid.uuid4(), f"operator-confirm-replay-{first_id}")
+    redelivery = await confirm(first_id, f"operator-confirm-{first_id}")
+
+    assert first["status"] == "order_draft_confirmed"
+    assert replay["status"] == "order_draft_already_confirmed"
+    assert redelivery["status"] == "skipped"
+    assert first["order_id"] == replay["order_id"]
+    assert first["send_status"] == replay["send_status"] == "skipped"
+    assert external_calls == []
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(Order)) == 1
+        assert await session.scalar(select(func.count()).select_from(Payment)) == 0
