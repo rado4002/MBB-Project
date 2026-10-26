@@ -47,6 +47,7 @@ ROLE_CAPABILITIES = {
         "operator_account.manage",
         "commerce.manage",
         "product_offer.read",
+        "order_draft.prepare",
         "order.read",
         "order.cancel",
         "order.prepare",
@@ -60,6 +61,7 @@ ROLE_CAPABILITIES = {
     "operator": BASE_CAPABILITIES
     | {
         "product_offer.read",
+        "order_draft.prepare",
         "order.read",
         "order.delivery_issue.create",
         "conversation.read",

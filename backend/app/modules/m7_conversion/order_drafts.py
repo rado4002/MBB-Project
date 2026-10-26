@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.commercial_state import read_commercial_state
@@ -22,8 +23,11 @@ from app.models.message import Message
 from app.models.order import Order
 from app.models.order_draft import OrderDraft
 from app.modules.m1_gateway.service import persist_outbound
+from app.modules.m4_conversation.operator_replies import REPLY_ELIGIBLE_STATUSES
 from app.modules.m4_conversation.inbound_order import latest_inbound_message_id
+from app.modules.inventory.service import read_available_stock
 from app.modules.product_offer.service import get_product_offer
+from app.operator_identity.audit import append_operator_audit_event
 from app.schemas.order_drafts import OrderDraftReplyResult
 from app.schemas.product_offer import ProductOfferResponse
 
@@ -51,6 +55,34 @@ class OrderDraftOrderUnavailable(OrderDraftError):
     pass
 
 
+class OperatorOrderDraftForbidden(OrderDraftError):
+    pass
+
+
+class OperatorOrderDraftNotEligible(OrderDraftError):
+    pass
+
+
+class OperatorOrderDraftStaleOffer(OrderDraftError):
+    pass
+
+
+class OperatorOrderDraftInsufficientStock(OrderDraftError):
+    pass
+
+
+class OperatorOrderDraftActiveConflict(OrderDraftError):
+    pass
+
+
+class OperatorOrderDraftIdempotencyConflict(OrderDraftError):
+    pass
+
+
+class OperatorOrderDraftUnavailable(OrderDraftError):
+    pass
+
+
 @dataclass(frozen=True)
 class PreparedOrderDraft:
     draft_id: uuid.UUID
@@ -58,6 +90,13 @@ class PreparedOrderDraft:
     confirmation_text: str
     outbound_message_id: uuid.UUID
     commercial_state_revision: int
+
+
+@dataclass(frozen=True)
+class OperatorPreparedOrderDraft:
+    draft: OrderDraft
+    customer_confirmation_text: str
+    replayed: bool
 
 
 def _utcnow() -> datetime:
@@ -210,6 +249,279 @@ def _new_confirmation_code() -> str:
     return uuid.uuid4().hex[:8].upper()
 
 
+def _operator_key_digest(actor_account_id: uuid.UUID, key: uuid.UUID) -> str:
+    return hashlib.sha256(
+        b"operator-order-draft-key:v1:"
+        + actor_account_id.bytes
+        + key.bytes
+    ).hexdigest()
+
+
+def _operator_request_fingerprint(
+    *,
+    conversation_id: uuid.UUID,
+    expected_ownership_version: int,
+    product_id: uuid.UUID,
+    sellable_item_id: uuid.UUID,
+    price_id: uuid.UUID,
+    exchange_rate_id: uuid.UUID,
+    inventory_updated_at: datetime,
+    quantity: int,
+) -> str:
+    payload = {
+        "conversation_id": str(conversation_id),
+        "expected_ownership_version": expected_ownership_version,
+        "product_id": str(product_id),
+        "sellable_item_id": str(sellable_item_id),
+        "price_id": str(price_id),
+        "exchange_rate_id": str(exchange_rate_id),
+        "inventory_updated_at": inventory_updated_at.isoformat(),
+        "quantity": quantity,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _operator_confirmation_text(draft: OrderDraft, language: str) -> str:
+    return t("order_draft_confirmation", language).format(
+        product=(
+            f"{draft.product_name} {draft.model_label}"
+            if draft.model_label else draft.product_name
+        ),
+        quantity=draft.quantity,
+        unit_usd=_decimal_text(draft.unit_price_usd),
+        total_cdf=_cdf_text(draft.total_cdf),
+        code=draft.confirmation_code,
+    )
+
+
+async def _operator_replay(
+    session: AsyncSession,
+    *,
+    key_digest: str,
+    request_fingerprint: str,
+    language: str,
+) -> OperatorPreparedOrderDraft | None:
+    draft = await session.scalar(
+        select(OrderDraft).where(
+            OrderDraft.operator_operation_key_digest == key_digest
+        )
+    )
+    if draft is None:
+        return None
+    if draft.operator_request_fingerprint != request_fingerprint:
+        raise OperatorOrderDraftIdempotencyConflict
+    return OperatorPreparedOrderDraft(
+        draft=draft,
+        customer_confirmation_text=_operator_confirmation_text(draft, language),
+        replayed=True,
+    )
+
+
+async def prepare_operator_order_draft(
+    session: AsyncSession,
+    *,
+    conversation_id: uuid.UUID,
+    expected_ownership_version: int,
+    product_id: uuid.UUID,
+    sellable_item_id: uuid.UUID,
+    price_id: uuid.UUID,
+    exchange_rate_id: uuid.UUID,
+    inventory_updated_at: datetime,
+    quantity: int,
+    idempotency_key: uuid.UUID,
+    actor_account_id: uuid.UUID,
+    actor_display_name: str,
+    actor_role: str,
+    request_id: str,
+    source_network_fingerprint: str | None,
+    user_agent_fingerprint: str | None,
+) -> OperatorPreparedOrderDraft:
+    """Prepare, but never present or send, one operator-owned draft snapshot."""
+    key_digest = _operator_key_digest(actor_account_id, idempotency_key)
+    fingerprint = _operator_request_fingerprint(
+        conversation_id=conversation_id,
+        expected_ownership_version=expected_ownership_version,
+        product_id=product_id,
+        sellable_item_id=sellable_item_id,
+        price_id=price_id,
+        exchange_rate_id=exchange_rate_id,
+        inventory_updated_at=inventory_updated_at,
+        quantity=quantity,
+    )
+    try:
+        conversation = await session.scalar(
+            select(Conversation)
+            .where(Conversation.conversation_id == conversation_id)
+            .with_for_update()
+        )
+        if conversation is None:
+            raise OperatorOrderDraftNotEligible("conversation_not_found")
+        if (
+            conversation.owner_type != "human"
+            or conversation.human_owner_account_id != actor_account_id
+            or conversation.ai_execution_state != "paused"
+        ):
+            raise OperatorOrderDraftForbidden
+        if conversation.ownership_version != expected_ownership_version:
+            raise StaleOrderDraftAuthority
+        if conversation.status not in REPLY_ELIGIBLE_STATUSES:
+            raise OperatorOrderDraftNotEligible("conversation_not_eligible")
+        replay = await _operator_replay(
+            session,
+            key_digest=key_digest,
+            request_fingerprint=fingerprint,
+            language=conversation.language_detected,
+        )
+        if replay is not None:
+            return replay
+
+        customer = await session.scalar(
+            select(Customer)
+            .where(Customer.phone_number == conversation.customer_id)
+            .with_for_update()
+        )
+        lead = await session.scalar(
+            select(Lead).where(Lead.conversation_id == conversation_id)
+        )
+        source_message_id = await _latest_message_id(
+            session, conversation_id, "inbound"
+        )
+        if (
+            customer is None
+            or customer.opt_out_flag
+            or lead is None
+            or lead.customer_id != conversation.customer_id
+            or source_message_id is None
+        ):
+            raise OperatorOrderDraftNotEligible("customer_not_eligible")
+
+        active = await session.scalar(
+            select(OrderDraft).where(
+                OrderDraft.conversation_id == conversation_id,
+                OrderDraft.status == "awaiting_confirmation",
+            )
+        )
+        if active is not None:
+            if (
+                active.created_by_operator_account_id == actor_account_id
+                and active.operator_request_fingerprint == fingerprint
+            ):
+                return OperatorPreparedOrderDraft(
+                    draft=active,
+                    customer_confirmation_text=_operator_confirmation_text(
+                        active, conversation.language_detected
+                    ),
+                    replayed=True,
+                )
+            raise OperatorOrderDraftActiveConflict
+
+        try:
+            offer = _require_confirmable_offer(
+                await get_product_offer(session, sellable_item_id)
+            )
+        except OrderDraftOfferUnavailable as exc:
+            if exc.safe_code == "out_of_stock":
+                raise OperatorOrderDraftInsufficientStock from exc
+            raise OperatorOrderDraftStaleOffer from exc
+        quote = offer.derived_cdf_quote
+        if (
+            offer.product_id != product_id
+            or offer.price_id != price_id
+            or quote is None
+            or quote.exchange_rate_id != exchange_rate_id
+            or offer.inventory_updated_at != inventory_updated_at
+        ):
+            raise OperatorOrderDraftStaleOffer
+
+        inventory = await read_available_stock(
+            session,
+            sellable_item_id=sellable_item_id,
+            lock_for_update=True,
+        )
+        if (
+            inventory.available_quantity is None
+            or inventory.available_quantity < quantity
+        ):
+            raise OperatorOrderDraftInsufficientStock
+        if inventory.updated_at != inventory_updated_at:
+            raise OperatorOrderDraftStaleOffer
+
+        snapshot = _snapshot_values(offer, quantity=quantity)
+        if snapshot["total_cdf"] > _ORDER_TOTAL_MAX:  # type: ignore[operator]
+            raise OrderDraftOrderUnavailable("order_total_out_of_range")
+        state = await read_commercial_state(session, conversation_id)
+        draft = OrderDraft(
+            draft_id=uuid.uuid4(),
+            draft_version=1,
+            conversation_id=conversation_id,
+            source_message_id=source_message_id,
+            presented_outbound_message_id=None,
+            created_by_turn_id=None,
+            created_by_operator_account_id=actor_account_id,
+            operator_operation_key_digest=key_digest,
+            operator_request_fingerprint=fingerprint,
+            ownership_version=expected_ownership_version,
+            commercial_state_revision=0 if state is None else state.revision,
+            confirmation_code=_new_confirmation_code(),
+            status="awaiting_confirmation",
+            **snapshot,
+        )
+        session.add(draft)
+        await session.flush()
+        await append_operator_audit_event(
+            session,
+            category="business",
+            actor_kind="human",
+            actor_account_id=actor_account_id,
+            actor_display_name=actor_display_name,
+            effective_role=actor_role,
+            request_id=request_id,
+            action="order_draft.prepared",
+            target_type="order_draft",
+            target_id=str(draft.draft_id),
+            outcome="succeeded",
+            idempotency_reference=key_digest[:16],
+            metadata={
+                "conversation_id": str(conversation_id),
+                "sellable_item_id": str(sellable_item_id),
+                "quantity": quantity,
+                "draft_version": 1,
+            },
+            source_network_fingerprint=source_network_fingerprint,
+            user_agent_fingerprint=user_agent_fingerprint,
+        )
+        await session.commit()
+        return OperatorPreparedOrderDraft(
+            draft=draft,
+            customer_confirmation_text=_operator_confirmation_text(
+                draft, conversation.language_detected
+            ),
+            replayed=False,
+        )
+    except OrderDraftError:
+        await session.rollback()
+        raise
+    except IntegrityError as exc:
+        await session.rollback()
+        try:
+            replay = await _operator_replay(
+                session,
+                key_digest=key_digest,
+                request_fingerprint=fingerprint,
+                language="french",
+            )
+        except OrderDraftError:
+            raise
+        if replay is not None:
+            return replay
+        raise OperatorOrderDraftActiveConflict from exc
+    except (SQLAlchemyError, OSError, ConnectionError, TimeoutError) as exc:
+        await session.rollback()
+        raise OperatorOrderDraftUnavailable from exc
+
+
 def _snapshot_values(
     offer: ProductOfferResponse,
     *,
@@ -278,7 +590,10 @@ async def prepare_order_draft(
         raise StaleOrderDraftAuthority
 
     replay = await session.scalar(
-        select(OrderDraft).where(OrderDraft.source_message_id == source_message_id)
+        select(OrderDraft).where(
+            OrderDraft.source_message_id == source_message_id,
+            OrderDraft.created_by_turn_id.is_not(None),
+        )
     )
     if replay is not None:
         text_value = await session.scalar(
@@ -440,7 +755,12 @@ async def _create_pending_order_from_revalidated_draft(
         .where(Customer.phone_number == conversation.customer_id)
         .with_for_update()
     )
-    if lead is None or customer is None or lead.customer_id != conversation.customer_id:
+    if (
+        lead is None
+        or customer is None
+        or customer.opt_out_flag
+        or lead.customer_id != conversation.customer_id
+    ):
         raise OrderDraftOrderUnavailable("order_party_authority_unavailable")
     delivery_zone = customer.city.strip()
     if not delivery_zone or len(delivery_zone) > 50:
@@ -450,6 +770,16 @@ async def _create_pending_order_from_revalidated_draft(
     total_cdf = quote.cdf_amount * draft.quantity
     if total_cdf <= 0 or total_cdf > _ORDER_TOTAL_MAX:
         raise OrderDraftOrderUnavailable("order_total_out_of_range")
+    inventory = await read_available_stock(
+        session,
+        sellable_item_id=draft.sellable_item_id,
+        lock_for_update=True,
+    )
+    if (
+        inventory.available_quantity is None
+        or inventory.available_quantity < draft.quantity
+    ):
+        raise OrderDraftOfferUnavailable("out_of_stock")
     order = Order(
         order_id=uuid.uuid4(),
         lead_id=lead.lead_id,
@@ -509,12 +839,22 @@ async def handle_order_draft_reply(
         .where(Conversation.conversation_id == conversation_id)
         .with_for_update()
     )
-    if (
-        conversation is None
-        or conversation.owner_type != "ai"
-        or conversation.ai_execution_state != "eligible"
-        or conversation.ownership_version != expected_ownership_version
-    ):
+    if conversation is None or conversation.ownership_version != expected_ownership_version:
+        raise StaleOrderDraftAuthority
+    if draft.created_by_operator_account_id is None:
+        authority_valid = (
+            conversation.owner_type == "ai"
+            and conversation.ai_execution_state == "eligible"
+        )
+    else:
+        authority_valid = (
+            conversation.owner_type == "human"
+            and conversation.human_owner_account_id
+            == draft.created_by_operator_account_id
+            and conversation.ai_execution_state == "paused"
+            and conversation.ownership_version == draft.ownership_version
+        )
+    if not authority_valid:
         raise StaleOrderDraftAuthority
     if (
         await _latest_message_id(session, conversation_id, "inbound")
@@ -586,8 +926,10 @@ async def handle_order_draft_reply(
             text_key="order_draft_expired",
             language=language,
         )
-    if await _latest_message_id(session, conversation_id, "outbound") != (
-        draft.presented_outbound_message_id
+    if (
+        draft.presented_outbound_message_id is not None
+        and await _latest_message_id(session, conversation_id, "outbound")
+        != draft.presented_outbound_message_id
     ):
         text_value = t("order_draft_expired", language)
         outbound_id = await _resolve_with_message(
@@ -669,6 +1011,33 @@ async def handle_order_draft_reply(
             outbound_message_id=outbound_id,
         )
 
+    inventory = await read_available_stock(
+        session,
+        sellable_item_id=draft.sellable_item_id,
+        lock_for_update=True,
+    )
+    if (
+        inventory.available_quantity is None
+        or inventory.available_quantity < draft.quantity
+    ):
+        text_value = t("order_draft_unavailable", language)
+        outbound_id = await _resolve_with_message(
+            session,
+            draft=draft,
+            source_message_id=source_message_id,
+            status="invalidated",
+            resolution_code="insufficient_stock",
+            text_value=text_value,
+            language=language,
+        )
+        return OrderDraftReplyResult(
+            state="invalidated",
+            draft_id=draft.draft_id,
+            draft_version=draft.draft_version,
+            customer_text=text_value,
+            outbound_message_id=outbound_id,
+        )
+
     refreshed_snapshot = _snapshot_values(offer, quantity=draft.quantity)
     if refreshed_snapshot["offer_fingerprint"] != draft.offer_fingerprint:
         confirmation_code = _new_confirmation_code()
@@ -698,6 +1067,9 @@ async def handle_order_draft_reply(
                 source_message_id=source_message_id,
                 presented_outbound_message_id=outbound_id,
                 created_by_turn_id=draft.created_by_turn_id,
+                created_by_operator_account_id=(
+                    draft.created_by_operator_account_id
+                ),
                 ownership_version=expected_ownership_version,
                 commercial_state_revision=state_revision,
                 confirmation_code=confirmation_code,
@@ -721,7 +1093,7 @@ async def handle_order_draft_reply(
             conversation=conversation,
             offer=offer,
         )
-    except OrderDraftOrderUnavailable:
+    except (OrderDraftOrderUnavailable, OrderDraftOfferUnavailable):
         text_value = t("order_draft_unavailable", language)
         outbound_id = await _resolve_with_message(
             session,

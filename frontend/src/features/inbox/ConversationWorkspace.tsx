@@ -1251,7 +1251,18 @@ export function ConversationWorkspace({
         />
         <div className="workspace-toolbar__actions">
           {auth.session?.capabilities.includes('product_offer.read') ? (
-            <ProductLookup key={conversationId} />
+            <ProductLookup
+              key={conversationId}
+              conversationId={conversationId}
+              expectedOwnershipVersion={ownership?.version ?? null}
+              canPrepareDraft={Boolean(
+                auth.session.capabilities.includes('order_draft.prepare')
+                && ownership?.owner_type === 'human'
+                && ownership.human_owner?.account_id === auth.session.human.account_id
+                && ownership.ai_execution_state === 'paused'
+                && currentReplyReason === null
+              )}
+            />
           ) : null}
           <button
             className="button button--secondary context-trigger"

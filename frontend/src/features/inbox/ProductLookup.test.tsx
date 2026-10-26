@@ -32,6 +32,7 @@ function offer(overrides: Partial<ProductOffer> = {}): ProductOffer {
 function workspace(role: 'operator' | 'administrator' = 'operator', owned = true) {
   server.use(
     http.get('/api/v1/auth/session', () => HttpResponse.json(sessionFixture(role))),
+    http.get('/api/v1/auth/csrf', () => HttpResponse.json({ csrf_token: 'csrf-test-token' })),
     http.get('/api/v1/operator/conversations', () => HttpResponse.json({
       items: [conversationFixture(first), conversationFixture(second)], next_cursor: null,
     })),
@@ -103,6 +104,57 @@ describe('Inbox authoritative product lookup', () => {
     await waitFor(() => expect(trigger).toHaveFocus())
   })
 
+  it('prepares an unsent authoritative draft and shows the exact customer action', async () => {
+    workspace()
+    let posted: Record<string, unknown> | null = null
+    server.use(http.post('/api/v1/operator/conversations/:conversationId/order-drafts', async ({ request, params }) => {
+      expect(params.conversationId).toBe(first)
+      expect(request.headers.get('Idempotency-Key')).toMatch(/^[0-9a-f-]{36}$/)
+      posted = await request.json() as Record<string, unknown>
+      return HttpResponse.json({
+        draft_id: second, draft_version: 1, status: 'awaiting_confirmation',
+        product_id: first, sellable_item_id: itemId, product_name: 'Air Fryer', model_label: '6L',
+        quantity: 2, unit_price_usd: '55.00', unit_price_cdf: '154000.00', total_cdf: '308000.00',
+        confirmation_code: 'A1B2C3D4', required_customer_reply: 'OUI A1B2C3D4',
+        customer_confirmation_text: 'Confirmez avec OUI A1B2C3D4.', presented_to_customer: false, replayed: false,
+      }, { status: 201 })
+    }))
+    const { user, dialog } = await openSearch()
+    await user.click(await within(dialog).findByRole('button', { name: 'Air Fryer — 6L' }))
+    await user.clear(within(dialog).getByLabelText('Quantity'))
+    await user.type(within(dialog).getByLabelText('Quantity'), '2')
+    expect(within(dialog).getByText('308000.00 CDF')).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Prepare Order draft' }))
+    expect(await within(dialog).findByRole('region', { name: 'Order draft status' })).toHaveTextContent('Awaiting customer confirmation')
+    expect(within(dialog).getByText('No message was sent.')).toBeInTheDocument()
+    expect(within(dialog).getByText('OUI A1B2C3D4')).toBeInTheDocument()
+    expect(posted).toMatchObject({
+      expected_ownership_version: 2, product_id: first, sellable_item_id: itemId,
+      price_id: second, exchange_rate_id: second,
+      inventory_updated_at: '2026-09-01T12:00:00Z', quantity: 2,
+    })
+  })
+
+  it('reports stale Offer and insufficient Stock failures without claiming a draft', async () => {
+    workspace()
+    let code = 'PRODUCT_OFFER_STALE'
+    server.use(http.post('/api/v1/operator/conversations/:conversationId/order-drafts', () => HttpResponse.json({
+      error: { code, message: code === 'PRODUCT_OFFER_STALE'
+        ? 'Product, price, exchange rate, or Stock changed. Refresh the Offer.'
+        : 'The requested quantity is no longer available.' },
+    }, { status: 409 })))
+    const { user, dialog } = await openSearch()
+    await user.click(await within(dialog).findByRole('button', { name: 'Air Fryer — 6L' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Prepare Order draft' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('changed')
+    expect(within(dialog).queryByRole('region', { name: 'Order draft status' })).not.toBeInTheDocument()
+    code = 'INSUFFICIENT_STOCK'
+    await user.clear(within(dialog).getByLabelText('Quantity'))
+    await user.type(within(dialog).getByLabelText('Quantity'), '5')
+    await user.click(within(dialog).getByRole('button', { name: 'Prepare Order draft' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('no longer available')
+  })
+
   it.each([
     { label: 'unavailable', value: offer({ inventory_status: 'out_of_stock', offer_status: 'out_of_stock', reason_code: 'inventory_out_of_stock', is_sellable_now: false }), text: 'Unavailable' },
     { label: 'unknown', value: offer({ inventory_status: 'unknown', inventory_configured: false, offer_status: 'availability_unconfirmed', reason_code: 'availability_unconfirmed', is_sellable_now: false }), text: 'Availability unconfirmed' },
@@ -169,7 +221,8 @@ describe('Inbox authoritative product lookup', () => {
     let resolveDetail!: (response: ProductOffer) => void
     const search = vi.fn(() => kind === 'search' ? new Promise<{ items: ProductOffer[] }>((resolve) => { resolveSearch = resolve }) : Promise.resolve({ items: [offer()] }))
     const detail = vi.fn(() => new Promise<ProductOffer>((resolve) => { resolveDetail = resolve }))
-    const spy = vi.spyOn(productOffers, 'createProductOfferClient').mockReturnValue({ search, detail })
+    const prepareDraft = vi.fn()
+    const spy = vi.spyOn(productOffers, 'createProductOfferClient').mockReturnValue({ search, detail, prepareDraft })
     try {
       workspace()
       const { user, dialog } = await openSearch()
@@ -202,6 +255,7 @@ describe('Inbox authoritative product lookup', () => {
     const { user, dialog } = await openSearch()
     await user.click(await within(dialog).findByRole('button', { name: 'Air Fryer — 6L' }))
     await within(dialog).findByText('Family cooking appliance.')
+    expect(within(dialog).queryByRole('button', { name: 'Prepare Order draft' })).not.toBeInTheDocument()
     await user.click(within(dialog).getByRole('button', { name: 'Back to conversation' }))
     expect(screen.getByRole('button', { name: 'Take over conversation' })).toBeInTheDocument()
     expect(screen.getByRole('radio', { name: 'Reply' })).toBeDisabled()

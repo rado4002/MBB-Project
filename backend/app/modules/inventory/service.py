@@ -73,6 +73,15 @@ class InventoryStatusResult:
     updated_at: datetime | None
 
 
+@dataclass(frozen=True)
+class AvailableStockSnapshot:
+    """Inventory-owned quantity fact for guarded cross-domain operations."""
+
+    sellable_item_id: uuid.UUID
+    available_quantity: int | None
+    updated_at: datetime | None
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -97,6 +106,32 @@ async def _lock_item_and_inventory(
         select(InventoryRecord)
         .where(InventoryRecord.sellable_item_id == sellable_item_id)
         .with_for_update()
+    )
+
+
+async def read_available_stock(
+    session: AsyncSession,
+    *,
+    sellable_item_id: uuid.UUID,
+    lock_for_update: bool = False,
+) -> AvailableStockSnapshot:
+    """Read unallocated quantity through Stock's explicit application contract."""
+    if lock_for_update:
+        record = await _lock_item_and_inventory(session, sellable_item_id)
+    else:
+        record = await session.scalar(
+            select(InventoryRecord).where(
+                InventoryRecord.sellable_item_id == sellable_item_id
+            )
+        )
+    return AvailableStockSnapshot(
+        sellable_item_id=sellable_item_id,
+        available_quantity=(
+            None
+            if record is None or record.quantity is None
+            else max(record.quantity - record.allocated_quantity, 0)
+        ),
+        updated_at=None if record is None else record.updated_at,
     )
 
 

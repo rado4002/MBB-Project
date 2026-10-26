@@ -224,6 +224,7 @@ from app.api.v1 import (  # noqa: E402  (after app creation intentional)
     maps,
     messages,
     operator_conversations,
+    operator_order_drafts,
     operator_product_offers,
     operator_accounts,
     orders,
@@ -241,6 +242,7 @@ app.include_router(business_customers.router, prefix=_V1_PREFIX)
 app.include_router(business_products.router, prefix=_V1_PREFIX)
 app.include_router(business_stock.router, prefix=_V1_PREFIX)
 app.include_router(operator_product_offers.router, prefix=_V1_PREFIX)
+app.include_router(operator_order_drafts.router, prefix=_V1_PREFIX)
 app.include_router(leads.router, prefix=_V1_PREFIX)
 app.include_router(relances.router, prefix=_V1_PREFIX)
 app.include_router(orders.router, prefix=_V1_PREFIX)

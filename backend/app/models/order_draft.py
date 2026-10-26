@@ -63,6 +63,26 @@ class OrderDraft(Base):
             name="chk_order_drafts_order_binding",
         ),
         CheckConstraint(
+            "(created_by_turn_id IS NOT NULL AND "
+            "created_by_operator_account_id IS NULL AND "
+            "presented_outbound_message_id IS NOT NULL AND "
+            "operator_operation_key_digest IS NULL AND "
+            "operator_request_fingerprint IS NULL) OR "
+            "(created_by_turn_id IS NULL AND "
+            "created_by_operator_account_id IS NOT NULL)",
+            name="chk_order_drafts_creator",
+        ),
+        CheckConstraint(
+            "operator_operation_key_digest IS NULL OR "
+            "operator_operation_key_digest ~ '^[0-9a-f]{64}$'",
+            name="chk_order_drafts_operator_key_digest",
+        ),
+        CheckConstraint(
+            "operator_request_fingerprint IS NULL OR "
+            "operator_request_fingerprint ~ '^[0-9a-f]{64}$'",
+            name="chk_order_drafts_operator_request_fingerprint",
+        ),
+        CheckConstraint(
             "(status = 'awaiting_confirmation' AND resolved_by_message_id IS NULL "
             "AND resolution_outbound_message_id IS NULL AND resolved_at IS NULL "
             "AND resolution_code IS NULL) OR "
@@ -98,6 +118,12 @@ class OrderDraft(Base):
             "order_id",
             unique=True,
             postgresql_where=text("order_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_order_drafts_operator_operation_key",
+            "operator_operation_key_digest",
+            unique=True,
+            postgresql_where=text("operator_operation_key_digest IS NOT NULL"),
         ),
         Index(
             "idx_order_drafts_conversation_created",
@@ -145,8 +171,8 @@ class OrderDraft(Base):
         ),
         nullable=False,
     )
-    presented_outbound_message_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), nullable=False
+    presented_outbound_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
     )
     resolved_by_message_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True
@@ -163,8 +189,23 @@ class OrderDraft(Base):
         ),
         nullable=True,
     )
-    created_by_turn_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), nullable=False
+    created_by_turn_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    created_by_operator_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "mbb.operator_accounts.account_id",
+            name="fk_order_drafts_created_by_operator_account_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    operator_operation_key_digest: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    operator_request_fingerprint: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
     )
     ownership_version: Mapped[int] = mapped_column(Integer, nullable=False)
     commercial_state_revision: Mapped[int] = mapped_column(Integer, nullable=False)

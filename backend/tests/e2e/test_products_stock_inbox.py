@@ -424,7 +424,7 @@ async def _assert_order_acceptance(monkeypatch: pytest.MonkeyPatch) -> uuid.UUID
     factory = async_session_factory
     try:
         async with factory() as session:
-            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "c1d2e3f4a5b6"
+            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "d2e3f4a5b6c7"
             item = await session.scalar(select(SellableItem).where(SellableItem.sku == SKU))
             conversation = await session.get(Conversation, CONVERSATION_ID)
             lead = await session.scalar(select(Lead).where(Lead.conversation_id == CONVERSATION_ID))

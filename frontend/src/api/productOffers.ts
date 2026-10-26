@@ -26,6 +26,25 @@ export interface ProductOffer {
   read_at: string
 }
 
+export interface OperatorOrderDraft {
+  draft_id: string
+  draft_version: number
+  status: 'awaiting_confirmation' | 'confirmed' | 'cancelled' | 'invalidated'
+  product_id: string
+  sellable_item_id: string
+  product_name: string
+  model_label: string | null
+  quantity: number
+  unit_price_usd: string
+  unit_price_cdf: string
+  total_cdf: string
+  confirmation_code: string
+  required_customer_reply: string | null
+  customer_confirmation_text: string
+  presented_to_customer: false
+  replayed: boolean
+}
+
 export function createProductOfferClient(onSessionExpired: () => void) {
   const path = '/api/v1/operator/product-offers'
   return {
@@ -36,5 +55,37 @@ export function createProductOfferClient(onSessionExpired: () => void) {
       ),
     detail: (id: string, signal: AbortSignal) =>
       requestJson<ProductOffer>(`${path}/${encodeURIComponent(id)}`, { signal }, onSessionExpired),
+    prepareDraft: (
+      conversationId: string,
+      offer: ProductOffer,
+      quantity: number,
+      expectedOwnershipVersion: number,
+      idempotencyKey: string,
+      csrfToken: string,
+      signal?: AbortSignal,
+    ) => {
+      if (!offer.price_id || !offer.derived_cdf_quote || !offer.inventory_updated_at) {
+        throw new Error('Offer is not eligible for an Order draft')
+      }
+      return requestJson<OperatorOrderDraft>(
+        `/api/v1/operator/conversations/${encodeURIComponent(conversationId)}/order-drafts`,
+        {
+          method: 'POST',
+          body: {
+            expected_ownership_version: expectedOwnershipVersion,
+            product_id: offer.product_id,
+            sellable_item_id: offer.sellable_item_id,
+            price_id: offer.price_id,
+            exchange_rate_id: offer.derived_cdf_quote.exchange_rate_id,
+            inventory_updated_at: offer.inventory_updated_at,
+            quantity,
+          },
+          idempotencyKey,
+          csrfToken,
+          signal,
+        },
+        onSessionExpired,
+      )
+    },
   }
 }

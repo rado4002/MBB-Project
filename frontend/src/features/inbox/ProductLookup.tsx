@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { createProductOfferClient, type ProductOffer } from '../../api/productOffers'
+import {
+  createProductOfferClient,
+  type OperatorOrderDraft,
+  type ProductOffer,
+} from '../../api/productOffers'
 import { asApiError, errorMessage } from '../../api/errors'
 import { useAuth } from '../../auth/AuthProvider'
 
@@ -20,6 +24,17 @@ const reasons = {
 const name = (offer: ProductOffer) =>
   `${offer.product_name} — ${offer.model_label || 'Standard variant'}`
 
+function multiplyAmount(value: string, quantity: number) {
+  if (!Number.isSafeInteger(quantity) || quantity < 0 || quantity > 1000) {
+    return 'Unavailable'
+  }
+  const [whole, fraction = ''] = value.split('.')
+  const scale = fraction.length
+  const total = BigInt(`${whole}${fraction}`) * BigInt(quantity)
+  const digits = total.toString().padStart(scale + 1, '0')
+  return scale ? `${digits.slice(0, -scale)}.${digits.slice(-scale)}` : digits
+}
+
 function OfferImage({ offer, large = false }: { offer: ProductOffer; large?: boolean }) {
   const [failed, setFailed] = useState(false)
   return offer.primary_media && !failed ? (
@@ -34,7 +49,15 @@ function OfferImage({ offer, large = false }: { offer: ProductOffer; large?: boo
 type Request = { kind: 'search'; query: string } | { kind: 'detail'; id: string }
 
 /** Keyed by conversation in the workspace: no selection or reply state is persisted. */
-export function ProductLookup() {
+export function ProductLookup({
+  conversationId,
+  expectedOwnershipVersion,
+  canPrepareDraft,
+}: {
+  conversationId: string
+  expectedOwnershipVersion: number | null
+  canPrepareDraft: boolean
+}) {
   const auth = useAuth()
   const client = useMemo(() => createProductOfferClient(auth.handleSessionExpired), [auth.handleSessionExpired])
   const titleId = useId()
@@ -51,6 +74,11 @@ export function ProductLookup() {
   const [request, setRequest] = useState<Request | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [quantity, setQuantity] = useState(1)
+  const [preparing, setPreparing] = useState(false)
+  const [draftError, setDraftError] = useState<string | null>(null)
+  const [draft, setDraft] = useState<OperatorOrderDraft | null>(null)
+  const draftAttempt = useRef<{ fingerprint: string; key: string } | null>(null)
 
   const close = useCallback(() => {
     controller.current?.abort()
@@ -60,6 +88,10 @@ export function ProductLookup() {
     setOffer(null)
     setResults(null)
     setRequest(null)
+    setDraft(null)
+    setDraftError(null)
+    setQuantity(1)
+    draftAttempt.current = null
   }, [])
   useEffect(() => () => controller.current?.abort(), [])
 
@@ -114,6 +146,10 @@ export function ProductLookup() {
     setLoading(true)
     setError(null)
     setOffer(null)
+    setDraft(null)
+    setDraftError(null)
+    setQuantity(1)
+    draftAttempt.current = null
     if (next.kind === 'search') setResults(null)
     try {
       if (next.kind === 'search') {
@@ -141,6 +177,45 @@ export function ProductLookup() {
     input.current?.focus()
   }
   const detailMode = request?.kind === 'detail'
+
+  const prepare = async () => {
+    if (
+      !offer || !canPrepareDraft || expectedOwnershipVersion === null
+      || !Number.isInteger(quantity) || quantity < 1 || quantity > 1000
+    ) return
+    const fingerprint = [
+      conversationId, expectedOwnershipVersion, offer.product_id,
+      offer.sellable_item_id, offer.price_id, offer.derived_cdf_quote?.exchange_rate_id,
+      offer.inventory_updated_at, quantity,
+    ].join(':')
+    const attempt = draftAttempt.current?.fingerprint === fingerprint
+      ? draftAttempt.current
+      : { fingerprint, key: crypto.randomUUID() }
+    draftAttempt.current = attempt
+    const active = new AbortController()
+    controller.current?.abort()
+    controller.current = active
+    setPreparing(true)
+    setDraftError(null)
+    try {
+      const csrf = await auth.getCsrfForMutation()
+      const prepared = await client.prepareDraft(
+        conversationId, offer, quantity, expectedOwnershipVersion,
+        attempt.key, csrf, active.signal,
+      )
+      if (!active.signal.aborted) {
+        setDraft(prepared)
+        draftAttempt.current = null
+      }
+    } catch (unknownError) {
+      if (!active.signal.aborted) {
+        const failure = asApiError(unknownError)
+        setDraftError(failure.operatorMessage ?? errorMessage(failure))
+      }
+    } finally {
+      if (!active.signal.aborted) setPreparing(false)
+    }
+  }
 
   return <>
     <button className="button button--secondary product-lookup-trigger" type="button" ref={trigger}
@@ -205,6 +280,43 @@ export function ProductLookup() {
               <p>Read at <time dateTime={offer.read_at}>{new Date(offer.read_at).toLocaleString()}</time></p>
               <button className="button button--secondary" type="button"
                 onClick={() => void run({ kind: 'detail', id: offer.sellable_item_id })}>Refresh</button>
+              {canPrepareDraft && offer.is_sellable_now && offer.current_usd_price
+                && offer.derived_cdf_quote && offer.inventory_updated_at ? <>
+                <form className="product-lookup__draft" onSubmit={(event) => {
+                  event.preventDefault()
+                  void prepare()
+                }}>
+                  <h4>Prepare Order draft</h4>
+                  <label htmlFor={`${inputId}-quantity`}>Quantity</label>
+                  <input id={`${inputId}-quantity`} type="number" min="1" max="1000" step="1"
+                    value={quantity} disabled={preparing || Boolean(draft)}
+                    onChange={(event) => {
+                      setQuantity(Number(event.target.value))
+                      setDraftError(null)
+                      draftAttempt.current = null
+                    }} />
+                  <dl className="context-details">
+                    <div><dt>Unit price</dt><dd>USD {offer.current_usd_price} · {offer.derived_cdf_quote.cdf_amount} CDF</dd></div>
+                    <div><dt>Draft total</dt><dd>{multiplyAmount(offer.derived_cdf_quote.cdf_amount, quantity || 0)} CDF</dd></div>
+                    <div><dt>Availability</dt><dd>{availability[offer.inventory_status]}</dd></div>
+                  </dl>
+                  <p>This prepares a draft only. It does not create an Order, reserve Stock, take Payment, or send a message.</p>
+                  <button className="button button--primary" disabled={preparing || Boolean(draft) || !Number.isInteger(quantity) || quantity < 1 || quantity > 1000}>
+                    {preparing ? 'Preparing…' : 'Prepare Order draft'}
+                  </button>
+                </form>
+                {draftError ? <p role="alert">{draftError}</p> : null}
+                {draft ? <section className="product-lookup__draft-status" aria-label="Order draft status">
+                  <h4>Draft status</h4>
+                  <p><strong>{draft.status === 'awaiting_confirmation' ? 'Awaiting customer confirmation' : draft.status}</strong></p>
+                  <p>Quantity {draft.quantity} · CDF {draft.total_cdf}</p>
+                  {draft.status === 'awaiting_confirmation' && draft.required_customer_reply
+                    ? <p><strong>No message was sent.</strong> The Customer must reply exactly <code>{draft.required_customer_reply}</code> before an Order can be created.</p>
+                    : <p>No further customer action is requested for this draft status.</p>}
+                  <p>Customer confirmation text:</p>
+                  <blockquote>{draft.customer_confirmation_text}</blockquote>
+                </section> : null}
+              </> : null}
             </article>}
           </div>
         </section>
