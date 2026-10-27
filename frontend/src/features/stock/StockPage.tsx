@@ -381,10 +381,14 @@ function StockDetail({ id, query, setup }: { id: string; query: string; setup: b
         {activityError && <p role="alert">{activityError}</p>}
         {!activityError && !activity.length && <p>No stock movements recorded yet.</p>}
         <ol>{activity.map((movement) => <li key={movement.movement_id} className={`stock-activity-${movement.operation_kind}`}>
-          <strong className="stock-activity-kind">{movement.operation_kind === 'receive' ? 'Receive' : 'Adjust'}</strong>
+          <strong className="stock-activity-kind">{movement.operation_kind === 'receive' ? 'Receive'
+            : movement.operation_kind === 'adjust' ? 'Adjust' : 'Dispatch'}</strong>
           <span>{movement.before_quantity === null ? 'Unknown' : movement.before_quantity} → {movement.after_quantity === null ? 'Unknown' : movement.after_quantity}</span>
           {movement.received_amount !== null && <span>+{movement.received_amount}</span>}
+          {typeof movement.dispatched_quantity === 'number' && <span>−{movement.dispatched_quantity} dispatched</span>}
           {movement.reason && <span>{movement.reason}</span>}
+          {movement.order_id && <span>Order: {movement.order_id}</span>}
+          {movement.handoff_reference && <span>Handoff: {movement.handoff_reference}</span>}
           <span>Actor: {movement.actor_account_id}</span>
           <time dateTime={movement.occurred_at}>{new Date(movement.occurred_at).toLocaleString()}</time>
         </li>)}</ol>

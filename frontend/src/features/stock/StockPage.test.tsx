@@ -20,8 +20,9 @@ const stockItem = {
 }
 const movement: StockMovement = {
   movement_id: '22222222-2222-4222-8222-222222222222', sellable_item_id: itemId,
-  operation_kind: 'receive', before_quantity: 10, before_updated_at: stockItem.inventory_updated_at,
-  received_amount: 5, corrected_quantity: null, after_quantity: 15, reason: null,
+  operation_kind: 'receive', order_id: null, before_quantity: 10, before_updated_at: stockItem.inventory_updated_at,
+  received_amount: 5, corrected_quantity: null, dispatched_quantity: null, after_quantity: 15, reason: null,
+  handoff_reference: null,
   actor_account_id: 'account-test-only', operation_key: 'key-test', occurred_at: '2026-09-29T12:00:00Z',
 }
 function setup(role: 'administrator' | 'operator' = 'administrator', quantity: number | null = 10, initialPrice: string | null = null) {
@@ -124,6 +125,32 @@ describe('Business Stock', () => {
     await expectAccessible(container)
     await user.click(screen.getByRole('link', { name: 'Products' }))
     expect(await screen.findByRole('heading', { name: 'Products' })).toBeInTheDocument()
+  })
+
+  it('renders mixed Receive, Adjust, and Dispatch history with authoritative dispatch evidence', async () => {
+    setup()
+    const orderId = '33333333-3333-4333-8333-333333333333'
+    const adjusted: StockMovement = { ...movement, movement_id: '44444444-4444-4444-8444-444444444444',
+      operation_kind: 'adjust', before_quantity: 15, received_amount: null, corrected_quantity: 12,
+      after_quantity: 12, reason: 'Verified physical count' }
+    const dispatched: StockMovement = { ...movement, movement_id: '55555555-5555-4555-8555-555555555555',
+      operation_kind: 'dispatch', order_id: orderId, before_quantity: 12, received_amount: null,
+      dispatched_quantity: 2, after_quantity: 10, handoff_reference: 'MBB-HANDOFF-001',
+      operation_key: 'dispatch-key', occurred_at: '2026-09-29T13:00:00Z' }
+    server.use(http.get(`${inventory}/activity`, () => HttpResponse.json({ items: [dispatched, adjusted, movement] })))
+
+    const { container } = renderApp(`/business/stock?item=${itemId}`)
+    const activity = await screen.findByRole('region', { name: 'Recent stock activity' })
+    expect(within(activity).getByText('Dispatch', { exact: true })).toBeInTheDocument()
+    expect(within(activity).getByText('Adjust', { exact: true })).toBeInTheDocument()
+    expect(within(activity).getByText('Receive', { exact: true })).toBeInTheDocument()
+    expect(within(activity).getByText('12 → 10')).toBeInTheDocument()
+    expect(within(activity).getByText('−2 dispatched')).toBeInTheDocument()
+    expect(within(activity).getByText(`Order: ${orderId}`)).toBeInTheDocument()
+    expect(within(activity).getByText('Handoff: MBB-HANDOFF-001')).toBeInTheDocument()
+    expect(within(activity).getAllByText('Actor: account-test-only')).toHaveLength(3)
+    expect(within(activity).getByText(new Date('2026-09-29T13:00:00Z').toLocaleString())).toBeInTheDocument()
+    await expectAccessible(container)
   })
 
   it('confirms Receive with reviewed before and after, then rereads stock and activity', async () => {

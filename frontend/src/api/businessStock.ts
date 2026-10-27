@@ -18,13 +18,16 @@ export interface StockItem {
 export interface StockMovement {
   movement_id: string
   sellable_item_id: string
-  operation_kind: 'receive' | 'adjust'
+  operation_kind: 'receive' | 'adjust' | 'dispatch'
+  order_id: string | null
   before_quantity: number | null
   before_updated_at: string | null
   received_amount: number | null
   corrected_quantity: number | null
+  dispatched_quantity: number | null
   after_quantity: number | null
   reason: string | null
+  handoff_reference: string | null
   actor_account_id: string
   operation_key: string | null
   occurred_at: string

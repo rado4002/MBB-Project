@@ -386,13 +386,16 @@ class StockAdjust(StrictCommerceModel):
 class StockMovementResponse(StrictCommerceModel):
     movement_id: UUID
     sellable_item_id: UUID
-    operation_kind: Literal["receive", "adjust"]
+    operation_kind: Literal["receive", "adjust", "dispatch"]
+    order_id: UUID | None
     before_quantity: int | None
     before_updated_at: datetime | None
     received_amount: int | None
     corrected_quantity: int | None
+    dispatched_quantity: int | None
     after_quantity: int | None
     reason: str | None
+    handoff_reference: str | None
     actor_account_id: UUID
     operation_key: UUID | None
     occurred_at: datetime

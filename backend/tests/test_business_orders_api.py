@@ -453,17 +453,45 @@ async def test_administrator_dispatch_requires_reauth_and_deducts_stock_once(
     monkeypatch: pytest.MonkeyPatch,
 ):
     transport, factory, seeded, order_id = accepted_order
-    reviewed_at = await _make_prepared_for_dispatch(factory, order_id)
     key = uuid.uuid4()
     url = f"/api/v1/business/orders/{order_id}/dispatch"
-    body = {
-        "expected_updated_at": reviewed_at.isoformat(),
-        "handoff_reference": "MBB-HANDOFF-API-1",
-        "attested": True,
-    }
 
     async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
         csrf = await _login(client, "commerce.admin", ADMIN_PASSWORD)
+        inventory_url = (
+            f"/api/v1/operator/commerce/sellable-items/"
+            f"{seeded.sellable_item_id}/inventory"
+        )
+        initial = (await client.get(inventory_url)).json()
+        adjusted = await client.post(
+            inventory_url + "/adjust",
+            headers=_headers(csrf),
+            json={
+                "operation_key": str(uuid.uuid4()),
+                "corrected_quantity": 4,
+                "expected_quantity": initial["quantity"],
+                "expected_updated_at": initial["updated_at"],
+                "reason": "Mixed activity dispatch regression",
+            },
+        )
+        assert adjusted.status_code == 200, adjusted.text
+        received = await client.post(
+            inventory_url + "/receive",
+            headers=_headers(csrf),
+            json={
+                "operation_key": str(uuid.uuid4()),
+                "received_amount": 1,
+                "expected_quantity": adjusted.json()["after_quantity"],
+                "expected_updated_at": adjusted.json()["occurred_at"],
+            },
+        )
+        assert received.status_code == 200, received.text
+        reviewed_at = await _make_prepared_for_dispatch(factory, order_id)
+        body = {
+            "expected_updated_at": reviewed_at.isoformat(),
+            "handoff_reference": "MBB-HANDOFF-API-1",
+            "attested": True,
+        }
         detail = await client.get(f"/api/v1/business/orders/{order_id}")
         assert detail.status_code == 200
         assert detail.json()["dispatch"] == {
@@ -499,6 +527,29 @@ async def test_administrator_dispatch_requires_reauth_and_deducts_stock_once(
             json=body,
         )
         assert replay.status_code == 200 and replay.json()["replayed"] is True
+        activity = await client.get(inventory_url + "/activity")
+        assert activity.status_code == 200, activity.text
+        movements = activity.json()["items"]
+        assert [item["operation_kind"] for item in movements[:3]] == [
+            "dispatch", "receive", "adjust",
+        ]
+        assert movements[0] == {
+            "movement_id": movements[0]["movement_id"],
+            "sellable_item_id": str(seeded.sellable_item_id),
+            "operation_kind": "dispatch",
+            "order_id": str(order_id),
+            "before_quantity": 5,
+            "before_updated_at": movements[0]["before_updated_at"],
+            "received_amount": None,
+            "corrected_quantity": None,
+            "dispatched_quantity": 2,
+            "after_quantity": 3,
+            "reason": None,
+            "handoff_reference": "MBB-HANDOFF-API-1",
+            "actor_account_id": movements[0]["actor_account_id"],
+            "operation_key": str(key),
+            "occurred_at": movements[0]["occurred_at"],
+        }
 
     async with factory() as db:
         order = await db.get(Order, order_id)
