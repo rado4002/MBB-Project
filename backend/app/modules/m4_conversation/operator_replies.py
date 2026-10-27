@@ -12,9 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.conversation import Conversation
 from app.models.message import Message
-
-REPLY_ELIGIBLE_STATUSES = frozenset(
-    {"active", "qualifying", "nurturing", "escalated"}
+from app.models.order_draft import OrderDraft
+from app.modules.m4_conversation.reply_policy import REPLY_ELIGIBLE_STATUSES
+from app.modules.m7_conversion.order_drafts import (
+    OperatorOrderDraftProposalStale,
+    validate_operator_order_draft_proposal,
 )
 
 
@@ -50,6 +52,10 @@ class ReplyAcceptanceUnavailable(OperatorReplyError):
     pass
 
 
+class ReplyOrderDraftProposalStale(OperatorReplyError):
+    pass
+
+
 @dataclass(frozen=True)
 class OperatorReplyResult:
     message: Message
@@ -74,6 +80,27 @@ def _matches_request(
     )
 
 
+async def _matches_proposal_binding(
+    session: AsyncSession,
+    *,
+    message_id: uuid.UUID,
+    order_draft_id: uuid.UUID | None,
+    order_draft_version: int | None,
+) -> bool:
+    if order_draft_id is None or order_draft_version is None:
+        linked = await session.scalar(
+            select(OrderDraft.draft_id).where(
+                OrderDraft.presented_outbound_message_id == message_id
+            )
+        )
+        return linked is None
+    draft = await session.get(OrderDraft, (order_draft_id, order_draft_version))
+    return bool(
+        draft is not None
+        and draft.presented_outbound_message_id == message_id
+    )
+
+
 async def _existing_result(
     session: AsyncSession,
     *,
@@ -82,6 +109,8 @@ async def _existing_result(
     actor_account_id: uuid.UUID,
     text: str,
     expected_ownership_version: int,
+    order_draft_id: uuid.UUID | None,
+    order_draft_version: int | None,
 ) -> OperatorReplyResult | None:
     existing = await session.get(Message, message_id)
     if existing is None:
@@ -92,6 +121,13 @@ async def _existing_result(
         actor_account_id=actor_account_id,
         text=text,
         expected_ownership_version=expected_ownership_version,
+    ):
+        raise ReplyIdempotencyConflict
+    if not await _matches_proposal_binding(
+        session,
+        message_id=message_id,
+        order_draft_id=order_draft_id,
+        order_draft_version=order_draft_version,
     ):
         raise ReplyIdempotencyConflict
     return OperatorReplyResult(existing, replayed=True)
@@ -109,6 +145,8 @@ async def accept_operator_reply(
     message_id: uuid.UUID,
     messaging_adapter: str,
     whatsapp_mode: str,
+    order_draft_id: uuid.UUID | None = None,
+    order_draft_version: int | None = None,
 ) -> OperatorReplyResult:
     """Persist one Human-authored reply before broker publication."""
     try:
@@ -119,6 +157,8 @@ async def accept_operator_reply(
             actor_account_id=actor_account_id,
             text=text,
             expected_ownership_version=expected_ownership_version,
+            order_draft_id=order_draft_id,
+            order_draft_version=order_draft_version,
         )
         if existing is not None:
             return existing
@@ -145,6 +185,8 @@ async def accept_operator_reply(
             actor_account_id=actor_account_id,
             text=text,
             expected_ownership_version=expected_ownership_version,
+            order_draft_id=order_draft_id,
+            order_draft_version=order_draft_version,
         )
         if existing is not None:
             return existing
@@ -159,6 +201,22 @@ async def accept_operator_reply(
             raise ReplyOwnershipVersionConflict
         if conversation.status not in REPLY_ELIGIBLE_STATUSES:
             raise ReplyNotEligible
+
+        proposal = None
+        if order_draft_id is not None and order_draft_version is not None:
+            try:
+                proposal = await validate_operator_order_draft_proposal(
+                    session,
+                    draft_id=order_draft_id,
+                    draft_version=order_draft_version,
+                    conversation_id=conversation_id,
+                    expected_ownership_version=expected_ownership_version,
+                    actor_account_id=actor_account_id,
+                    language=conversation.language_detected,
+                    text=text,
+                )
+            except OperatorOrderDraftProposalStale as exc:
+                raise ReplyOrderDraftProposalStale from exc
 
         now = datetime.now(timezone.utc)
         message = Message(
@@ -178,6 +236,9 @@ async def accept_operator_reply(
         )
         session.add(message)
         await session.flush()
+        if proposal is not None:
+            proposal.presented_outbound_message_id = message.message_id
+            await session.flush()
         await session.execute(
             update(Conversation)
             .where(Conversation.conversation_id == conversation_id)
@@ -196,6 +257,7 @@ async def accept_operator_reply(
         ReplyOwnershipVersionConflict,
         ReplyNotEligible,
         ReplyChannelUnsupported,
+        ReplyOrderDraftProposalStale,
     ):
         await session.rollback()
         raise
@@ -209,6 +271,8 @@ async def accept_operator_reply(
                 actor_account_id=actor_account_id,
                 text=text,
                 expected_ownership_version=expected_ownership_version,
+                order_draft_id=order_draft_id,
+                order_draft_version=order_draft_version,
             )
         except ReplyIdempotencyConflict:
             raise

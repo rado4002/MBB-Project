@@ -53,6 +53,8 @@ class _AcceptanceSession:
         return self.messages.get(message_id)
 
     async def scalar(self, _statement):
+        if "order_drafts" in str(_statement):
+            return None
         return self.conversation
 
     def add(self, message):

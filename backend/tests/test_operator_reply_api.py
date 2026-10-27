@@ -11,6 +11,7 @@ from app.modules.m4_conversation.operator_replies import (
     OperatorReplyResult,
     ReplyIdempotencyConflict,
     ReplyNotEligible,
+    ReplyOrderDraftProposalStale,
     ReplyOwnershipConflict,
     ReplyOwnershipVersionConflict,
 )
@@ -103,6 +104,8 @@ async def test_reply_uses_authenticated_actor_and_publishes_persisted_uuid(
         assert service_calls[0]["actor_account_id"] == account.account_id
         assert service_calls[0]["actor_role"] == role
         assert service_calls[0]["message_id"] == key
+        assert service_calls[0]["order_draft_id"] is None
+        assert service_calls[0]["order_draft_version"] is None
     finally:
         await client.aclose()
         await redis_client.aclose()
@@ -178,6 +181,7 @@ async def test_reply_rejects_blank_oversize_and_non_uuid_key_before_service(
         (ReplyOwnershipVersionConflict(), "OWNERSHIP_VERSION_CONFLICT"),
         (ReplyNotEligible(), "CONVERSATION_NOT_REPLY_ELIGIBLE"),
         (ReplyIdempotencyConflict(), "IDEMPOTENCY_CONFLICT"),
+        (ReplyOrderDraftProposalStale(), "ORDER_DRAFT_PROPOSAL_STALE"),
     ],
 )
 async def test_reply_conflicts_are_safe_and_do_not_publish(

@@ -209,6 +209,8 @@ export interface OperatorMessageItem {
 export interface OperatorReplyRequest {
   text: string
   expected_ownership_version: number
+  order_draft_id?: string
+  order_draft_version?: number
 }
 
 export interface OperatorInternalNoteRequest {

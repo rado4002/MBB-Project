@@ -22,7 +22,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "backend"
 FRONTEND = ROOT / "frontend"
-TEST = BACKEND / "tests" / "e2e" / "test_products_stock_inbox.py"
+TESTS = (
+    BACKEND / "tests" / "e2e" / "test_products_stock_inbox.py",
+    BACKEND / "tests" / "e2e" / "test_operator_order_proposal.py",
+)
 
 
 def run(command: list[str], *, cwd: Path = ROOT, env: dict[str, str] | None = None) -> None:
@@ -124,8 +127,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if not TEST.is_file():
-        raise RuntimeError(f"Missing browser test: {TEST}")
+    for test in TESTS:
+        if not test.is_file():
+            raise RuntimeError(f"Missing browser test: {test}")
     run(["docker", "info"])
     if not args.skip_frontend_build:
         npm = shutil.which("npm")
@@ -276,7 +280,11 @@ http {
                 expected_status=401,
                 expected_error_code="session_required",
             )
-            run([sys.executable, "-m", "pytest", str(TEST), "-q", "--tb=short"], cwd=BACKEND, env=env)
+            run(
+                [sys.executable, "-m", "pytest", *(str(test) for test in TESTS), "-q", "--tb=short"],
+                cwd=BACKEND,
+                env=env,
+            )
             run(
                 [sys.executable, "-m", "pytest", "tests/test_business_orders_api.py", "-q", "--tb=short"],
                 cwd=BACKEND, env=env,

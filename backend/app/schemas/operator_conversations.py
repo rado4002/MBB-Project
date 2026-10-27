@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas.common import ContentType, ConversationStatus, Language, OrderStatus
 
@@ -203,6 +203,8 @@ class OperatorMessageHistoryResponse(BaseModel):
 class OperatorReplyCreate(BaseModel):
     text: str = Field(min_length=1, max_length=4096)
     expected_ownership_version: int = Field(gt=0)
+    order_draft_id: UUID | None = None
+    order_draft_version: int | None = Field(default=None, gt=0)
 
     @field_validator("text")
     @classmethod
@@ -210,6 +212,12 @@ class OperatorReplyCreate(BaseModel):
         if not value.strip():
             raise ValueError("reply text must not be blank")
         return value
+
+    @model_validator(mode="after")
+    def require_complete_order_draft_identity(self):
+        if (self.order_draft_id is None) != (self.order_draft_version is None):
+            raise ValueError("order draft ID and version must be provided together")
+        return self
 
 
 class OperatorInternalNoteCreate(BaseModel):

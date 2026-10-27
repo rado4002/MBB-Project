@@ -53,10 +53,12 @@ export function ProductLookup({
   conversationId,
   expectedOwnershipVersion,
   canPrepareDraft,
+  onUseInReply,
 }: {
   conversationId: string
   expectedOwnershipVersion: number | null
   canPrepareDraft: boolean
+  onUseInReply: (draft: OperatorOrderDraft) => void
 }) {
   const auth = useAuth()
   const client = useMemo(() => createProductOfferClient(auth.handleSessionExpired), [auth.handleSessionExpired])
@@ -315,6 +317,14 @@ export function ProductLookup({
                     : <p>No further customer action is requested for this draft status.</p>}
                   <p>Customer confirmation text:</p>
                   <blockquote>{draft.customer_confirmation_text}</blockquote>
+                  {draft.status === 'awaiting_confirmation' && canPrepareDraft ? (
+                    <button className="button button--primary" type="button" onClick={() => {
+                      onUseInReply(draft)
+                      close()
+                    }}>
+                      Use in reply
+                    </button>
+                  ) : null}
                 </section> : null}
               </> : null}
             </article>}

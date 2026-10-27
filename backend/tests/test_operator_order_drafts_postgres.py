@@ -29,6 +29,12 @@ from app.modules.m7_conversion.order_drafts import (
     handle_order_draft_reply,
     prepare_operator_order_draft,
 )
+from app.modules.m4_conversation.operator_replies import (
+    ReplyOrderDraftProposalStale,
+    ReplyOwnershipVersionConflict,
+    accept_operator_reply,
+    mark_operator_reply_accepted,
+)
 from app.operator_identity.passwords import hash_password
 from test_order_drafts_postgres import (  # noqa: F401
     _block_m1_external_effects,
@@ -107,6 +113,27 @@ async def _prepare(factory, seeded, operator, *, key=None, quantity=2, **overrid
         )
 
 
+async def _present(factory, seeded, operator, prepared, *, key=None, text=None):
+    message_id = key or uuid.uuid4()
+    async with factory() as session:
+        result = await accept_operator_reply(
+            session,
+            conversation_id=seeded.conversation_id,
+            text=text or prepared.customer_confirmation_text,
+            expected_ownership_version=2,
+            actor_account_id=operator.account_id,
+            actor_display_name=operator.display_name,
+            actor_role=operator.role,
+            message_id=message_id,
+            messaging_adapter="whatsapp",
+            whatsapp_mode="baileys",
+            order_draft_id=prepared.draft.draft_id,
+            order_draft_version=prepared.draft.draft_version,
+        )
+        accepted = await mark_operator_reply_accepted(session, message_id)
+        return result, accepted
+
+
 @pytest.mark.asyncio
 async def test_operator_prepare_is_unsent_idempotent_and_only_customer_confirms(postgres_engine):
     from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -135,14 +162,20 @@ async def test_operator_prepare_is_unsent_idempotent_and_only_customer_confirms(
     assert replay.draft.draft_id == prepared.draft.draft_id
     assert replay.customer_confirmation_text == prepared.customer_confirmation_text
 
+    presentation, accepted = await _present(
+        factory, seeded, operator, prepared
+    )
+    assert presentation.replayed is False
+    assert accepted.delivery_state == "accepted"
+
     async with factory() as session:
         draft = await session.get(OrderDraft, (prepared.draft.draft_id, 1))
         inventory = await session.get(InventoryRecord, seeded.inventory_id)
         assert draft is not None and draft.status == "awaiting_confirmation"
-        assert draft.presented_outbound_message_id is None
+        assert draft.presented_outbound_message_id == presentation.message.message_id
         assert draft.created_by_turn_id is None
         assert draft.created_by_operator_account_id == operator.account_id
-        assert await session.scalar(select(func.count()).select_from(Message)) == before_messages
+        assert await session.scalar(select(func.count()).select_from(Message)) == before_messages + 1
         assert await session.scalar(select(func.count()).select_from(Order)) == 0
         assert await session.scalar(select(func.count()).select_from(Payment)) == 0
         assert inventory is not None
@@ -223,6 +256,7 @@ async def test_m1_resolves_operator_draft_before_human_control_gate(
     seeded = await _seed(factory)
     operator = await _operator_context(factory, seeded)
     prepared = await _prepare(factory, seeded, operator)
+    await _present(factory, seeded, operator, prepared)
     external_calls = _block_m1_external_effects(
         monkeypatch, factory, whatsapp_send_enabled=True
     )
@@ -258,3 +292,161 @@ async def test_m1_resolves_operator_draft_before_human_control_gate(
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(Order)) == 1
         assert await session.scalar(select(func.count()).select_from(Payment)) == 0
+
+
+@pytest.mark.asyncio
+async def test_proposal_submission_is_exact_replayable_and_has_no_order_effect(
+    postgres_engine,
+):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    factory = async_sessionmaker(postgres_engine, expire_on_commit=False)
+    seeded = await _seed(factory)
+    operator = await _operator_context(factory, seeded)
+    prepared = await _prepare(factory, seeded, operator)
+    key = uuid.uuid4()
+
+    with pytest.raises(ReplyOrderDraftProposalStale):
+        await _present(
+            factory,
+            seeded,
+            operator,
+            prepared,
+            text=prepared.customer_confirmation_text + " changed",
+        )
+
+    first, _accepted = await _present(
+        factory, seeded, operator, prepared, key=key
+    )
+    replay, _accepted_replay = await _present(
+        factory, seeded, operator, prepared, key=key
+    )
+    assert first.replayed is False and replay.replayed is True
+    assert replay.message.message_id == first.message.message_id
+    async with factory() as session:
+        draft = await session.get(
+            OrderDraft, (prepared.draft.draft_id, prepared.draft.draft_version)
+        )
+        assert draft is not None
+        assert draft.presented_outbound_message_id == key
+        assert await session.scalar(select(func.count()).select_from(Order)) == 0
+        assert await session.scalar(select(func.count()).select_from(Payment)) == 0
+
+
+@pytest.mark.asyncio
+async def test_proposal_submission_rejects_new_customer_evidence(
+    postgres_engine,
+):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    factory = async_sessionmaker(postgres_engine, expire_on_commit=False)
+    seeded = await _seed(factory)
+    operator = await _operator_context(factory, seeded)
+    prepared = await _prepare(factory, seeded, operator)
+    async with factory() as session:
+        session.add(Message(
+            message_id=uuid.uuid4(),
+            conversation_id=seeded.conversation_id,
+            timestamp=datetime.now(timezone.utc),
+            direction="inbound",
+            content="Nouvelle demande client",
+            content_type="text",
+            language="french",
+            whatsapp_message_id=f"proposal-expiry-{uuid.uuid4()}",
+        ))
+        await session.commit()
+    with pytest.raises(ReplyOrderDraftProposalStale):
+        await _present(factory, seeded, operator, prepared)
+
+
+@pytest.mark.asyncio
+async def test_proposal_submission_rejects_stale_stock(
+    postgres_engine,
+):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    factory = async_sessionmaker(postgres_engine, expire_on_commit=False)
+    seeded = await _seed(factory)
+    operator = await _operator_context(factory, seeded)
+    prepared = await _prepare(factory, seeded, operator)
+    async with factory() as session:
+        inventory = await session.get(InventoryRecord, seeded.inventory_id)
+        assert inventory is not None
+        inventory.quantity = 1
+        inventory.updated_at = datetime.now(timezone.utc)
+        await session.commit()
+    with pytest.raises(ReplyOrderDraftProposalStale):
+        await _present(factory, seeded, operator, prepared)
+
+
+@pytest.mark.asyncio
+async def test_proposal_submission_rejects_draft_expired_by_newer_reply(
+    postgres_engine,
+):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    factory = async_sessionmaker(postgres_engine, expire_on_commit=False)
+    seeded = await _seed(factory)
+    operator = await _operator_context(factory, seeded)
+    prepared = await _prepare(factory, seeded, operator)
+    async with factory() as session:
+        session.add(Message(
+            message_id=uuid.uuid4(),
+            conversation_id=seeded.conversation_id,
+            timestamp=datetime.now(timezone.utc),
+            direction="outbound",
+            content="Une réponse plus récente remplace le brouillon.",
+            content_type="text",
+            language="french",
+            operator_author_account_id=operator.account_id,
+            author_display_name=operator.display_name,
+            accepted_ownership_version=2,
+        ))
+        await session.commit()
+    with pytest.raises(ReplyOrderDraftProposalStale):
+        await _present(factory, seeded, operator, prepared)
+
+
+@pytest.mark.asyncio
+async def test_proposal_submission_rejects_changed_ownership(postgres_engine):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    factory = async_sessionmaker(postgres_engine, expire_on_commit=False)
+    seeded = await _seed(factory)
+    operator = await _operator_context(factory, seeded)
+    prepared = await _prepare(factory, seeded, operator)
+    async with factory() as session:
+        conversation = await session.get(Conversation, seeded.conversation_id)
+        assert conversation is not None
+        conversation.ownership_version = 3
+        await session.commit()
+    with pytest.raises(ReplyOwnershipVersionConflict):
+        await _present(factory, seeded, operator, prepared)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_proposal_submission_presents_exactly_once(postgres_engine):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    factory = async_sessionmaker(postgres_engine, expire_on_commit=False)
+    seeded = await _seed(factory)
+    operator = await _operator_context(factory, seeded)
+    prepared = await _prepare(factory, seeded, operator)
+    results = await asyncio.gather(
+        _present(factory, seeded, operator, prepared),
+        _present(factory, seeded, operator, prepared),
+        return_exceptions=True,
+    )
+    assert sum(isinstance(result, tuple) for result in results) == 1
+    assert sum(isinstance(result, ReplyOrderDraftProposalStale) for result in results) == 1
+    async with factory() as session:
+        draft = await session.get(
+            OrderDraft, (prepared.draft.draft_id, prepared.draft.draft_version)
+        )
+        assert draft is not None and draft.presented_outbound_message_id is not None
+        assert await session.scalar(
+            select(func.count()).select_from(Message).where(
+                Message.direction == "outbound",
+                Message.conversation_id == seeded.conversation_id,
+            )
+        ) == 1

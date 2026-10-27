@@ -89,6 +89,7 @@ from app.modules.m4_conversation.operator_replies import (
     ReplyConversationNotFound,
     ReplyIdempotencyConflict,
     ReplyNotEligible,
+    ReplyOrderDraftProposalStale,
     ReplyOwnershipConflict,
     ReplyOwnershipVersionConflict,
     accept_operator_reply,
@@ -1202,6 +1203,8 @@ async def create_operator_reply(
             message_id=idempotency_key,
             messaging_adapter=settings.messaging_adapter,
             whatsapp_mode=settings.whatsapp_mode,
+            order_draft_id=body.order_draft_id,
+            order_draft_version=body.order_draft_version,
         )
     except ReplyConversationNotFound as exc:
         raise _operator_error(
@@ -1232,6 +1235,15 @@ async def create_operator_reply(
             status_code=status.HTTP_409_CONFLICT,
             code="CONVERSATION_NOT_REPLY_ELIGIBLE",
             message="This conversation cannot currently receive replies.",
+        ) from exc
+    except ReplyOrderDraftProposalStale as exc:
+        raise _operator_error(
+            status_code=status.HTTP_409_CONFLICT,
+            code="ORDER_DRAFT_PROPOSAL_STALE",
+            message=(
+                "The Order draft changed or expired. Prepare a current proposal "
+                "before replying."
+            ),
         ) from exc
     except ReplyChannelUnsupported as exc:
         raise _operator_error(

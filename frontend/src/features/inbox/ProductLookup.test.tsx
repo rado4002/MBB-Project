@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import * as productOffers from '../../api/productOffers'
 import type { ProductOffer } from '../../api/productOffers'
 import { expectAccessible } from '../../test/accessibility'
-import { conversationDetailFixture, conversationFixture, sessionFixture } from '../../test/fixtures'
+import { conversationDetailFixture, conversationFixture, messageFixture, sessionFixture } from '../../test/fixtures'
 import { renderApp } from '../../test/renderApp'
 import { server } from '../../test/server'
 
@@ -104,9 +104,10 @@ describe('Inbox authoritative product lookup', () => {
     await waitFor(() => expect(trigger).toHaveFocus())
   })
 
-  it('prepares an unsent authoritative draft and shows the exact customer action', async () => {
+  it('prepares an unsent authoritative draft and loads it for explicit manual submission', async () => {
     workspace()
     let posted: Record<string, unknown> | null = null
+    let replyBody: Record<string, unknown> | null = null
     server.use(http.post('/api/v1/operator/conversations/:conversationId/order-drafts', async ({ request, params }) => {
       expect(params.conversationId).toBe(first)
       expect(request.headers.get('Idempotency-Key')).toMatch(/^[0-9a-f-]{36}$/)
@@ -118,6 +119,13 @@ describe('Inbox authoritative product lookup', () => {
         confirmation_code: 'A1B2C3D4', required_customer_reply: 'OUI A1B2C3D4',
         customer_confirmation_text: 'Confirmez avec OUI A1B2C3D4.', presented_to_customer: false, replayed: false,
       }, { status: 201 })
+    }), http.post('/api/v1/operator/conversations/:conversationId/replies', async ({ request }) => {
+      replyBody = await request.json() as Record<string, unknown>
+      return HttpResponse.json(messageFixture('99999999-9999-4999-8999-999999999999', {
+        direction: 'outbound', sender_type: 'operator', text: 'Confirmez avec OUI A1B2C3D4.',
+        delivery_state: 'accepted', delivery_state_timestamp: '2026-09-26T12:01:00Z',
+        operator_author: { account_id: 'account-test-only', display_name: 'Omar Operator' },
+      }), { status: 202 })
     }))
     const { user, dialog } = await openSearch()
     await user.click(await within(dialog).findByRole('button', { name: 'Air Fryer — 6L' }))
@@ -128,6 +136,20 @@ describe('Inbox authoritative product lookup', () => {
     expect(await within(dialog).findByRole('region', { name: 'Order draft status' })).toHaveTextContent('Awaiting customer confirmation')
     expect(within(dialog).getByText('No message was sent.')).toBeInTheDocument()
     expect(within(dialog).getByText('OUI A1B2C3D4')).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Use in reply' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    const reply = screen.getByRole('textbox', { name: 'Reply to Customer' })
+    expect(reply).toHaveValue('Confirmez avec OUI A1B2C3D4.')
+    expect(reply).toHaveAttribute('readonly')
+    expect(screen.getByText(/Review it before sending/)).toBeInTheDocument()
+    expect(replyBody).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(replyBody).toEqual({
+      text: 'Confirmez avec OUI A1B2C3D4.',
+      expected_ownership_version: 2,
+      order_draft_id: second,
+      order_draft_version: 1,
+    }))
     expect(posted).toMatchObject({
       expected_ownership_version: 2, product_id: first, sellable_item_id: itemId,
       price_id: second, exchange_rate_id: second,

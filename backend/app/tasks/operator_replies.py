@@ -34,7 +34,7 @@ async def _deliver_operator_reply(message_id: uuid.UUID) -> dict[str, str]:
     from app.database import async_session_factory
     from app.models.conversation import Conversation
     from app.models.message import Message
-    from app.modules.m4_conversation.operator_replies import REPLY_ELIGIBLE_STATUSES
+    from app.modules.m4_conversation.reply_policy import REPLY_ELIGIBLE_STATUSES
 
     async with async_session_factory() as session:
         row = (

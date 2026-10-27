@@ -24,6 +24,7 @@ import type {
   OperatorTimelineItem,
 } from '../../api/contracts/conversations'
 import { ApiError, errorMessage } from '../../api/errors'
+import type { OperatorOrderDraft } from '../../api/productOffers'
 import { useAuth } from '../../auth/AuthProvider'
 import { InlineAlert } from '../../components/InlineAlert'
 import { ConversationAuthority } from './ConversationAuthority'
@@ -658,6 +659,8 @@ function MessageTimeline({
   canReply,
   onAuthorityConflict,
   onReplyAccepted,
+  replyProposal,
+  onClearReplyProposal,
 }: {
   client: ConversationApiClient
   conversationId: string
@@ -666,6 +669,8 @@ function MessageTimeline({
   canReply: boolean
   onAuthorityConflict: () => Promise<void>
   onReplyAccepted: () => Promise<void>
+  replyProposal: ReplyProposal | null
+  onClearReplyProposal: () => void
 }) {
   const auth = useAuth()
   const history = useMessageHistory(client, conversationId)
@@ -839,6 +844,8 @@ function MessageTimeline({
             history.appendAccepted(message)
             return onReplyAccepted()
           }}
+          replyProposal={replyProposal}
+          onClearReplyProposal={onClearReplyProposal}
           onNoteAccepted={(note) => history.appendInternalNote(note)}
         />
       ) : null}
@@ -856,6 +863,8 @@ function ConversationComposer({
   onAuthorityConflict,
   onReplyAccepted,
   onNoteAccepted,
+  replyProposal,
+  onClearReplyProposal,
 }: {
   client: ConversationApiClient
   conversationId: string
@@ -866,6 +875,8 @@ function ConversationComposer({
   onAuthorityConflict: () => Promise<void>
   onReplyAccepted: (message: OperatorMessageItem) => Promise<void>
   onNoteAccepted: (note: OperatorInternalNoteItem) => void
+  replyProposal: ReplyProposal | null
+  onClearReplyProposal: () => void
 }) {
   const auth = useAuth()
   const [mode, setMode] = useState<'reply' | 'internal_note'>(
@@ -879,7 +890,11 @@ function ConversationComposer({
   const [acceptedAnnouncement, setAcceptedAnnouncement] = useState('')
   const submittingRef = useRef(false)
   const focusAfterAcceptanceRef = useRef(false)
-  const replyAttemptRef = useRef<{ text: string; key: string } | null>(null)
+  const replyAttemptRef = useRef<{
+    text: string
+    proposalKey: string | null
+    key: string
+  } | null>(null)
   const noteAttemptRef = useRef<{ text: string; key: string } | null>(null)
   const previousCanReplyRef = useRef(canReply)
   const errorRef = useRef<HTMLDivElement>(null)
@@ -887,10 +902,12 @@ function ConversationComposer({
   const helpId = useId()
   const errorId = useId()
   const replyReasonId = useId()
-  const activeMode = mode === 'reply' && !canReply && canCreateNote
+  const activeMode = replyProposal ? 'reply' : mode === 'reply' && !canReply && canCreateNote
     ? 'internal_note'
     : mode
-  const text = activeMode === 'reply' ? replyText : noteText
+  const text = activeMode === 'reply'
+    ? replyProposal?.draft.customer_confirmation_text ?? replyText
+    : noteText
   const setText = activeMode === 'reply' ? setReplyText : setNoteText
 
   useEffect(() => {
@@ -933,7 +950,15 @@ function ConversationComposer({
     }
 
     const attemptRef = activeMode === 'reply' ? replyAttemptRef : noteAttemptRef
-    const attempt =
+    const proposalKey = activeMode === 'reply' && replyProposal
+      ? `${replyProposal.draft.draft_id}:${replyProposal.draft.draft_version}`
+      : null
+    const attempt = activeMode === 'reply'
+      ? replyAttemptRef.current?.text === text
+        && replyAttemptRef.current.proposalKey === proposalKey
+        ? replyAttemptRef.current
+        : { text, proposalKey, key: crypto.randomUUID() }
+      :
       attemptRef.current?.text === text
         ? attemptRef.current
         : { text, key: crypto.randomUUID() }
@@ -949,12 +974,20 @@ function ConversationComposer({
         if (expectedOwnershipVersion === null) return
         const message = await client.createReply(
           conversationId,
-          { text, expected_ownership_version: expectedOwnershipVersion },
+          {
+            text,
+            expected_ownership_version: expectedOwnershipVersion,
+            ...(replyProposal ? {
+              order_draft_id: replyProposal.draft.draft_id,
+              order_draft_version: replyProposal.draft.draft_version,
+            } : {}),
+          },
           attempt.key,
           csrfToken,
         )
         historyAssertAccepted(message)
         setReplyText('')
+        onClearReplyProposal()
         replyAttemptRef.current = null
         setAcceptedAnnouncement('Reply accepted and added to the timeline.')
         void onReplyAccepted(message).catch(() => undefined)
@@ -1077,6 +1110,7 @@ function ConversationComposer({
         maxLength={4096}
         rows={2}
         disabled={submitting}
+        readOnly={activeMode === 'reply' && replyProposal !== null}
         aria-invalid={validationError ? 'true' : undefined}
         aria-describedby={`${helpId} ${validationError ? errorId : ''}`.trim()}
         onChange={(event) => {
@@ -1093,8 +1127,19 @@ function ConversationComposer({
               Internal only — not sent to the customer or available to AI.
             </span>
           ) : null}
+          {activeMode === 'reply' && replyProposal ? (
+            <span role="note">
+              Authoritative Order proposal loaded. Review it before sending; editing is disabled.
+            </span>
+          ) : null}
           <span>{Array.from(text).length}/4,096 · Ctrl+Enter to submit</span>
         </div>
+        {activeMode === 'reply' && replyProposal ? (
+          <button className="button button--secondary" type="button" disabled={submitting}
+            onClick={onClearReplyProposal}>
+            Remove proposal
+          </button>
+        ) : null}
         <button className="button button--primary" type="submit" disabled={submitting}>
           {activeMode === 'reply'
             ? submitting ? 'Sending…' : 'Send'
@@ -1107,6 +1152,12 @@ function ConversationComposer({
       </p>
     </form>
   )
+}
+
+interface ReplyProposal {
+  draft: OperatorOrderDraft
+  conversationId: string
+  ownershipVersion: number
 }
 
 function historyAssertAccepted(message: OperatorMessageItem) {
@@ -1143,6 +1194,7 @@ export function ConversationWorkspace({
     useState<ConversationOwnership | null>(null)
   const [authorityFocusRequest, setAuthorityFocusRequest] = useState(0)
   const [authorityNotice, setAuthorityNotice] = useState('')
+  const [replyProposal, setReplyProposal] = useState<ReplyProposal | null>(null)
   const closeContext = useCallback(() => setContextOpen(false), [])
   const closeOwnership = useCallback(() => setOwnershipOpen(false), [])
   const ownership = detail.detail?.ownership
@@ -1171,6 +1223,12 @@ export function ConversationWorkspace({
     auth.session?.human.account_id,
     hasReplyCapability,
   )
+
+  const currentReplyProposal = replyProposal?.conversationId === conversationId
+    && replyProposal.ownershipVersion === ownership?.version
+    && currentReplyReason === null
+    ? replyProposal
+    : null
 
   const openOwnership = () => {
     if (!ownership) return
@@ -1262,6 +1320,14 @@ export function ConversationWorkspace({
                 && ownership.ai_execution_state === 'paused'
                 && currentReplyReason === null
               )}
+              onUseInReply={(draft) => {
+                if (ownership?.version == null || currentReplyReason !== null) return
+                setReplyProposal({
+                  draft,
+                  conversationId,
+                  ownershipVersion: ownership.version,
+                })
+              }}
             />
           ) : null}
           <button
@@ -1287,6 +1353,8 @@ export function ConversationWorkspace({
           onReplyAccepted={async () => {
             await Promise.all([detail.refresh(), onOwnershipChanged()])
           }}
+          replyProposal={currentReplyProposal}
+          onClearReplyProposal={() => setReplyProposal(null)}
         />
         <ContextPanel
           client={client}
