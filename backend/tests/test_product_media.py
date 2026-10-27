@@ -39,8 +39,12 @@ def test_asset_url_rejects_unsafe_locator_shapes(asset_url: str) -> None:
 
 
 def test_asset_url_accepts_https_without_network_access() -> None:
-    value = "https://example.invalid/product/image.webp"
-    assert normalize_media_asset_url(value) == value
+    direct_asset = "https://example.invalid/product/image.webp"
+    google_sharing_page = "https://drive.google.com/file/d/fictional/view?usp=sharing"
+    assert normalize_media_asset_url(direct_asset) == direct_asset
+    # The media contract validates and stores HTTPS locators; it does not fetch or
+    # inspect content. The UI must therefore distinguish sharing pages before save.
+    assert normalize_media_asset_url(google_sharing_page) == google_sharing_page
 
 
 def test_asset_url_and_alt_text_are_bounded() -> None:

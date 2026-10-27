@@ -268,15 +268,15 @@ describe('Administrator Product creation', () => {
     expect(writes).toBe(1)
   })
 
-  it('preserves first-variant values while confirming Administrator password', async () => {
+  it('creates an inactive first variant without routine password confirmation', async () => {
     const state = setup('administrator', false)
     let writes = 0
+    let reauthentications = 0
     server.use(
-      http.post('/api/v1/auth/reauthenticate', () => HttpResponse.json({ ...sessionFixture('administrator'),
-        recent_reauthentication_expires_at_epoch: 2_000_000_000, csrf_token: 'rotated-csrf' })),
+      http.post('/api/v1/auth/reauthenticate', () => { reauthentications++; return HttpResponse.json({}) }),
       http.post(`${products}/:id/sellable-items`, async ({ request }) => {
         writes++
-        expect(request.headers.get('X-CSRF-Token')).toBe('rotated-csrf')
+        expect(request.headers.get('X-CSRF-Token')).toBe('commerce-csrf')
         expect(await request.json()).toEqual({ model_label: '6L', sku: 'FRY-6L', attributes: {}, active: false })
         state.setVariants([{ ...variant, model_label: '6L', sku: 'FRY-6L' }])
         return HttpResponse.json({ ...variant, model_label: '6L', sku: 'FRY-6L' }, { status: 201 })
@@ -288,26 +288,20 @@ describe('Administrator Product creation', () => {
     await user.type(screen.getByRole('textbox', { name: 'Variant name (optional)' }), '6L')
     await user.type(screen.getByRole('textbox', { name: 'SKU (optional)' }), 'fry-6l')
     await user.click(screen.getByRole('button', { name: 'Save first variant' }))
-    await user.type(await screen.findByLabelText('Confirm Administrator password'), 'Fictional-Password-42!')
-    await user.click(screen.getByRole('button', { name: 'Confirm password' }))
-    await screen.findByText('Password confirmed. Review and save the variant.')
-    expect(screen.getByRole('textbox', { name: 'Variant name (optional)' })).toHaveValue('6L')
-    expect(screen.getByRole('textbox', { name: 'SKU (optional)' })).toHaveValue('fry-6l')
-    expect(writes).toBe(0)
-    await user.click(screen.getByRole('button', { name: 'Save first variant' }))
     expect(await screen.findByRole('button', { name: '6L · FRY-6L' })).toHaveAttribute('aria-pressed', 'true')
     expect(writes).toBe(1)
+    expect(reauthentications).toBe(0)
   })
 
-  it('keeps Product values through validation and password confirmation', async () => {
+  it('keeps Product values through validation without routine password confirmation', async () => {
     setup('administrator', false)
     let writes = 0
+    let reauthentications = 0
     server.use(
-      http.post('/api/v1/auth/reauthenticate', () => HttpResponse.json({ ...sessionFixture('administrator'),
-        recent_reauthentication_expires_at_epoch: 2_000_000_000, csrf_token: 'rotated-csrf' })),
+      http.post('/api/v1/auth/reauthenticate', () => { reauthentications++; return HttpResponse.json({}) }),
       http.post(products, async ({ request }) => {
         writes++
-        expect(request.headers.get('X-CSRF-Token')).toBe('rotated-csrf')
+        expect(request.headers.get('X-CSRF-Token')).toBe('commerce-csrf')
         return HttpResponse.json({ error: { code: 'COMMERCE_VALIDATION_FAILED' } }, { status: 422 })
       }),
     )
@@ -321,15 +315,10 @@ describe('Administrator Product creation', () => {
     await user.type(screen.getByRole('textbox', { name: 'Category code' }), product.category_code)
     await user.type(screen.getByRole('textbox', { name: 'Description' }), product.description)
     await user.click(screen.getByRole('button', { name: 'Save product' }))
-    await user.type(await screen.findByLabelText('Confirm Administrator password'), 'Fictional-Password-42!')
     await expectAccessible(container)
-    await user.click(screen.getByRole('button', { name: 'Confirm password' }))
-    await screen.findByText('Password confirmed. Review and save the product.')
-    expect(screen.getByRole('textbox', { name: 'Product name' })).toHaveValue(product.name)
-    expect(writes).toBe(0)
-    await user.click(screen.getByRole('button', { name: 'Save product' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('Check the information')
     expect(screen.getByRole('textbox', { name: 'Description' })).toHaveValue(product.description)
     expect(writes).toBe(1)
+    expect(reauthentications).toBe(0)
   })
 })

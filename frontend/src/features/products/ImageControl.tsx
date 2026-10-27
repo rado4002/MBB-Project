@@ -5,7 +5,7 @@ import { useAuth } from '../../auth/AuthProvider'
 import { PasswordField } from '../../components/PasswordField'
 
 type OwnerScope = 'product' | 'sellable_item'
-type Preview = 'idle' | 'loading' | 'ready' | 'failed'
+type Preview = 'idle' | 'loading' | 'ready' | 'failed' | 'sharing-page'
 
 function validImageUrl(value: string): boolean {
   try {
@@ -14,8 +14,19 @@ function validImageUrl(value: string): boolean {
   } catch { return false }
 }
 
-export function ImageControl({ scope, ownerId, onChanged }: {
-  scope: OwnerScope; ownerId: string; onChanged: () => Promise<void>
+function isGoogleSharingPage(value: string): boolean {
+  try {
+    const url = new URL(value)
+    const host = url.hostname.toLowerCase()
+    return host === 'photos.app.goo.gl'
+      || host === 'photos.google.com'
+      || host === 'drive.google.com'
+      || host === 'docs.google.com'
+  } catch { return false }
+}
+
+export function ImageControl({ scope, ownerId, onChanged, showHeading = true }: {
+  scope: OwnerScope; ownerId: string; onChanged: () => Promise<void>; showHeading?: boolean
 }) {
   const auth = useAuth()
   const client = useMemo(() => createBusinessProductsClient(auth.handleSessionExpired), [auth.handleSessionExpired])
@@ -66,7 +77,10 @@ export function ImageControl({ scope, ownerId, onChanged }: {
   }
   const updateUrl = (value: string) => {
     setUrl(value)
-    setPreview(value.trim() && validImageUrl(value.trim()) ? 'loading' : 'idle')
+    const normalized = value.trim()
+    setPreview(normalized && validImageUrl(normalized)
+      ? (isGoogleSharingPage(normalized) ? 'sharing-page' : 'loading')
+      : 'idle')
   }
   const recent = () => {
     const expiry = auth.session?.recent_reauthentication_expires_at_epoch
@@ -77,7 +91,7 @@ export function ImageControl({ scope, ownerId, onChanged }: {
     if (busy || loading || needsRefresh || denied || !recent()) return
     const assetUrl = url.trim()
     if (kind === 'save' && (!validImageUrl(assetUrl) || preview !== 'ready')) {
-      setError('Enter an HTTPS image URL and wait for a successful preview.'); return
+      setError('Enter a public direct HTTPS image URL and wait for a successful preview.'); return
     }
     const current = new AbortController(); operation.current = current
     setBusy(true); setError(null); setNotice(null)
@@ -121,7 +135,7 @@ export function ImageControl({ scope, ownerId, onChanged }: {
   }
 
   return <section className="products-secondary products-image-control" aria-label={label}>
-    <h2>{label}</h2>
+    {showHeading && <h2>{label}</h2>}
     {loading && <p role="status">Loading current image…</p>}
     {error && <p role="alert">{error}</p>}
     {notice && <p role="status">{notice}</p>}
@@ -131,14 +145,17 @@ export function ImageControl({ scope, ownerId, onChanged }: {
       {primary && <button className="button button--secondary" disabled={busy} onClick={() => void mutate('remove')}>Remove image</button>}
     </div>}
     {editing && !needsRefresh && !denied && <form className="products-image-form" onSubmit={(event) => { event.preventDefault(); void mutate('save') }}>
-      <label htmlFor={`${fieldId}-url`}>HTTPS image URL</label>
+      <label htmlFor={`${fieldId}-url`}>Direct HTTPS image URL</label>
       <input id={`${fieldId}-url`} type="url" required maxLength={2048} value={url} disabled={busy}
+        aria-describedby={`${fieldId}-url-hint`}
         onChange={(event) => updateUrl(event.target.value)} />
+      <p id={`${fieldId}-url-hint`}>Use a public URL that opens the image file itself. MBB stores the URL; it does not upload or convert sharing pages. Google Drive and Google Photos sharing links are not direct image URLs.</p>
       <label htmlFor={`${fieldId}-alt`}>Alt text (optional)</label>
       <input id={`${fieldId}-alt`} maxLength={500} value={alt} disabled={busy} onChange={(event) => setAlt(event.target.value)} />
       {preview === 'loading' && <p role="status">Checking image preview…</p>}
-      {preview === 'failed' && <p role="alert">Image preview failed. Check the URL before saving.</p>}
-      {url.trim() && validImageUrl(url.trim()) && <img key={url.trim()} className="products-image products-image--large"
+      {preview === 'sharing-page' && <p role="alert">This Google sharing link opens a web page, not an image file. Use a public direct image URL that loads without sign-in.</p>}
+      {preview === 'failed' && <p role="alert">The browser could not load an image from this URL. It may require sign-in, block embedding, or return a web page instead of an image file.</p>}
+      {url.trim() && validImageUrl(url.trim()) && preview !== 'sharing-page' && <img key={url.trim()} className="products-image products-image--large"
         src={url.trim()} alt={alt.trim() || 'Image preview'} referrerPolicy="no-referrer"
         onLoad={() => setPreview('ready')} onError={() => setPreview('failed')} />}
       {preview === 'ready' && <p role="status">Image preview ready.</p>}

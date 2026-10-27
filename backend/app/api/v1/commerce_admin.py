@@ -236,10 +236,11 @@ async def create_product(
     response: Response,
     principal: Annotated[BrowserPrincipal, Depends(_require_commerce_manager)],
     _csrf: Annotated[BrowserPrincipal, Depends(require_csrf)],
-    _recent: Annotated[BrowserPrincipal, Depends(require_recent_reauthentication)],
     settings: Annotated[Settings, Depends(get_browser_settings)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ProductResponse:
+    if body.active:
+        await require_recent_reauthentication(principal, settings)
     _write_guard(request, settings)
     product = await _commit_or_raise(
         db,
@@ -356,10 +357,11 @@ async def create_sellable_item(
     response: Response,
     principal: Annotated[BrowserPrincipal, Depends(_require_commerce_manager)],
     _csrf: Annotated[BrowserPrincipal, Depends(require_csrf)],
-    _recent: Annotated[BrowserPrincipal, Depends(require_recent_reauthentication)],
     settings: Annotated[Settings, Depends(get_browser_settings)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SellableItemResponse:
+    if body.active:
+        await require_recent_reauthentication(principal, settings)
     _write_guard(request, settings)
     item = await _commit_or_raise(
         db,

@@ -15,6 +15,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.adapters.fx.exchange_rate_api import ExchangeRateAPIObservation
+from app.api import browser_auth_deps
 from app.api.browser_auth_deps import get_browser_redis, get_browser_settings
 from app.api.browser_auth_errors import (
     BrowserAuthError,
@@ -267,6 +268,73 @@ async def test_commerce_writes_preserve_csrf_origin_and_strict_payload_guards(
             json={**body, "current_price": "60.00"},
         )
         assert unknown.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_inactive_creation_does_not_require_recent_password_but_active_creation_does(
+    harness,
+    monkeypatch,
+) -> None:
+    transport, factory, _administrator_id = harness
+    base = "/api/v1/operator/commerce"
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        csrf = await _login(client, "commerce.admin", ADMIN_PASSWORD)
+        current_time = browser_auth_deps.time.time()
+        monkeypatch.setattr(browser_auth_deps.time, "time", lambda: current_time + 601)
+
+        inactive_product = await client.post(
+            f"{base}/products",
+            headers=_headers(csrf),
+            json={
+                "name": "Fictional Draft Kettle",
+                "category_code": "kettle",
+                "description": "Fictional inactive creation evidence.",
+                "active": False,
+            },
+        )
+        assert inactive_product.status_code == 201
+        product_id = inactive_product.json()["product_id"]
+
+        active_product = await client.post(
+            f"{base}/products",
+            headers=_headers(csrf),
+            json={
+                "name": "Fictional Active Kettle",
+                "category_code": "kettle",
+                "description": "Must retain the higher-impact safeguard.",
+                "active": True,
+            },
+        )
+        assert active_product.status_code == 403
+        assert (
+            active_product.json()["error"]["code"]
+            == "recent_reauthentication_required"
+        )
+
+        inactive_variant = await client.post(
+            f"{base}/products/{product_id}/sellable-items",
+            headers=_headers(csrf),
+            json={"model_label": "Standard", "sku": "DRAFT-KETTLE", "active": False},
+        )
+        assert inactive_variant.status_code == 201
+
+        active_variant = await client.post(
+            f"{base}/products/{product_id}/sellable-items",
+            headers=_headers(csrf),
+            json={"model_label": "Active", "sku": "ACTIVE-KETTLE", "active": True},
+        )
+        assert active_variant.status_code == 403
+        assert (
+            active_variant.json()["error"]["code"]
+            == "recent_reauthentication_required"
+        )
+
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(Product)) == 1
+        assert await session.scalar(select(func.count()).select_from(SellableItem)) == 1
+        actions = (await session.scalars(select(OperatorAuditEvent.action))).all()
+        assert actions.count("commerce.product.created") == 1
+        assert actions.count("commerce.sellable_item.created") == 1
 
 
 @pytest.mark.asyncio

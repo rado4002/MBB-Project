@@ -56,35 +56,6 @@ function returnedId(value: unknown): value is string {
   return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
 }
 
-function CreationPassword({ onConfirmed, onCancel }: { onConfirmed: () => void; onCancel: () => void }) {
-  const auth = useAuth()
-  const [password, setPassword] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const id = useId()
-  const field = useRef<HTMLInputElement>(null)
-  useEffect(() => { field.current?.focus() }, [])
-  const confirm = async (event: FormEvent) => {
-    event.preventDefault()
-    if (busy) return
-    setBusy(true); setError(null)
-    try {
-      await auth.reauthenticate(password)
-      onConfirmed()
-    } catch (failure) { setError(errorMessage(asApiError(failure))) }
-    finally { setPassword(''); setBusy(false) }
-  }
-  return <form className="products-setup" onSubmit={(event) => void confirm(event)}>
-    <PasswordField ref={field} id={id} label="Confirm Administrator password" autoComplete="current-password"
-      value={password} disabled={busy} required onChange={(event) => setPassword(event.target.value)} />
-    {error && <p role="alert">{error}</p>}
-    <div className="products-setup-actions">
-      <button className="button button--primary" disabled={busy}>Confirm password</button>
-      <button className="button button--secondary" type="button" disabled={busy} onClick={onCancel}>Back to form</button>
-    </div>
-  </form>
-}
-
 function ProductCreateForm({ categories, onCreated, onCancel, onReview }: {
   categories: string[]; onCreated: (id: string, name: string) => void; onCancel: () => void; onReview: () => void
 }) {
@@ -96,14 +67,13 @@ function ProductCreateForm({ categories, onCreated, onCancel, onReview }: {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [reauth, setReauth] = useState(false)
   const [uncertain, setUncertain] = useState(false)
   const id = useId()
   const nameField = useRef<HTMLInputElement>(null)
   useEffect(() => { nameField.current?.focus() }, [])
   const save = async (event: FormEvent) => {
     event.preventDefault()
-    if (busy || uncertain || reauth) return
+    if (busy || uncertain) return
     const normalizedName = name.trim()
     const normalizedCategory = category.trim().toLowerCase()
     const normalizedDescription = description.trim()
@@ -113,8 +83,6 @@ function ProductCreateForm({ categories, onCreated, onCancel, onReview }: {
     if (!normalizedDescription || normalizedDescription.length > 4000) errors.description = 'Enter a description of at most 4000 characters.'
     setFieldErrors(errors); setError(null)
     if (Object.keys(errors).length) return
-    const expiry = auth.session?.recent_reauthentication_expires_at_epoch
-    if (expiry == null || expiry < Math.floor(Date.now() / 1000)) { setReauth(true); return }
     setBusy(true)
     let sent = false
     try {
@@ -126,8 +94,7 @@ function ProductCreateForm({ categories, onCreated, onCancel, onReview }: {
       onCreated(created.product_id, normalizedName)
     } catch (failure) {
       const apiError = asApiError(failure)
-      if (apiError.code === 'recent_reauthentication_required') setReauth(true)
-      else if (sent && uncertainCreate(apiError)) {
+      if (sent && uncertainCreate(apiError)) {
         setUncertain(true)
         setError('Product creation could not be confirmed. It may already have been saved. Review the Products list and open the matching record before creating again; a matching name alone does not confirm it is the same product.')
       } else setError(errorMessage(apiError))
@@ -176,12 +143,10 @@ function ProductCreateForm({ categories, onCreated, onCancel, onReview }: {
         onChange={(event) => setDescription(event.target.value)} />
       {fieldErrors.description && <p id={`${id}-description-error`}>{fieldErrors.description}</p>}
       <div className="products-setup-actions">
-        <button className="button button--primary" disabled={busy || uncertain || reauth}>Save product</button>
+        <button className="button button--primary" disabled={busy || uncertain}>Save product</button>
         <button className="button button--secondary" type="button" disabled={busy} onClick={onCancel}>Back to products</button>
       </div>
     </form>
-    {reauth && <CreationPassword onConfirmed={() => { setReauth(false); setError('Password confirmed. Review and save the product.') }}
-      onCancel={() => setReauth(false)} />}
   </section>
 }
 
@@ -193,7 +158,6 @@ function FirstVariantForm({ productId, onCreated, stockSetup = false }: { produc
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [reauth, setReauth] = useState(false)
   const [uncertain, setUncertain] = useState(false)
   const [review, setReview] = useState<BusinessProductDetail | null>(null)
   const id = useId()
@@ -208,7 +172,7 @@ function FirstVariantForm({ productId, onCreated, stockSetup = false }: { produc
   }
   const save = async (event: FormEvent) => {
     event.preventDefault()
-    if (busy || uncertain || reauth) return
+    if (busy || uncertain) return
     const normalizedLabel = label.trim()
     const normalizedSku = sku.trim().toUpperCase()
     const errors: Record<string, string> = {}
@@ -216,8 +180,6 @@ function FirstVariantForm({ productId, onCreated, stockSetup = false }: { produc
     if (normalizedSku && !/^[A-Z0-9][A-Z0-9._-]{0,63}$/.test(normalizedSku)) errors.sku = 'Use up to 64 letters, numbers, periods, underscores, or hyphens.'
     setFieldErrors(errors); setError(null)
     if (Object.keys(errors).length) return
-    const expiry = auth.session?.recent_reauthentication_expires_at_epoch
-    if (expiry == null || expiry < Math.floor(Date.now() / 1000)) { setReauth(true); return }
     setBusy(true)
     let sent = false
     try {
@@ -229,8 +191,7 @@ function FirstVariantForm({ productId, onCreated, stockSetup = false }: { produc
       onCreated(created.sellable_item_id)
     } catch (failure) {
       const apiError = asApiError(failure)
-      if (apiError.code === 'recent_reauthentication_required') setReauth(true)
-      else if (sent && uncertainCreate(apiError)) {
+      if (sent && uncertainCreate(apiError)) {
         setUncertain(true)
         setError('Variant creation could not be confirmed. It may already have been saved. Inspect this Product before adding another variant.')
       } else if (apiError.status === 409) {
@@ -270,12 +231,10 @@ function FirstVariantForm({ productId, onCreated, stockSetup = false }: { produc
         onChange={(event) => setSku(event.target.value)} />
       {fieldErrors.sku && <p id={`${id}-sku-error`}>{fieldErrors.sku}</p>}
       <div className="products-setup-actions">
-        <button className="button button--primary" disabled={busy || uncertain || reauth}>Save first variant</button>
+        <button className="button button--primary" disabled={busy || uncertain}>Save first variant</button>
         <Link className="button button--secondary" to={`/business/products/${productId}`}>View Product detail</Link>
       </div>
     </form>
-    {reauth && <CreationPassword onConfirmed={() => { setReauth(false); setError('Password confirmed. Review and save the variant.') }}
-      onCancel={() => setReauth(false)} />}
   </section>
 }
 
@@ -514,7 +473,12 @@ function ProductDetail({ id }: { id: string }) {
       if (!current.signal.aborted) {
         setProduct(data)
         setSelected((previous) => data.variants.some((variant) => variant.sellable_item_id === previous)
-          ? previous : (data.variants.some((variant) => variant.sellable_item_id === preferredVariantId) ? preferredVariantId : null))
+          ? previous
+          : data.variants.some((variant) => variant.sellable_item_id === preferredVariantId)
+            ? preferredVariantId
+            : data.variants.length === 1 && !data.has_more_variants
+              ? data.variants[0].sellable_item_id
+              : null)
       }
       return !current.signal.aborted
     } catch (failure) {
@@ -583,7 +547,7 @@ function ProductDetail({ id }: { id: string }) {
       </section>
       {manager && <section className="products-detail-section" aria-labelledby="products-images-heading">
         <div className="products-section-heading"><div><p className="products-kicker">Media</p><h2 id="products-images-heading">Product images</h2></div></div>
-        <ImageControl scope="product" ownerId={id} onChanged={async () => {
+        <ImageControl scope="product" ownerId={id} showHeading={false} onChanged={async () => {
           if (!await load()) throw new Error('Product detail could not be reread')
           setNotice('Image change saved. Showing refreshed Product detail.')
         }} />
