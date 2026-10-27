@@ -111,6 +111,7 @@ describe('shared Business Products', () => {
     await user.keyboard('{Enter}')
     expect(await screen.findByRole('heading', { name: '6L' })).toHaveFocus()
     expect(choice).toHaveAttribute('aria-pressed', 'true')
+    expect(within(choice).getByText('Selected')).toBeVisible()
     const facts = screen.getByRole('region', { name: 'Current commercial facts' })
     expect(within(within(facts).getByText('Availability').parentElement!).getByText('Available')).toBeVisible()
     expect(within(within(facts).getByText('Commercial status').parentElement!).getByText('Price not set')).toBeVisible()

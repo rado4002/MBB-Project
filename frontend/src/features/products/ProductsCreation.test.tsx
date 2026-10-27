@@ -49,6 +49,22 @@ async function fillProduct(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe('Administrator Product creation', () => {
+  it('explains Product terminology and reuses an existing category code', async () => {
+    setup()
+    const { container } = renderApp('/business/products')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Add product' }))
+    const terms = screen.getByText('The customer-facing family, such as Solar Kettle.').closest('dl')!
+    expect(terms).toHaveTextContent('Product')
+    expect(terms).toHaveTextContent('Category code')
+    expect(terms).toHaveTextContent('Variant')
+    expect(terms).toHaveTextContent('SKU')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Use existing category' }), 'air_fryer')
+    expect(screen.getByRole('textbox', { name: 'Category code' })).toHaveValue('air_fryer')
+    expect(screen.getByText(/Reuse an existing code above/)).toBeInTheDocument()
+    await expectAccessible(container)
+  })
+
   it('creates Product and Standard variant inactive, then selects it in existing detail', async () => {
     const state = setup()
     let productWrites = 0

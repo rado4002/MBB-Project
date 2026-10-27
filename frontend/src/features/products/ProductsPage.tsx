@@ -15,6 +15,16 @@ const reasons = {
   product_inactive: 'Product is inactive', sellable_item_inactive: 'Variant is inactive',
 }
 
+function categoryLabel(code: string): string {
+  return code.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function StateBadge({ active, noun }: { active: boolean; noun: 'product' | 'variant' }) {
+  return <span className={`products-state products-state--${active ? 'active' : 'inactive'}`}>
+    {active ? 'Active' : 'Inactive'} {noun}
+  </span>
+}
+
 function productError(failure: unknown): string {
   const error = asApiError(failure)
   if (error.status === 404) return 'This product is no longer available to inspect.'
@@ -75,8 +85,8 @@ function CreationPassword({ onConfirmed, onCancel }: { onConfirmed: () => void; 
   </form>
 }
 
-function ProductCreateForm({ onCreated, onCancel, onReview }: {
-  onCreated: (id: string, name: string) => void; onCancel: () => void; onReview: () => void
+function ProductCreateForm({ categories, onCreated, onCancel, onReview }: {
+  categories: string[]; onCreated: (id: string, name: string) => void; onCancel: () => void; onReview: () => void
 }) {
   const auth = useAuth()
   const client = useMemo(() => createBusinessProductsClient(auth.handleSessionExpired), [auth.handleSessionExpired])
@@ -124,8 +134,17 @@ function ProductCreateForm({ onCreated, onCancel, onReview }: {
     } finally { setBusy(false) }
   }
   return <section className="products-secondary" aria-label="Add product">
-    <h2>Add product</h2>
-    <p>This product will remain inactive while you set it up.</p>
+    <div className="products-section-heading">
+      <div><p className="products-kicker">Catalog setup</p><h2>Add product</h2></div>
+      <span className="products-state products-state--inactive">Saved inactive</span>
+    </div>
+    <p>Create the shared Product identity first. You will add its first sellable Variant next.</p>
+    <dl className="products-concepts" aria-label="Product setup terms">
+      <div><dt>Product</dt><dd>The customer-facing family, such as Solar Kettle.</dd></div>
+      <div><dt>Category code</dt><dd>An internal grouping code. Reuse an existing code when it fits.</dd></div>
+      <div><dt>Variant</dt><dd>A specific sellable option, such as Three litre.</dd></div>
+      <div><dt>SKU</dt><dd>An optional unique stock identifier for that Variant.</dd></div>
+    </dl>
     {error && <p role="alert">{error}</p>}
     {uncertain && <button className="button button--secondary" onClick={onReview}>Refresh Products list</button>}
     <form className="products-setup" onSubmit={(event) => void save(event)} noValidate>
@@ -134,11 +153,22 @@ function ProductCreateForm({ onCreated, onCancel, onReview }: {
         aria-invalid={!!fieldErrors.name} aria-describedby={fieldErrors.name ? `${id}-name-error` : undefined}
         onChange={(event) => setName(event.target.value)} />
       {fieldErrors.name && <p id={`${id}-name-error`}>{fieldErrors.name}</p>}
+      {categories.length > 0 && <>
+        <label htmlFor={`${id}-existing-category`}>Use existing category</label>
+        <select id={`${id}-existing-category`} value="" disabled={busy || uncertain}
+          onChange={(event) => setCategory(event.target.value)}>
+          <option value="">Choose an existing category code</option>
+          {categories.map((code) => <option key={code} value={code}>{categoryLabel(code)} · {code}</option>)}
+        </select>
+      </>}
       <label htmlFor={`${id}-category`}>Category code</label>
       <input id={`${id}-category`} value={category} maxLength={50} required disabled={busy || uncertain}
+        autoComplete="off"
         aria-invalid={!!fieldErrors.category} aria-describedby={`${id}-category-hint${fieldErrors.category ? ` ${id}-category-error` : ''}`}
         onChange={(event) => setCategory(event.target.value)} />
-      <p id={`${id}-category-hint`}>For example: air_fryer. Letters, numbers, and underscores.</p>
+      <p id={`${id}-category-hint`}>{categories.length
+        ? 'Reuse an existing code above when it fits, or enter a supported code using lowercase letters, numbers, and underscores.'
+        : 'Use lowercase letters, numbers, and underscores, for example air_fryer.'}</p>
       {fieldErrors.category && <p id={`${id}-category-error`}>{fieldErrors.category}</p>}
       <label htmlFor={`${id}-description`}>Description</label>
       <textarea id={`${id}-description`} value={description} maxLength={4000} required disabled={busy || uncertain}
@@ -209,10 +239,14 @@ function FirstVariantForm({ productId, onCreated, stockSetup = false }: { produc
     } finally { setBusy(false) }
   }
   return <section className="products-secondary" aria-label="Add first variant">
-    <h2>Add first variant</h2>
+    <div className="products-section-heading">
+      <div><p className="products-kicker">Sellable option</p><h2>Add first variant</h2></div>
+      <span className="products-state products-state--inactive">Saved inactive</span>
+    </div>
     <p>{stockSetup
       ? 'This variant will remain inactive. Continue to Stock to set price and establish a verified stock count.'
       : 'This variant will remain inactive. Price can be set on Product detail; stock quantity is managed in Stock.'}</p>
+    <p className="products-guidance"><strong>Variant name</strong> distinguishes this option from siblings. <strong>SKU</strong> is its optional unique stock identifier.</p>
     {error && <p role="alert">{error}</p>}
     {uncertain && <button className="button button--secondary" onClick={() => void refresh()}>Refresh Product detail</button>}
     {review && <div role="status">
@@ -261,6 +295,7 @@ function ProductList() {
   const inputId = useId()
   const [adding, setAdding] = useState(fromStock)
   const [createdProduct, setCreatedProduct] = useState<{ id: string; name: string } | null>(null)
+  const categories = useMemo(() => [...new Set(result?.items.map((product) => product.category_code) ?? [])].sort(), [result])
   const load = useCallback(async (value: string) => {
     controller.current?.abort()
     const current = new AbortController()
@@ -283,11 +318,11 @@ function ProductList() {
   }, [load])
   return <>
     <header className="business-page-heading">
-      <div><h1>Products</h1></div>
+      <div><h1>Products</h1><p>Find Product families, then inspect their sellable Variants and commercial state.</p></div>
       {manager && !adding && <button className="button button--primary" onClick={() => setAdding(true)}>Add product</button>}
     </header>
     {fromStock && manager && <p>Create the Product and first variant here. Both remain inactive. Stock setup follows.</p>}
-    {manager && adding && !createdProduct && <ProductCreateForm
+    {manager && adding && !createdProduct && <ProductCreateForm categories={categories}
       onCreated={(id, name) => setCreatedProduct({ id, name })}
       onCancel={() => { setAdding(false); void load('') }} onReview={() => void load('')} />}
     {manager && adding && createdProduct && <>
@@ -296,26 +331,38 @@ function ProductList() {
         ? `/business/stock?item=${encodeURIComponent(id)}&setup=1`
         : `/business/products/${createdProduct.id}?variant=${encodeURIComponent(id)}`)} />
     </>}
-    <form className="products-search" onSubmit={(event) => { event.preventDefault(); void load(query.trim()) }}>
-      <label htmlFor={inputId}>Product name or category</label>
-      <input id={inputId} value={query} maxLength={120} onChange={(event) => setQuery(event.target.value)} />
-      <button className="button button--secondary" disabled={loading}>Search</button>
-    </form>
-    {loading && <p role="status">Loading products…</p>}
-    {error && <div role="alert"><p>{error}</p><button className="button button--secondary" onClick={() => void load(submitted)}>Retry</button></div>}
-    {result && <>
-      {!result.items.length && <p role="status">{submitted ? 'No matching products.' : 'No products are available to inspect.'}</p>}
-      {result.has_more && <p role="status">Showing the first 50 products. Search for a more specific name or category.</p>}
-      <ul className="products-list">
-        {result.items.map((product) => <li key={product.product_id}>
-          <ProductImage key={product.primary_media?.asset_url ?? 'none'} media={product.primary_media} />
-          <div><Link to={`/business/products/${product.product_id}`}>{product.name}</Link>
-            <p>{product.category_code.replaceAll('_', ' ')}</p>
-            {manager && <p>{product.active ? 'Active' : 'Inactive'}</p>}
-          </div>
-        </li>)}
-      </ul>
-    </>}
+    <section className="products-catalog" aria-labelledby={`${inputId}-catalog-heading`}>
+      <div className="products-catalog-heading">
+        <div><p className="products-kicker">Catalog</p><h2 id={`${inputId}-catalog-heading`}>Browse products</h2></div>
+        {result && <span className="products-result-count">{result.items.length}{result.has_more ? '+' : ''} shown</span>}
+      </div>
+      <form className="products-search" role="search" onSubmit={(event) => { event.preventDefault(); void load(query.trim()) }}>
+        <label htmlFor={inputId}>Product name or category</label>
+        <div className="products-search-row">
+          <input id={inputId} value={query} maxLength={120} placeholder="Search by Product name or category code"
+            onChange={(event) => setQuery(event.target.value)} />
+          {query && <button className="button button--secondary" type="button" disabled={loading}
+            onClick={() => { setQuery(''); void load('') }}>Clear</button>}
+          <button className="button button--secondary" disabled={loading}>Search</button>
+        </div>
+      </form>
+      {loading && <p role="status">Loading products…</p>}
+      {error && <div role="alert"><p>{error}</p><button className="button button--secondary" onClick={() => void load(submitted)}>Retry</button></div>}
+      {result && <>
+        {!result.items.length && <p role="status">{submitted ? 'No matching products.' : 'No products are available to inspect.'}</p>}
+        {result.has_more && <p role="status">Showing the first 50 products. Search for a more specific name or category.</p>}
+        <ul className="products-list" aria-label="Product catalog">
+          {result.items.map((product) => <li key={product.product_id}>
+            <ProductImage key={product.primary_media?.asset_url ?? 'none'} media={product.primary_media} />
+            <div className="products-list-identity"><Link to={`/business/products/${product.product_id}`}>{product.name}</Link>
+              <p><span>{categoryLabel(product.category_code)}</span><code>{product.category_code}</code></p>
+            </div>
+            {manager && <StateBadge active={product.active} noun="product" />}
+            <span className="products-list-action" aria-hidden="true">View</span>
+          </li>)}
+        </ul>
+      </>}
+    </section>
   </>
 }
 
@@ -489,44 +536,64 @@ function ProductDetail({ id }: { id: string }) {
     {product && <>
       <header className="products-family">
         <ProductImage key={product.primary_media?.asset_url ?? 'none'} media={product.primary_media} />
-        <div>
+        <div className="products-family-identity">
           <h1>{product.name}</h1>
-          <p className="products-meta">{product.category_code.replaceAll('_', ' ')}</p>
-          {manager && <p className="products-meta">{product.active ? 'Active product' : 'Inactive product'}</p>}
+          <div className="products-identity-meta">
+            <span className="products-category-label">{categoryLabel(product.category_code)}</span>
+            <code>{product.category_code}</code>
+            {manager && <StateBadge active={product.active} noun="product" />}
+          </div>
+          {product.description.length > 280
+            ? <details className="products-description-disclosure"><summary>Show product description</summary><p className="products-description">{product.description}</p></details>
+            : <p className="products-description">{product.description}</p>}
         </div>
       </header>
-      {manager && <ImageControl scope="product" ownerId={id} onChanged={async () => {
-        if (!await load()) throw new Error('Product detail could not be reread')
-        setNotice('Image change saved. Showing refreshed Product detail.')
-      }} />}
-      {manager && <LifecycleAction kind="product" id={id} active={product.active}
-        onChanged={async () => { if (await load()) setNotice('Showing refreshed Product detail.') }} />}
-      <h2>Variants</h2>
-      {product.variants.length > 0 && <p className="products-meta">Select a variant to inspect its current price and availability.</p>}
-      {!product.variants.length && <p>No variants have been added.</p>}
-      {manager && !product.active && !product.variants.length && <FirstVariantForm productId={id}
-        onCreated={(itemId) => navigate(`/business/products/${id}?variant=${encodeURIComponent(itemId)}`)} />}
-      {product.has_more_variants && <p role="status">Showing the first 200 variants. Additional variants are not shown.</p>}
-      <ul className="products-variants">
-        {product.variants.map((variant) => <li key={variant.sellable_item_id}>
-          <button className="products-variant-choice" aria-pressed={selected === variant.sellable_item_id}
-            aria-label={`${variant.model_label || 'Standard variant'}${variant.sku ? ` · ${variant.sku}` : ''}`}
-            onClick={() => setSelected(variant.sellable_item_id)}>
-            <span className="products-variant-name">{variant.model_label || 'Standard variant'}</span>
-            {variant.sku && <span className="products-meta">{` · ${variant.sku}`}</span>}
-            <span className="products-variant-marker" aria-hidden="true">{selected === variant.sellable_item_id ? 'Selected' : 'Select'}</span>
-          </button>
-          {manager && <span className="products-meta">{variant.active ? 'Active variant' : 'Inactive variant'}</span>}
-        </li>)}
-      </ul>
-      {selectedVariant && <VariantDetail key={`${selectedVariant.sellable_item_id}-${product.active}-${selectedVariant.active}`} id={selectedVariant.sellable_item_id}
-        active={selectedVariant.active}
-        onChanged={async () => { if (await load()) setNotice('Showing refreshed Product detail.') }} />}
-      <section className="products-secondary" aria-label="Product description">
-        {product.description.length > 280
-          ? <details><summary>Show product description</summary><p className="products-description">{product.description}</p></details>
-          : <><h2>Product description</h2><p className="products-description">{product.description}</p></>}
+      <section className="products-detail-section" aria-labelledby="products-variants-heading">
+        <div className="products-section-heading">
+          <div><p className="products-kicker">Sellable options</p><h2 id="products-variants-heading">Variants</h2></div>
+          <span className="products-result-count">{product.variants.length} shown</span>
+        </div>
+        {product.variants.length > 0 && <p className="products-section-intro">Select a Variant to inspect its price, availability, images and lifecycle controls.</p>}
+        {!product.variants.length && <p>No variants have been added.</p>}
+        {manager && !product.active && !product.variants.length && <FirstVariantForm productId={id}
+          onCreated={(itemId) => navigate(`/business/products/${id}?variant=${encodeURIComponent(itemId)}`)} />}
+        {product.has_more_variants && <p role="status">Showing the first 200 variants. Additional variants are not shown.</p>}
+        {product.variants.length > 0 && <div className="products-variant-workspace">
+          <ul className="products-variants">
+            {product.variants.map((variant) => <li key={variant.sellable_item_id}>
+              <button className="products-variant-choice" aria-pressed={selected === variant.sellable_item_id}
+                aria-label={`${variant.model_label || 'Standard variant'}${variant.sku ? ` · ${variant.sku}` : ''}`}
+                onClick={() => setSelected(variant.sellable_item_id)}>
+                <span className="products-variant-title">
+                  <span className="products-variant-name">{variant.model_label || 'Standard variant'}</span>
+                  <span className="products-variant-marker" aria-hidden="true">{selected === variant.sellable_item_id ? 'Selected' : 'View'}</span>
+                </span>
+                <span className="products-meta">{variant.sku ? `SKU · ${variant.sku}` : 'No SKU assigned'}</span>
+                {manager && <StateBadge active={variant.active} noun="variant" />}
+              </button>
+            </li>)}
+          </ul>
+          <div className="products-variant-panel">
+            {selectedVariant ? <VariantDetail key={`${selectedVariant.sellable_item_id}-${product.active}-${selectedVariant.active}`} id={selectedVariant.sellable_item_id}
+              active={selectedVariant.active}
+              onChanged={async () => { if (await load()) setNotice('Showing refreshed Product detail.') }} />
+              : <div className="products-variant-empty"><strong>Select a Variant</strong><p>Its authoritative price, stock availability and offer status will appear here.</p></div>}
+          </div>
+        </div>}
       </section>
+      {manager && <section className="products-detail-section" aria-labelledby="products-images-heading">
+        <div className="products-section-heading"><div><p className="products-kicker">Media</p><h2 id="products-images-heading">Product images</h2></div></div>
+        <ImageControl scope="product" ownerId={id} onChanged={async () => {
+          if (!await load()) throw new Error('Product detail could not be reread')
+          setNotice('Image change saved. Showing refreshed Product detail.')
+        }} />
+      </section>}
+      {manager && <section className="products-detail-section" aria-labelledby="products-lifecycle-heading">
+        <div className="products-section-heading"><div><p className="products-kicker">Availability control</p><h2 id="products-lifecycle-heading">Product lifecycle</h2></div></div>
+        <p className="products-section-intro">Activation controls whether this Product family can be offered. Price and Stock remain authoritative for each Variant.</p>
+        <LifecycleAction kind="product" id={id} active={product.active}
+          onChanged={async () => { if (await load()) setNotice('Showing refreshed Product detail.') }} />
+      </section>}
     </>}
   </>
 }
@@ -640,7 +707,6 @@ function VariantDetail({ id, active, onChanged }: { id: string; active: boolean;
       <button className="button button--secondary" disabled={busy || loading} onClick={() => void load()}>Refresh current facts</button>
     </div>
     {offer && <>
-      {manager && !denied && <LifecycleAction kind="variant" id={id} active={active} offer={offer} onChanged={onChanged} />}
       <div className="products-commercial-layout">
         <section aria-label="Current commercial facts">
           <h3>Current commercial facts</h3>
@@ -682,5 +748,6 @@ function VariantDetail({ id, active, onChanged }: { id: string; active: boolean;
         ? <details><summary>Show characteristics ({Object.keys(offer.attributes).length})</summary>{characteristics}</details>
         : <><h3>Characteristics</h3>{characteristics}</>}
     </section>}
+    {offer && manager && !denied && <LifecycleAction kind="variant" id={id} active={active} offer={offer} onChanged={onChanged} />}
   </section>
 }
