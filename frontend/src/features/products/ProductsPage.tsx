@@ -282,7 +282,7 @@ function ProductList() {
     </header>
     {fromStock && manager && <p>Create the Product and first variant here. Both remain inactive. Stock setup follows.</p>}
     {manager && adding && !createdProduct && <ProductCreateForm categories={categories}
-      onCreated={(id, name) => setCreatedProduct({ id, name })}
+      onCreated={(id, name) => { setCreatedProduct({ id, name }); void load(submitted) }}
       onCancel={() => { setAdding(false); void load('') }} onReview={() => void load('')} />}
     {manager && adding && createdProduct && <>
       <p role="status">{createdProduct.name} was saved inactive. Add its first variant or return to Product detail.</p>

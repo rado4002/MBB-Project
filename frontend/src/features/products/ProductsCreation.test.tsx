@@ -102,6 +102,38 @@ describe('Administrator Product creation', () => {
     expect(screen.getByText('Inactive product')).toBeInTheDocument()
   })
 
+  it('refreshes the active catalog filter after confirmed creation while first-Variant setup continues', async () => {
+    setup()
+    let productCreated = false
+    let productWrites = 0
+    const browseQueries: string[] = []
+    server.use(
+      http.get(browse, ({ request }) => {
+        browseQueries.push(new URL(request.url).searchParams.get('query') ?? '')
+        return HttpResponse.json({ items: productCreated ? [product] : [], has_more: false })
+      }),
+      http.post(products, () => {
+        productWrites++
+        productCreated = true
+        return HttpResponse.json(product, { status: 201 })
+      }),
+    )
+    renderApp('/business/products')
+    const user = userEvent.setup()
+    const search = await screen.findByRole('textbox', { name: 'Product name or category' })
+    await user.type(search, 'air_fryer')
+    await user.click(screen.getByRole('button', { name: 'Search' }))
+    await waitFor(() => expect(browseQueries).toEqual(['', 'air_fryer']))
+    await fillProduct(user)
+    await user.click(screen.getByRole('button', { name: 'Save product' }))
+    expect(await screen.findByRole('heading', { name: 'Add first variant' })).toBeInTheDocument()
+    expect(screen.getByText(/saved inactive/)).toBeInTheDocument()
+    expect(await screen.findByRole('link', { name: product.name })).toBeInTheDocument()
+    expect(search).toHaveValue('air_fryer')
+    expect(browseQueries).toEqual(['', 'air_fryer', 'air_fryer'])
+    expect(productWrites).toBe(1)
+  })
+
   it('keeps creation unavailable to Operator', async () => {
     setup('operator')
     renderApp('/business/products')
