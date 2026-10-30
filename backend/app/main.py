@@ -15,6 +15,11 @@ from app.api.browser_auth_errors import (
     browser_validation_error_response,
 )
 from app.config import get_settings
+from app.sensitive_logging import (
+    configure_sensitive_access_log_redaction,
+    redact_sensitive_log_event,
+    sanitize_customer_access_path,
+)
 
 settings = get_settings()
 
@@ -22,6 +27,7 @@ settings = get_settings()
 structlog.configure(
     processors=[
         structlog.contextvars.merge_contextvars,
+        redact_sensitive_log_event,
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.StackInfoRenderer(),
@@ -33,6 +39,7 @@ structlog.configure(
     context_class=dict,
     logger_factory=structlog.PrintLoggerFactory(),
 )
+configure_sensitive_access_log_redaction()
 
 log = structlog.get_logger()
 
@@ -108,7 +115,13 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
                 message="An internal error occurred.",
             ),
         )
-    log.error("unhandled_exception", path=request.url.path, error=str(exc))
+    request_path = request.url.path
+    legacy_customer_path = request_path.startswith("/api/v1/customers/")
+    log.error(
+        "unhandled_exception",
+        path=sanitize_customer_access_path(request_path),
+        error=type(exc).__name__ if legacy_customer_path else str(exc),
+    )
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={"error": "internal_server_error", "message": "An unexpected error occurred."},

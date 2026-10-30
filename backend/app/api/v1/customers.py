@@ -1,18 +1,16 @@
 """
 EP-20: GET /api/v1/customers/{phone_number}
-EP-21: PUT /api/v1/customers/{phone_number}/opt-out
-EP-22: PUT /api/v1/customers/{phone_number}/language
+EP-21: PUT /api/v1/customers/{phone_number}/opt-out (disabled legacy mutation)
+EP-22: PUT /api/v1/customers/{phone_number}/language (disabled legacy mutation)
 A-10:  GET /api/v1/customers (admin list)
 """
-from datetime import datetime, timezone
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 
-from app.api.deps import DBSession, IdempotencyKey, get_current_role, require_role
+from app.api.deps import DBSession, get_current_role, require_role
 from app.models.customer import Customer
-from app.modules.m6_relance.service import cancel_all_relances
 from app.schemas.customers import (
     CustomerLanguageResponse,
     CustomerLanguageUpdate,
@@ -53,11 +51,11 @@ def _customer_response_payload(
 @router.get(
     "/{phone_number:path}",
     response_model=CustomerResponse,
-    dependencies=[Depends(get_current_role)],
+    dependencies=[Depends(require_role("admin", "orchestrator"))],
 )
 async def get_customer(phone_number: str, db: DBSession):
     """Retrieve a customer profile by canonical international E.164 number."""
-    log.info("customer.get", phone=phone_number)
+    log.info("customer.get")
     
     customer = await db.get(Customer, phone_number)
     if not customer:
@@ -88,55 +86,12 @@ async def get_customer(phone_number: str, db: DBSession):
     status_code=status.HTTP_200_OK,
     dependencies=[Depends(get_current_role)],
 )
-async def opt_out_customer(phone_number: str, db: DBSession, idempotency_key: IdempotencyKey):
-    """
-    Register customer opt-out. Immediately stops all automated messages.
-    Signals: 'stop', 'arrête', 'yaka te', 'tika' are also auto-detected in M2.
-    Idempotent via phone_number PK.
-    """
-    log.info("customer.opt_out", phone=phone_number)
-    
-    customer = await db.get(Customer, phone_number)
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
-    
-    # Idempotency: already opted out
-    if customer.opted_out:
-        log.debug("customer.already_opted_out", phone=phone_number)
-        return OptOutResponse(
-            phone_number=customer.phone_number,
-            opted_out=True,
-            opted_out_at=customer.updated_at,
-        )
-    
-    # Mark as opted out
-    customer.opted_out = True
-    customer.updated_at = datetime.now(timezone.utc)
-    
-    # Cancel all pending relances for this customer's leads
-    from app.models.lead import Lead
-    leads_result = await db.execute(
-        select(Lead).where(Lead.customer_id == phone_number)
-    )
-    leads = leads_result.scalars().all()
-    
-    total_cancelled = 0
-    for lead in leads:
-        cancelled = await cancel_all_relances(session=db, lead_id=lead.lead_id)
-        total_cancelled += cancelled
-    
-    await db.commit()
-    
-    log.info(
-        "customer.opted_out_success",
-        phone=phone_number,
-        relances_cancelled=total_cancelled,
-    )
-    
-    return OptOutResponse(
-        phone_number=customer.phone_number,
-        opted_out=True,
-        opted_out_at=customer.updated_at,
+async def opt_out_customer(phone_number: str):
+    """Reject the unsafe phone-addressed mutation for every authenticated role."""
+    del phone_number
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="legacy_customer_mutation_disabled",
     )
 
 
@@ -148,25 +103,12 @@ async def opt_out_customer(phone_number: str, db: DBSession, idempotency_key: Id
 async def update_customer_language(
     phone_number: str,
     body: CustomerLanguageUpdate,
-    db: DBSession,
-    idempotency_key: IdempotencyKey,
 ):
-    """Update preferred communication language for a customer. Idempotent via phone_number PK."""
-    log.info("customer.language.update", phone=phone_number, language=body.language)
-    
-    customer = await db.get(Customer, phone_number)
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
-    
-    # Update language (idempotent: overwriting is safe)
-    customer.preferred_language = body.language
-    customer.updated_at = datetime.now(timezone.utc)
-    await db.commit()
-    
-    return CustomerLanguageResponse(
-        phone_number=customer.phone_number,
-        preferred_language=customer.preferred_language,
-        updated_at=customer.updated_at,
+    """Reject the unsafe phone-addressed mutation for every authenticated role."""
+    del phone_number, body
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="legacy_customer_mutation_disabled",
     )
 
 

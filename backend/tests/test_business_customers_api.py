@@ -7,9 +7,9 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 
-from app.api.v1 import business_customers
+from app.api.v1 import business_customers, customers as legacy_customers
 from app.models.conversation import Conversation
 from app.models.customer import Customer
 from app.models.lead import Lead
@@ -17,6 +17,7 @@ from app.models.message import Message
 from app.models.operator_audit import OperatorAuditEvent
 from app.models.relance import Relance
 from app.models.relance_candidate import RelanceCandidate
+from app.security import create_access_token
 from test_commerce_admin_api import (
     ADMIN_PASSWORD,
     OPERATOR_PASSWORD,
@@ -295,6 +296,100 @@ async def test_customer_overview_pagination_is_stable_and_customer_owned(
     ]
     assert customer_ids == sorted(customer_ids)
     assert len(customer_ids) == len(set(customer_ids)) == 30
+
+
+async def test_legacy_customer_role_matrix_and_mutations_have_zero_side_effects(
+    customer_workspace,
+):
+    transport, factory, _administrator_id, conversation_id, _other_id, _evidence_id = (
+        customer_workspace
+    )
+    transport.app.include_router(legacy_customers.router, prefix="/api/v1")
+    async with factory() as db:
+        customer_id = await db.scalar(
+            select(Conversation.customer_id).where(
+                Conversation.conversation_id == conversation_id
+            )
+        )
+    assert customer_id is not None
+
+    def headers(role: str) -> dict[str, str]:
+        token = create_access_token("legacy-customer-security-test", role)
+        return {"Authorization": f"Bearer {token}"}
+
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        assert (await client.get("/api/v1/customers")).status_code == 401
+        assert (
+            await client.get(f"/api/v1/customers/{customer_id}")
+        ).status_code == 401
+        assert (
+            await client.put(f"/api/v1/customers/{customer_id}/opt-out")
+        ).status_code == 401
+        assert (
+            await client.put(
+                f"/api/v1/customers/{customer_id}/language",
+                headers={"Authorization": "Bearer invalid"},
+                json={"language": "swahili"},
+            )
+        ).status_code == 401
+        for role in ("admin", "orchestrator"):
+            assert (
+                await client.get("/api/v1/customers", headers=headers(role))
+            ).status_code == 200
+            assert (
+                await client.get(
+                    f"/api/v1/customers/{customer_id}", headers=headers(role)
+                )
+            ).status_code == 200
+        for role in ("administrator", "operator", "hub", "lab", "unknown"):
+            assert (
+                await client.get("/api/v1/customers", headers=headers(role))
+            ).status_code == 403
+            assert (
+                await client.get(
+                    f"/api/v1/customers/{customer_id}", headers=headers(role)
+                )
+            ).status_code == 403
+
+        mutation_roles = (
+            "admin",
+            "orchestrator",
+            "administrator",
+            "operator",
+            "hub",
+            "lab",
+            "unknown",
+        )
+        for role in mutation_roles:
+            opt_out = await client.put(
+                f"/api/v1/customers/{customer_id}/opt-out",
+                headers=headers(role),
+            )
+            language = await client.put(
+                f"/api/v1/customers/{customer_id}/language",
+                headers=headers(role),
+                json={"language": "swahili"},
+            )
+            assert opt_out.status_code == 403
+            assert language.status_code == 403
+            assert opt_out.json()["detail"] == "legacy_customer_mutation_disabled"
+            assert language.json()["detail"] == "legacy_customer_mutation_disabled"
+
+    async with factory() as db:
+        customer = await db.get(Customer, customer_id)
+        relance = await db.scalar(
+            select(Relance)
+            .join(Lead, Lead.lead_id == Relance.lead_id)
+            .where(Lead.customer_id == customer_id)
+        )
+        audit_count = await db.scalar(
+            select(func.count()).select_from(OperatorAuditEvent)
+        )
+        assert customer is not None
+        assert customer.preferred_language == "french"
+        assert customer.opt_out_flag is False and customer.opt_out_at is None
+        assert relance is not None and relance.cancelled is False
+        assert audit_count == 0
 
 
 async def test_profile_write_enforces_permission_origin_validation_concurrency_and_audit(
