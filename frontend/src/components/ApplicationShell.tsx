@@ -16,6 +16,7 @@ export function ApplicationShell() {
   const navigate = useNavigate()
   const pageName = location.pathname.startsWith('/business/orders')
     ? 'Orders'
+    : location.pathname.startsWith('/business/customers') ? 'Customers'
     : location.pathname.startsWith('/business/stock') ? 'Stock'
     : location.pathname.startsWith('/business') ? 'Products'
     : location.pathname.startsWith('/inbox/') ? 'Inbox' : (pageNames[location.pathname] ?? 'MBB')

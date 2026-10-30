@@ -14,6 +14,23 @@ class CustomerChannelEvidence(BaseModel):
     provenance: Literal["verified_provider_message"]
 
 
+class BusinessCustomerListItem(BaseModel):
+    customer_id: str
+    customer_reference: UUID
+    conversation_id: UUID | None = None
+    display_name: str | None = None
+    phone_number: str
+    communication_channel: Literal["whatsapp"] | None = None
+    acquisition_source: str | None = Field(default=None, max_length=50)
+    acquisition_source_provenance: Literal["earliest_recorded_lead"] | None = None
+    last_interaction_at: datetime
+
+
+class BusinessCustomerListResponse(BaseModel):
+    items: list[BusinessCustomerListItem] = Field(max_length=25)
+    has_more: bool
+
+
 class CustomerOptOutEvidence(BaseModel):
     message_id: UUID
     received_at: datetime
@@ -23,9 +40,10 @@ class CustomerOptOutEvidence(BaseModel):
 
 
 class BusinessCustomerProfile(BaseModel):
-    conversation_id: UUID
+    customer_id: str
+    conversation_id: UUID | None = None
     display_name: str | None = None
-    phone_masked: str
+    phone_number: str
     city: str
     preferred_language: Language
     opted_out: bool

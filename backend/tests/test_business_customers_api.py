@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 
 from app.api.v1 import business_customers
 from app.models.conversation import Conversation
@@ -40,6 +40,7 @@ async def customer_workspace(harness):  # noqa: F811
     other_phone = "+243810005102"
     conversation_id = uuid.uuid4()
     other_conversation_id = uuid.uuid4()
+    second_customer_conversation_id = uuid.uuid4()
     evidence_id = uuid.uuid4()
     lead_id = uuid.uuid4()
     now = datetime.now(timezone.utc)
@@ -62,6 +63,13 @@ async def customer_workspace(harness):  # noqa: F811
                     city="Goma",
                     preferred_language="swahili",
                 ),
+                Customer(
+                    phone_number="+243810005103",
+                    name="Customer Without Conversation",
+                    city="Lubumbashi",
+                    preferred_language="french",
+                    last_interaction=now + timedelta(minutes=2),
+                ),
             ]
         )
         await db.flush()
@@ -78,6 +86,12 @@ async def customer_workspace(harness):  # noqa: F811
                     customer_id=other_phone,
                     language_detected="swahili",
                     last_message_time=now + timedelta(minutes=1),
+                ),
+                Conversation(
+                    conversation_id=second_customer_conversation_id,
+                    customer_id=customer_phone,
+                    language_detected="french",
+                    last_message_time=now - timedelta(minutes=1),
                 ),
             ]
         )
@@ -118,6 +132,20 @@ async def customer_workspace(harness):  # noqa: F811
                 intent="product_inquiry",
                 product_interest=[],
                 source="referral_partner",
+                created_at=now,
+            )
+        )
+        db.add(
+            Lead(
+                customer_id=customer_phone,
+                conversation_id=second_customer_conversation_id,
+                score="cold",
+                score_value=1,
+                stage="awareness",
+                intent="product_inquiry",
+                product_interest=[],
+                source="later_campaign",
+                created_at=now + timedelta(minutes=1),
             )
         )
         await db.flush()
@@ -156,7 +184,7 @@ async def customer_workspace(harness):  # noqa: F811
             await db.commit()
 
 
-async def test_profile_read_is_masked_authorized_and_customer_isolated(
+async def test_crm_read_is_authorized_full_identity_complete_and_customer_isolated(
     customer_workspace,
 ):
     transport, _factory, _administrator_id, conversation_id, other_id, evidence_id = (
@@ -166,23 +194,107 @@ async def test_profile_read_is_masked_authorized_and_customer_isolated(
         assert (
             await client.get(f"/api/v1/business/customers/{conversation_id}")
         ).status_code == 401
+        assert (await client.get("/api/v1/business/customers")).status_code == 401
         await _login(client, "commerce.operator", OPERATOR_PASSWORD)
+        overview = await client.get("/api/v1/business/customers?q=Marie")
+        assert overview.status_code == 200
+        assert overview.headers["cache-control"] == "no-store"
+        overview_body = overview.json()
+        assert overview_body["has_more"] is False
+        assert len(overview_body["items"]) == 1
+        assert overview_body["items"][0] | {
+            "last_interaction_at": "checked",
+            "customer_reference": "checked",
+        } == {
+            "customer_id": "+243810005101",
+            "customer_reference": "checked",
+            "conversation_id": str(conversation_id),
+            "display_name": "Marie Client",
+            "phone_number": "+243810005101",
+            "communication_channel": "whatsapp",
+            "acquisition_source": "referral_partner",
+            "acquisition_source_provenance": "earliest_recorded_lead",
+            "last_interaction_at": "checked",
+        }
+        all_customers = (await client.get("/api/v1/business/customers")).json()["items"]
+        orphan = next(
+            item for item in all_customers
+            if item["customer_id"] == "+243810005103"
+        )
+        assert orphan["conversation_id"] is None
+        assert orphan["acquisition_source"] is None
+        assert orphan["communication_channel"] is None
+        orphan_detail = await client.get(
+            f"/api/v1/business/customers/by-reference/{orphan['customer_reference']}"
+        )
+        assert orphan_detail.status_code == 200
+        assert orphan_detail.json()["customer_id"] == "+243810005103"
+        assert orphan_detail.json()["conversation_id"] is None
+        customer_reference = overview_body["items"][0]["customer_reference"]
+        bound_detail = await client.get(
+            f"/api/v1/business/customers/by-reference/{customer_reference}",
+            params={"conversation_id": str(conversation_id)},
+        )
+        assert bound_detail.status_code == 200
+        assert bound_detail.json()["conversation_id"] == str(conversation_id)
+        mismatched_detail = await client.get(
+            f"/api/v1/business/customers/by-reference/{customer_reference}",
+            params={"conversation_id": str(other_id)},
+        )
+        assert mismatched_detail.status_code == 404
         response = await client.get(f"/api/v1/business/customers/{conversation_id}")
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-store"
         body = response.json()
-        assert body["phone_masked"] == "***5101"
-        assert "+243" not in response.text
+        assert body["customer_id"] == "+243810005101"
+        assert body["phone_number"] == "+243810005101"
         assert body["communication_channels"] == [
             {"channel": "whatsapp", "provenance": "verified_provider_message"}
         ]
-        assert body["acquisition_sources"] == ["referral_partner"]
+        assert body["acquisition_sources"] == ["referral_partner", "later_campaign"]
         assert [item["message_id"] for item in body["opt_out_evidence"]] == [
             str(evidence_id)
         ]
         other = await client.get(f"/api/v1/business/customers/{other_id}")
         assert other.status_code == 200
         assert str(evidence_id) not in other.text
+
+
+async def test_customer_overview_pagination_is_stable_and_customer_owned(
+    customer_workspace,
+):
+    transport, factory, _administrator_id, _conversation_id, _other_id, _evidence_id = (
+        customer_workspace
+    )
+    stable_time = datetime(2026, 10, 30, tzinfo=timezone.utc)
+    async with factory() as db:
+        db.add_all(
+            [
+                Customer(
+                    phone_number=f"+24382000{index:04d}",
+                    name=f"Pagination Customer {index:02d}",
+                    city="Kinshasa",
+                    preferred_language="french",
+                    last_interaction=stable_time,
+                )
+                for index in range(27)
+            ]
+        )
+        await db.execute(update(Customer).values(last_interaction=stable_time))
+        await db.commit()
+
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        await _login(client, "commerce.operator", OPERATOR_PASSWORD)
+        first = (await client.get("/api/v1/business/customers?offset=0")).json()
+        second = (await client.get("/api/v1/business/customers?offset=25")).json()
+
+    assert len(first["items"]) == 25 and first["has_more"] is True
+    assert len(second["items"]) == 5 and second["has_more"] is False
+    customer_ids = [
+        item["customer_id"] for item in [*first["items"], *second["items"]]
+    ]
+    assert customer_ids == sorted(customer_ids)
+    assert len(customer_ids) == len(set(customer_ids)) == 30
 
 
 async def test_profile_write_enforces_permission_origin_validation_concurrency_and_audit(
@@ -215,6 +327,9 @@ async def test_profile_write_enforces_permission_origin_validation_concurrency_a
         ).status_code == 403
     async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
         csrf = await _login(client, "commerce.admin", ADMIN_PASSWORD)
+        admin_overview = await client.get("/api/v1/business/customers?q=Marie")
+        assert admin_overview.status_code == 200
+        assert admin_overview.json()["items"][0]["phone_number"] == "+243810005101"
         path = f"/api/v1/business/customers/{conversation_id}/profile"
         assert (await client.put(path, json=body)).status_code == 403
         assert (
@@ -231,6 +346,7 @@ async def test_profile_write_enforces_permission_origin_validation_concurrency_a
         response = await client.put(path, headers=_headers(csrf), json=body)
         assert response.status_code == 200
         assert response.json()["display_name"] == "Marie Updated"
+        assert response.json()["phone_number"] == "+243810005101"
         stale = {**body, "profile": {**body["profile"], "city": "Goma"}}
         assert (
             await client.put(path, headers=_headers(csrf), json=stale)

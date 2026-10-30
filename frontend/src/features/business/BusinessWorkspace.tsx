@@ -29,7 +29,7 @@ export function BusinessWorkspace() {
         <NavLink to="/business/stock" className={({ isActive }) => isActive ? 'active' : undefined}><BusinessIcon kind="stock" />Stock</NavLink>
         {auth.session?.capabilities.includes('order.read') && <NavLink to="/business/orders" className={({ isActive }) => isActive ? 'active' : undefined}><BusinessIcon kind="orders" />Orders</NavLink>}
         {auth.session?.capabilities.includes('commerce.manage') && <NavLink to="/business/fx" className={({ isActive }) => isActive ? 'active' : undefined}><BusinessIcon kind="fx" />FX</NavLink>}
-        {module === 'customers' && <NavLink to={location.pathname} className="active" aria-current="page"><BusinessIcon kind="customers" />Customer</NavLink>}
+        {auth.session?.capabilities.includes('customer.read') && <NavLink to="/business/customers" className={({ isActive }) => isActive ? 'active' : undefined}><BusinessIcon kind="customers" />Customers</NavLink>}
       </nav>
     </aside>
     <div className="business-module-switcher">
@@ -39,7 +39,7 @@ export function BusinessWorkspace() {
         <option value="stock">Stock</option>
         {auth.session?.capabilities.includes('order.read') && <option value="orders">Orders</option>}
         {auth.session?.capabilities.includes('commerce.manage') && <option value="fx">FX</option>}
-        {module === 'customers' && <option value="customers" disabled>Customer profile</option>}
+        {auth.session?.capabilities.includes('customer.read') && <option value="customers">Customers</option>}
       </select>
     </div>
     <div className="business-content"><Outlet /></div>

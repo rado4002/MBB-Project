@@ -11,9 +11,10 @@ const conversationId = '11111111-1111-4111-8111-111111111111'
 const evidenceId = '22222222-2222-4222-8222-222222222222'
 const base = `/api/v1/business/customers/${conversationId}`
 const profile = {
+  customer_id: '+243810005101',
   conversation_id: conversationId,
   display_name: 'Marie Client',
-  phone_masked: '***5101',
+  phone_number: '+243810005101',
   city: 'Kinshasa',
   preferred_language: 'french',
   opted_out: false,
@@ -38,18 +39,24 @@ function setup(role: 'operator' | 'administrator') {
       recent_reauthentication_expires_at_epoch: 2_000_000_000,
     })),
     http.get(base, () => HttpResponse.json(profile)),
+    http.get(`/api/v1/operator/conversations/${conversationId}/customer-activity`, () => HttpResponse.json({
+      customer: { display_name: 'Marie Client', phone_masked: '***5101', city: 'Kinshasa', preferred_language: 'french', opted_out: false, consent_given: false },
+      conversations: [],
+      orders: [],
+    })),
   )
 }
 
 describe('Customer Profile & Contact Preferences', () => {
-  it('shows masked identity and distinct channel/source provenance read-only to an Operator', async () => {
+  it('shows authorized CRM identity and distinct channel/source provenance read-only to an Operator', async () => {
     setup('operator')
     renderApp(`/business/customers/${conversationId}`)
     expect(await screen.findByRole('heading', { name: 'Profile & contact preferences' })).toBeInTheDocument()
-    expect(await screen.findByText('***5101')).toBeInTheDocument()
+    expect(await screen.findAllByText('+243810005101')).toHaveLength(2)
     expect(screen.getByText('WhatsApp · verified provider message')).toBeInTheDocument()
     expect(screen.getByText('Referral Partner')).toBeInTheDocument()
     expect(screen.getByText(/does not merge identities across channels/)).toBeInTheDocument()
+    expect(screen.getByText(/Customer relationship history is shown separately from Lead qualification/)).toBeInTheDocument()
     expect(screen.getByText(/Administrator permission is required/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Record opt-out' })).not.toBeInTheDocument()
     await expectAccessible(document.body)

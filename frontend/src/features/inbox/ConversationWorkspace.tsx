@@ -12,7 +12,7 @@ import {
   type RefObject,
 } from 'react'
 import { createPortal } from 'react-dom'
-import { Link } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import type { ConversationApiClient } from '../../api/conversations'
 import type {
   ConversationOwnership,
@@ -257,6 +257,7 @@ function CustomerActivity({
   headingLevel?: 'h3' | 'h4'
 }) {
   const auth = useAuth()
+  const location = useLocation()
   const [activity, setActivity] = useState<OperatorCustomerActivityResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(false)
@@ -319,7 +320,7 @@ function CustomerActivity({
               </div>
             </dl>
             {auth.session?.capabilities.includes('customer.read') ? (
-              <Link to={`/business/customers/${encodeURIComponent(conversationId)}`}>Open Customer profile</Link>
+              <Link to={`/business/customers/${encodeURIComponent(conversationId)}`} state={{ fromInbox: `${location.pathname}${location.search}` }}>Open Customer profile</Link>
             ) : null}
             <ActivityHeading>Recent conversations</ActivityHeading>
             {activity.conversations.length ? (

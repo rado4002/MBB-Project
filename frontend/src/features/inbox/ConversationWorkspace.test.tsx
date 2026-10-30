@@ -225,6 +225,10 @@ describe('read-only conversation workspace', () => {
     expect(screen.getAllByText('Control: MBB AI Assistant')).toHaveLength(2)
     expect(screen.getByText('Acquisition source: Referral Partner')).toBeInTheDocument()
     expect(screen.getByText('Acquisition source: Social Campaign')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Open Customer profile' })).toHaveAttribute(
+      'href',
+      `/business/customers/${firstId}`,
+    )
     expect(screen.getByRole('link', { name: 'Open conversation' })).toHaveAttribute(
       'href',
       `/inbox/${secondId}`,

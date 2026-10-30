@@ -533,6 +533,28 @@ h2 { font-size: 1.125rem; }
 .customer-profile-form { display: grid; gap: var(--space-2); max-width: 38rem; }
 .customer-profile-form input:not([type="checkbox"]), .customer-profile-form select { min-height: 2.75rem; width: 100%; }
 .customer-profile-form .button { width: fit-content; min-height: 2.75rem; margin-top: var(--space-2); }
+.customers-page, .customer-profile-page { max-width: 90rem; margin-inline: auto; padding: var(--space-8); overflow-wrap: anywhere; }
+.customers-search { display: grid; gap: var(--space-2); margin-bottom: var(--space-5); }
+.customers-search > div { display: flex; gap: var(--space-2); }
+.customers-search input { flex: 1; min-width: 0; min-height: 2.75rem; padding: var(--space-3); border: 1px solid #dce3ee; border-radius: .5rem; font: inherit; }
+.customers-results { overflow: hidden; border: 1px solid #dce3ee; border-radius: .65rem; background: #fff; }
+.customers-results > [role="status"], .customers-results > [role="alert"] { margin: var(--space-5); }
+.customers-results-heading { display: flex; justify-content: space-between; gap: var(--space-3); padding: var(--space-4) var(--space-5); border-bottom: 1px solid #e8edf4; }
+.customers-results-heading span { color: #64748b; font-size: .8125rem; }
+.customers-table-wrap { overflow-x: auto; }
+.customers-table { width: 100%; border-collapse: collapse; text-align: left; }
+.customers-table th, .customers-table td { padding: var(--space-4) var(--space-5); border-bottom: 1px solid #e8edf4; vertical-align: top; }
+.customers-table thead th { color: #64748b; font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; }
+.customers-table tbody th { min-width: 13rem; }
+.customers-table tbody th span { display: block; margin-top: var(--space-1); color: #64748b; font-size: .8125rem; font-weight: 400; }
+.customers-table tbody tr:hover { background: #f8fbff; }
+.customers-table a { color: #0f172a; font-weight: 700; }
+.customers-empty { padding: var(--space-8); text-align: center; }
+.customers-empty h2 { margin: 0; font-size: 1.1rem; }
+.customers-empty p { color: #64748b; }
+.customers-pagination { display: flex; justify-content: flex-end; gap: var(--space-2); padding: var(--space-4) var(--space-5); }
+.customer-relationship-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-5); }
+.customer-relationship-grid h3 { margin: 0 0 var(--space-3); font-size: 1rem; }
 .supporting-copy { margin: 0; color: var(--color-text-muted); font-size: 0.82rem; }
 .checkbox-row { display: flex; gap: var(--space-2); align-items: start; min-height: 2.75rem; padding-top: var(--space-2); }
 .checkbox-row input { margin-top: 0.2rem; }
@@ -889,7 +911,14 @@ h2 { font-size: 1.125rem; }
   .business-module-switcher { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-4); background: #fff; border-bottom: 1px solid #dce3ee; }
   .business-module-switcher label { color: #0f172a; font-weight: 700; }
   .business-module-switcher select { flex: 1; min-width: 0; min-height: 2.75rem; padding: var(--space-2); border: 1px solid #dce3ee; border-radius: .5rem; background: #fff; color: #2563eb; font-weight: 650; }
-  .products-page, .stock-page, .orders-page { padding: var(--space-4); }
+  .products-page, .stock-page, .orders-page, .customers-page, .customer-profile-page { padding: var(--space-4); }
+  .customers-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .customers-table, .customers-table tbody, .customers-table tr, .customers-table th, .customers-table td { display: block; width: 100%; }
+  .customers-table tr { padding: var(--space-3) var(--space-4); border-bottom: 1px solid #e8edf4; }
+  .customers-table th, .customers-table td { padding: var(--space-1) 0; border: 0; }
+  .customers-table td::before { content: attr(data-label) ": "; color: #64748b; font-weight: 650; }
+  .customer-relationship-grid { grid-template-columns: minmax(0, 1fr); }
+  .customers-search > div { align-items: stretch; flex-direction: column; }
   .orders-workspace--selected .orders-list { display: none; }
   .orders-list, .orders-detail { padding: var(--space-4); }
   .orders-facts { grid-template-columns: minmax(0, 1fr); }

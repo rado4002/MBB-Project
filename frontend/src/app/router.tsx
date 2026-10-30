@@ -17,6 +17,7 @@ import { StockPage } from '../features/stock/StockPage'
 import { OrdersPage } from '../features/orders/OrdersPage'
 import { FxPage } from '../features/fx/FxPage'
 import { CustomerProfilePage } from '../features/customers/CustomerProfilePage'
+import { CustomersPage } from '../features/customers/CustomersPage'
 
 function EntryRoute() {
   const auth = useAuth()
@@ -68,6 +69,12 @@ function CustomerRoute() {
     ? <CustomerProfilePage /> : <Navigate to="/inbox" replace />
 }
 
+function CustomersRoute() {
+  const auth = useAuth()
+  return auth.session?.capabilities.includes('customer.read')
+    ? <CustomersPage /> : <Navigate to="/inbox" replace />
+}
+
 export function AppRouter() {
   return (
     <Routes>
@@ -101,6 +108,8 @@ export function AppRouter() {
           <Route path="orders" element={<OrdersRoute />} />
           <Route path="orders/:orderId" element={<OrdersRoute />} />
           <Route path="fx" element={<FxRoute />} />
+          <Route path="customers" element={<CustomersRoute />} />
+          <Route path="customers/ref/:customerReference" element={<CustomerRoute />} />
           <Route path="customers/:conversationId" element={<CustomerRoute />} />
         </Route>
       </Route>

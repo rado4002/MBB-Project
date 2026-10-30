@@ -3,9 +3,10 @@ import { requestJson } from './client'
 export type CustomerLanguage = 'lingala' | 'french' | 'swahili'
 
 export interface BusinessCustomerProfile {
-  conversation_id: string
+  customer_id: string
+  conversation_id: string | null
   display_name: string | null
-  phone_masked: string
+  phone_number: string
   city: string
   preferred_language: CustomerLanguage
   opted_out: boolean
@@ -26,6 +27,23 @@ export interface BusinessCustomerProfile {
   }>
 }
 
+export interface BusinessCustomerListItem {
+  customer_id: string
+  customer_reference: string
+  conversation_id: string | null
+  display_name: string | null
+  phone_number: string
+  communication_channel: 'whatsapp' | null
+  acquisition_source: string | null
+  acquisition_source_provenance: 'earliest_recorded_lead' | null
+  last_interaction_at: string
+}
+
+export interface BusinessCustomerListResponse {
+  items: BusinessCustomerListItem[]
+  has_more: boolean
+}
+
 export interface CustomerProfileSnapshot {
   display_name: string | null
   city: string
@@ -35,12 +53,31 @@ export interface CustomerProfileSnapshot {
 export function createBusinessCustomersClient(onSessionExpired: () => void) {
   const base = '/api/v1/business/customers'
   return {
+    list: (query: string, offset: number, signal: AbortSignal) => {
+      const params = new URLSearchParams({ offset: String(offset) })
+      if (query) params.set('q', query)
+      return requestJson<BusinessCustomerListResponse>(
+        `${base}?${params.toString()}`,
+        { signal },
+        onSessionExpired,
+      )
+    },
     detail: (conversationId: string, signal: AbortSignal) =>
       requestJson<BusinessCustomerProfile>(
         `${base}/${encodeURIComponent(conversationId)}`,
         { signal },
         onSessionExpired,
       ),
+    detailByReference: (customerReference: string, conversationId: string, signal: AbortSignal) => {
+      const query = new URLSearchParams()
+      if (conversationId) query.set('conversation_id', conversationId)
+      const suffix = query.toString() ? `?${query.toString()}` : ''
+      return requestJson<BusinessCustomerProfile>(
+        `${base}/by-reference/${encodeURIComponent(customerReference)}${suffix}`,
+        { signal },
+        onSessionExpired,
+      )
+    },
     update: (
       conversationId: string,
       expected: CustomerProfileSnapshot,
