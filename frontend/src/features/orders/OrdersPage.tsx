@@ -163,7 +163,14 @@ function currentOperationalState(detail: OrderDetail) {
   if (detail.status === 'delivered') return 'Customer-reported receipt recorded'
   if (detail.status === 'delivering') return deliveryReadiness(detail.delivery)
   if (detail.status === 'preparing') {
-    return detail.dispatch.eligible ? 'Ready for authorized dispatch' : dispatchStockReadiness(detail.dispatch)
+    if (detail.dispatch.payment_state !== 'verified') return paymentReadiness(detail.dispatch.payment_state)
+    if (detail.dispatch.allocation_state !== 'full_unconsumed' || detail.dispatch.inventory_state !== 'ready') {
+      return dispatchStockReadiness(detail.dispatch)
+    }
+    if (detail.dispatch.delivery_method_state !== 'supported') {
+      return 'Only moto taxi Orders can use this dispatch workflow'
+    }
+    return detail.dispatch.eligible ? 'Ready for authorized dispatch' : 'Dispatch is not eligible'
   }
   if (detail.status === 'confirmed') {
     if (detail.preparation.payment_state !== 'verified') return paymentReadiness(detail.preparation.payment_state)
@@ -820,15 +827,19 @@ export function OrdersPage() {
           <Link data-order-id={order.order_id} onClick={() => { lastSelectedOrder.current = order.order_id }}
             to={`/business/orders/${encodeURIComponent(order.order_id)}?${new URLSearchParams({ status: status ?? 'all', offset: String(offset) })}`} aria-current={order.order_id === orderId ? 'page' : undefined}>
             <strong>Order {order.order_id.slice(0, 8)}</strong>
-            <span>{order.first_product_name ?? 'Product unavailable'} · {order.item_count} {order.item_count === 1 ? 'item' : 'items'}</span>
-            <span>{formatAmount(order.total_cdf, order.currency)} · <time dateTime={order.created_at}>{formatDate(order.created_at)}</time></span>
+            <span>{order.first_product_name ?? 'Product unavailable'}</span>
+            <span className="orders-queue-meta">
+              <span><small>Items</small><strong>{order.item_count}</strong></span>
+              <span><small>Accepted total</small><strong>{formatAmount(order.total_cdf, order.currency)}</strong></span>
+            </span>
+            <time dateTime={order.created_at}>{formatDate(order.created_at)}</time>
             <dl className="orders-queue-states">
               <div><dt>Order</dt><dd>{humanize(order.status)}</dd></div>
               <div><dt>Payment</dt><dd>{queuePayment(order.readiness.payment_state)}</dd></div>
               <div><dt>Stock</dt><dd>{queueStock(order)}</dd></div>
               <div><dt>Delivery</dt><dd>{queueDelivery(order)}</dd></div>
-              {order.readiness.issue_state === 'open' && <div className="orders-state-alert"><dt>Issue</dt><dd>Open</dd></div>}
             </dl>
+            {order.readiness.issue_state === 'open' && <span className="orders-queue-alert">Open delivery issue</span>}
           </Link>
         </li>)}</ul>}
         {list && <div className="orders-pagination">
@@ -842,22 +853,20 @@ export function OrdersPage() {
         {detailError && <div role="alert"><p>{detailError}</p><button className="button button--secondary" onClick={() => void loadDetail(new AbortController().signal)}>Retry</button></div>}
         {detail && <>
           <h2 ref={detailHeading} tabIndex={-1}>Order {detail.order_id.slice(0, 8)}</h2>
-          <dl className="orders-facts">
-            <div><dt>Order status</dt><dd>{humanize(detail.status)}</dd></div>
-            <div><dt>Accepted total</dt><dd>{formatAmount(detail.total_cdf, detail.currency)}</dd></div>
-            <div><dt>Created</dt><dd><time dateTime={detail.created_at}>{formatDate(detail.created_at)}</time></dd></div>
-            <div><dt>Recorded zone</dt><dd>{detail.delivery_zone}</dd></div>
-            {detail.delivered_at && <div><dt>Customer message received</dt><dd><time dateTime={detail.delivered_at}>{formatDate(detail.delivered_at)}</time></dd></div>}
-          </dl>
           <section className="orders-current-state" aria-labelledby="order-current-state-heading">
             <h3 id="order-current-state-heading">Current operational state</h3>
-            <p>Current focus — {currentOperationalState(detail)}</p>
-            <dl className="orders-state-summary">
-              <div><dt>Order</dt><dd>{humanize(detail.status)}</dd></div>
+            <p className="orders-current-focus">Current focus — {currentOperationalState(detail)}</p>
+            <dl className="orders-detail-summary">
+              <div><dt>Status</dt><dd>{humanize(detail.status)}</dd></div>
+              <div><dt>Accepted total</dt><dd>{formatAmount(detail.total_cdf, detail.currency)}</dd></div>
+              <div><dt>Items</dt><dd>{detail.item_count}</dd></div>
+              <div><dt>Recorded zone</dt><dd>{detail.delivery_zone}</dd></div>
               <div><dt>Payment</dt><dd>{queuePayment(detail.preparation.payment_state)}</dd></div>
               <div><dt>Stock</dt><dd>{detailStock(detail)}</dd></div>
               <div><dt>Delivery</dt><dd>{detailDelivery(detail)}</dd></div>
               <div><dt>Issue</dt><dd>{detail.delivery.issue_state === 'open' ? 'Open' : 'None open'}</dd></div>
+              <div><dt>Created</dt><dd><time dateTime={detail.created_at}>{formatDate(detail.created_at)}</time></dd></div>
+              {detail.delivered_at && <div><dt>Customer message received</dt><dd><time dateTime={detail.delivered_at}>{formatDate(detail.delivered_at)}</time></dd></div>}
             </dl>
             {prepareNotice && detail.status !== 'confirmed' && <p role="status">{prepareNotice}</p>}
             {dispatchNotice && detail.status !== 'preparing' && <p role="status">{dispatchNotice}</p>}
@@ -867,6 +876,21 @@ export function OrdersPage() {
               <button className="button button--secondary" onClick={() => {
                 setCancelOpen(true); setCancelError(null); setCancelNotice(null)
               }}>Cancel Order</button>
+            </div>}
+            {canPrepare && detail.preparation.eligible && !prepareOpen && <div className="orders-actions">
+              <button className="button button--primary" onClick={() => {
+                setPrepareOpen(true); setPrepareError(null); setPrepareNotice(null)
+              }}>Prepare Order</button>
+            </div>}
+            {canDispatch && detail.dispatch.eligible && !dispatchOpen && <div className="orders-actions">
+              <button className="button button--primary" onClick={() => {
+                setDispatchOpen(true); setDispatchError(null); setDispatchNotice(null)
+              }}>Dispatch Order</button>
+            </div>}
+            {canConfirmDelivery && detail.delivery.eligible && !deliveryOpen && <div className="orders-actions">
+              <button className="button button--primary" onClick={() => {
+                setDeliveryOpen(true); setDeliveryError(null); setDeliveryNotice(null)
+              }}>Confirm customer receipt</button>
             </div>}
             {canCancel && detail.status === 'pending' && cancelOpen && <form className="orders-cancellation" onSubmit={(event) => void submitCancellation(event)}>
               <h3>Cancel pending Order</h3>
@@ -917,16 +941,14 @@ export function OrdersPage() {
             <h3 id="order-preparation-heading">Preparation readiness</h3>
             {prepareError && <p role="alert">{prepareError}</p>}
             {prepareNotice && <p role="status">{prepareNotice}</p>}
-            <dl className="orders-facts">
-              <div><dt>Payment verification</dt><dd>{paymentReadiness(detail.preparation.payment_state)}</dd></div>
-              <div><dt>Stock allocation</dt><dd>{allocationReadiness(detail.preparation)}</dd></div>
-              <div><dt>Eligibility</dt><dd>{detail.preparation.eligible ? 'Ready to prepare' : 'Not eligible'}</dd></div>
-            </dl>
-            {canPrepare && detail.preparation.eligible && !prepareOpen && <div className="orders-actions">
-              <button className="button button--primary" onClick={() => {
-                setPrepareOpen(true); setPrepareError(null); setPrepareNotice(null)
-              }}>Prepare Order</button>
-            </div>}
+            <details className="orders-evidence-disclosure">
+              <summary tabIndex={0}>Payment and Stock evidence</summary>
+              <dl className="orders-facts">
+                <div><dt>Payment verification</dt><dd>{paymentReadiness(detail.preparation.payment_state)}</dd></div>
+                <div><dt>Stock allocation</dt><dd>{allocationReadiness(detail.preparation)}</dd></div>
+                <div><dt>Eligibility</dt><dd>{detail.preparation.eligible ? 'Ready to prepare' : 'Not eligible'}</dd></div>
+              </dl>
+            </details>
             {canPrepare && detail.preparation.eligible && prepareOpen && <form className="orders-preparation-confirm" onSubmit={(event) => void submitPreparation(event)}>
               <h3>Begin Order preparation?</h3>
               <p>This changes the Order from confirmed to preparing. It does not dispatch, deliver, or settle Payment.</p>
@@ -942,17 +964,15 @@ export function OrdersPage() {
             <h3 id="order-dispatch-heading">Dispatch readiness</h3>
             {dispatchError && <p role="alert">{dispatchError}</p>}
             {dispatchNotice && <p role="status">{dispatchNotice}</p>}
-            <dl className="orders-facts">
-              <div><dt>Payment verification</dt><dd>{paymentReadiness(detail.dispatch.payment_state)}</dd></div>
-              <div><dt>Allocated Stock</dt><dd>{dispatchStockReadiness(detail.dispatch)}</dd></div>
-              <div><dt>Delivery method</dt><dd>{detail.dispatch.delivery_method_state === 'supported' ? 'Moto taxi supported' : 'Not supported for dispatch'}</dd></div>
-              <div><dt>Eligibility</dt><dd>{detail.dispatch.eligible ? 'Ready to dispatch' : 'Not eligible'}</dd></div>
-            </dl>
-            {canDispatch && detail.dispatch.eligible && !dispatchOpen && <div className="orders-actions">
-              <button className="button button--primary" onClick={() => {
-                setDispatchOpen(true); setDispatchError(null); setDispatchNotice(null)
-              }}>Dispatch Order</button>
-            </div>}
+            <details className="orders-evidence-disclosure">
+              <summary tabIndex={0}>Payment, Stock and dispatch evidence</summary>
+              <dl className="orders-facts">
+                <div><dt>Payment verification</dt><dd>{paymentReadiness(detail.dispatch.payment_state)}</dd></div>
+                <div><dt>Allocated Stock</dt><dd>{dispatchStockReadiness(detail.dispatch)}</dd></div>
+                <div><dt>Delivery method</dt><dd>{detail.dispatch.delivery_method_state === 'supported' ? 'Moto taxi supported' : 'Not supported for dispatch'}</dd></div>
+                <div><dt>Eligibility</dt><dd>{detail.dispatch.eligible ? 'Ready to dispatch' : 'Not eligible'}</dd></div>
+              </dl>
+            </details>
             {canDispatch && detail.dispatch.eligible && dispatchOpen && <form className="orders-dispatch-confirm" onSubmit={(event) => void submitDispatch(event)}>
               <h3>Confirm physical dispatch</h3>
               <p>This deducts the allocated items from physical Stock and changes the Order to delivering. It does not confirm customer receipt.</p>
@@ -1015,11 +1035,6 @@ export function OrdersPage() {
                 </div>
               </article>)}
               {detail.delivery.evidence_has_more && <p>Only the 20 most recent eligible messages are shown. Open the associated Inbox conversation for full context.</p>}
-            </div>}
-            {canConfirmDelivery && detail.delivery.eligible && !deliveryOpen && <div className="orders-actions">
-              <button className="button button--primary" onClick={() => {
-                setDeliveryOpen(true); setDeliveryError(null); setDeliveryNotice(null)
-              }}>Confirm customer receipt</button>
             </div>}
             {canConfirmDelivery && detail.delivery.eligible && deliveryOpen && <form className="orders-delivery-confirm" onSubmit={(event) => void submitDelivery(event)}>
               <h3>Confirm delivery from customer evidence</h3>

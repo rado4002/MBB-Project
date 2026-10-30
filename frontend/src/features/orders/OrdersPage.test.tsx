@@ -67,13 +67,20 @@ describe('read-only Business Orders', () => {
     setup()
     const user = userEvent.setup()
     renderApp('/business/orders')
-    await user.click(await screen.findByRole('link', { name: /Order 11111111.*Fictional Air Fryer/i }))
+    const queueLink = await screen.findByRole('link', { name: /Order 11111111.*Fictional Air Fryer/i })
+    expect(within(queueLink).getByText('Items')).toBeInTheDocument()
+    expect(within(queueLink).getByText('1')).toBeInTheDocument()
+    expect(within(queueLink).getByText('Accepted total')).toBeInTheDocument()
+    expect(within(queueLink).getByText('CDF 309,400.00')).toBeInTheDocument()
+    expect(within(queueLink).getAllByRole('term')).toHaveLength(4)
+    await user.click(queueLink)
     const region = await screen.findByRole('region', { name: 'Order detail' })
     expect(await within(region).findAllByText('Pending')).not.toHaveLength(0)
     expect(within(region).getByText('CDF 309,400.00')).toBeInTheDocument()
     expect(within(region).getByText(/Accepted USD price USD 55.25/)).toBeInTheDocument()
     expect(within(region).getByText(/Accepted USD\/CDF rate 2800/)).toBeInTheDocument()
     expect(within(region).getByText(/Current focus.*No Payment recorded/)).toBeInTheDocument()
+    expect(region.querySelector('.orders-current-state')?.nextElementSibling).toHaveClass('orders-commercial')
     expect(within(region).getByRole('link', { name: 'Open associated Inbox conversation' })).toHaveAttribute('href', `/inbox/${conversationId}`)
     expect(within(region).queryByRole('button')).not.toBeInTheDocument()
   })
@@ -107,6 +114,14 @@ describe('read-only Business Orders', () => {
     renderApp(`/business/orders/${orderId}`)
     const region = await screen.findByRole('region', { name: 'Order detail' })
     expect(await within(region).findByText('Ready to prepare')).toBeInTheDocument()
+    const evidenceSummary = within(region).getByText('Payment and Stock evidence')
+    const evidenceDisclosure = evidenceSummary.closest('details')
+    expect(evidenceDisclosure).not.toHaveAttribute('open')
+    expect(within(region).getByRole('button', { name: 'Prepare Order' })).toBeVisible()
+    await user.click(evidenceSummary)
+    expect(evidenceDisclosure).toHaveAttribute('open')
+    evidenceSummary.focus()
+    expect(evidenceSummary).toHaveFocus()
     expect(within(region).getByText('Verified completed Payment matches the accepted Order')).toBeInTheDocument()
     expect(within(region).getByText('Full allocation · 2 of 2')).toBeInTheDocument()
     await expectAccessible(document.body)
@@ -242,6 +257,25 @@ describe('read-only Business Orders', () => {
       csrf: 'dispatch-csrf',
     })
     expect(submissions[0]?.key).toMatch(/^[0-9a-f-]{36}$/)
+  })
+
+  it('keeps an unsupported dispatch blocker visible while supporting evidence is collapsed', async () => {
+    setup(conversationId, 'administrator')
+    server.use(http.get(`${base}/${orderId}`, () => HttpResponse.json({
+      ...detail,
+      status: 'preparing',
+      preparation: { ...detail.preparation, payment_state: 'verified' },
+      dispatch: {
+        eligible: false, order_state: 'preparing', payment_state: 'verified',
+        allocation_state: 'full_unconsumed', inventory_state: 'ready',
+        delivery_method_state: 'unsupported', required_quantity: 2,
+      },
+    })))
+    renderApp(`/business/orders/${orderId}`)
+    const region = await screen.findByRole('region', { name: 'Order detail' })
+    expect(await within(region).findByText(/Current focus.*Only moto taxi Orders/)).toBeInTheDocument()
+    expect(within(region).getByText('Payment, Stock and dispatch evidence').closest('details')).not.toHaveAttribute('open')
+    expect(within(region).queryByRole('button', { name: 'Dispatch Order' })).not.toBeInTheDocument()
   })
 
   it('lets an Administrator select customer evidence and attest reported receipt', async () => {
