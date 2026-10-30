@@ -59,7 +59,52 @@ function formatDate(value: string) {
 }
 
 function humanize(value: string) {
-  return value.replaceAll('_', ' ')
+  const words = value.replaceAll('_', ' ')
+  return words.charAt(0).toUpperCase() + words.slice(1)
+}
+
+function queuePayment(state: OrderQueueItem['readiness']['payment_state'] | OrderDetail['preparation']['payment_state']) {
+  if (state === 'verified') return 'Verified'
+  if (state === 'missing') return 'Not recorded'
+  if (state === 'not_verified') return 'Not verified'
+  if (state === 'mismatch') return 'Mismatch'
+  return 'Unavailable'
+}
+
+function queueStock(item: OrderQueueItem) {
+  if (item.readiness.stock_state === 'consumed') return 'Dispatched'
+  if (item.readiness.stock_state === 'full_unconsumed') {
+    return item.readiness.inventory_state === 'ready' ? 'Allocated · ready' : 'Allocated · conflict'
+  }
+  if (item.readiness.stock_state === 'missing') return 'Not allocated'
+  if (item.readiness.stock_state === 'mismatch') return 'Allocation mismatch'
+  return 'Unsupported'
+}
+
+function queueDelivery(item: OrderQueueItem) {
+  if (item.readiness.delivery_state === 'delivered') return 'Delivered'
+  if (item.readiness.delivery_state === 'delivering') {
+    return item.readiness.dispatch_state === 'matched' ? 'In delivery' : 'Dispatch evidence missing'
+  }
+  return 'Not started'
+}
+
+function detailStock(detail: OrderDetail) {
+  if (detail.dispatch.allocation_state === 'consumed') return 'Dispatched'
+  if (detail.dispatch.allocation_state === 'full_unconsumed') {
+    return detail.dispatch.inventory_state === 'ready' ? 'Allocated · ready' : 'Allocated · conflict'
+  }
+  if (detail.dispatch.allocation_state === 'missing') return 'Not allocated'
+  if (detail.dispatch.allocation_state === 'mismatch') return 'Allocation mismatch'
+  return 'Unsupported'
+}
+
+function detailDelivery(detail: OrderDetail) {
+  if (detail.delivery.order_state === 'delivered') return 'Delivered'
+  if (detail.delivery.order_state === 'delivering') {
+    return detail.delivery.dispatch_state === 'matched' ? 'In delivery' : 'Dispatch evidence missing'
+  }
+  return 'Not started'
 }
 
 function readError(failure: unknown) {
@@ -110,6 +155,21 @@ function deliveryReadiness(delivery: OrderDetail['delivery']) {
   if (delivery.association_state === 'ambiguous') return 'More than one delivering Order is associated with this conversation'
   if (delivery.evidence_state === 'missing') return 'No eligible post-dispatch inbound customer text has been received'
   return 'Customer receipt evidence is ready for Administrator review'
+}
+
+function currentOperationalState(detail: OrderDetail) {
+  if (detail.delivery.issue_state === 'open') return 'Open delivery issue requires review'
+  if (detail.status === 'cancelled') return 'Order cancelled'
+  if (detail.status === 'delivered') return 'Customer-reported receipt recorded'
+  if (detail.status === 'delivering') return deliveryReadiness(detail.delivery)
+  if (detail.status === 'preparing') {
+    return detail.dispatch.eligible ? 'Ready for authorized dispatch' : dispatchStockReadiness(detail.dispatch)
+  }
+  if (detail.status === 'confirmed') {
+    if (detail.preparation.payment_state !== 'verified') return paymentReadiness(detail.preparation.payment_state)
+    return detail.preparation.eligible ? 'Ready for authorized preparation' : allocationReadiness(detail.preparation)
+  }
+  return paymentReadiness(detail.preparation.payment_state)
 }
 
 export function OrdersPage() {
@@ -178,6 +238,8 @@ export function OrdersPage() {
   const issueAttempt = useRef<{ signature: string; key: string } | null>(null)
   const issueCloseAttempt = useRef<{ signature: string; key: string } | null>(null)
   const issueRequest = useRef<AbortController | null>(null)
+  const detailHeading = useRef<HTMLHeadingElement | null>(null)
+  const lastSelectedOrder = useRef<string | null>(null)
   const canCancel = auth.session?.capabilities.includes('order.cancel') ?? false
   const canPrepare = auth.session?.capabilities.includes('order.prepare') ?? false
   const canDispatch = auth.session?.capabilities.includes('order.dispatch') ?? false
@@ -236,6 +298,12 @@ export function OrdersPage() {
     void loadDetail(controller.signal)
     return () => controller.abort()
   }, [loadDetail])
+  useEffect(() => {
+    if (orderId && detail) detailHeading.current?.focus()
+    if (!orderId && list && lastSelectedOrder.current) {
+      document.querySelector<HTMLElement>(`[data-order-id="${lastSelectedOrder.current}"]`)?.focus()
+    }
+  }, [detail, list, orderId])
   const submitCancellation = async (event: FormEvent) => {
     event.preventDefault()
     if (!detail || !canCancel || detail.status !== 'pending' || !cancelReason || cancelBusy) return
@@ -330,6 +398,13 @@ export function OrdersPage() {
         ...detail,
         status: result.status,
         updated_at: result.updated_at,
+        readiness: {
+          ...detail.readiness,
+          stock_state: 'consumed',
+          inventory_state: 'conflict',
+          dispatch_state: 'matched',
+          delivery_state: 'delivering',
+        },
         preparation: { ...detail.preparation, eligible: false, order_state: 'not_confirmed' },
         dispatch: {
           ...detail.dispatch,
@@ -343,7 +418,11 @@ export function OrdersPage() {
       setList((current) => current ? {
         ...current,
         items: current.items.map((item) => item.order_id === result.order_id
-          ? { ...item, status: result.status, updated_at: result.updated_at }
+          ? { ...item, status: result.status, updated_at: result.updated_at, readiness: {
+            ...item.readiness,
+            stock_state: 'consumed', inventory_state: 'conflict',
+            dispatch_state: 'matched', delivery_state: 'delivering',
+          } }
           : item),
       } : current)
       setPrepareOpen(false)
@@ -530,6 +609,7 @@ export function OrdersPage() {
         status: result.status,
         delivered_at: result.delivered_at,
         updated_at: result.updated_at,
+        readiness: { ...detail.readiness, delivery_state: 'delivered' },
         delivery: {
           ...detail.delivery,
           eligible: false,
@@ -542,7 +622,9 @@ export function OrdersPage() {
       setList((current) => current ? {
         ...current,
         items: current.items.map((item) => item.order_id === result.order_id
-          ? { ...item, status: result.status, updated_at: result.updated_at }
+          ? { ...item, status: result.status, updated_at: result.updated_at, readiness: {
+            ...item.readiness, delivery_state: 'delivered',
+          } }
           : item),
       } : current)
       setDeliveryOpen(false); setSelectedEvidence(''); setDeliveryAttested(false)
@@ -728,17 +810,25 @@ export function OrdersPage() {
       <section className="orders-list" aria-label="Orders queue">
         <label htmlFor="orders-status">Order status</label>
         <select id="orders-status" value={status ?? 'all'} onChange={(event) => chooseStatus(event.target.value)}>
-          {statuses.map((value) => <option key={value} value={value}>{value}</option>)}
+          {statuses.map((value) => <option key={value} value={value}>{humanize(value)}</option>)}
           <option value="all">All statuses</option>
         </select>
         {!list && !listError && <p role="status">Loading Orders…</p>}
         {listError && <div role="alert"><p>{listError}</p><button className="button button--secondary" onClick={() => void loadList(new AbortController().signal)}>Retry</button></div>}
         {list && list.items.length === 0 && <p>No Orders found.</p>}
         {list && <ul>{list.items.map((order) => <li key={order.order_id}>
-          <Link to={`/business/orders/${encodeURIComponent(order.order_id)}?${new URLSearchParams({ status: status ?? 'all', offset: String(offset) })}`} aria-current={order.order_id === orderId ? 'page' : undefined}>
-            <strong>{order.first_product_name ?? `Order ${order.order_id.slice(0, 8)}`}</strong>
-            <span>{order.status} · {formatAmount(order.total_cdf, order.currency)}</span>
-            <time dateTime={order.created_at}>{formatDate(order.created_at)}</time>
+          <Link data-order-id={order.order_id} onClick={() => { lastSelectedOrder.current = order.order_id }}
+            to={`/business/orders/${encodeURIComponent(order.order_id)}?${new URLSearchParams({ status: status ?? 'all', offset: String(offset) })}`} aria-current={order.order_id === orderId ? 'page' : undefined}>
+            <strong>Order {order.order_id.slice(0, 8)}</strong>
+            <span>{order.first_product_name ?? 'Product unavailable'} · {order.item_count} {order.item_count === 1 ? 'item' : 'items'}</span>
+            <span>{formatAmount(order.total_cdf, order.currency)} · <time dateTime={order.created_at}>{formatDate(order.created_at)}</time></span>
+            <dl className="orders-queue-states">
+              <div><dt>Order</dt><dd>{humanize(order.status)}</dd></div>
+              <div><dt>Payment</dt><dd>{queuePayment(order.readiness.payment_state)}</dd></div>
+              <div><dt>Stock</dt><dd>{queueStock(order)}</dd></div>
+              <div><dt>Delivery</dt><dd>{queueDelivery(order)}</dd></div>
+              {order.readiness.issue_state === 'open' && <div className="orders-state-alert"><dt>Issue</dt><dd>Open</dd></div>}
+            </dl>
           </Link>
         </li>)}</ul>}
         {list && <div className="orders-pagination">
@@ -750,27 +840,83 @@ export function OrdersPage() {
         <Link className="orders-back" to={listPath}>Back to Orders</Link>
         {!detail && !detailError && <p role="status">Loading Order…</p>}
         {detailError && <div role="alert"><p>{detailError}</p><button className="button button--secondary" onClick={() => void loadDetail(new AbortController().signal)}>Retry</button></div>}
-        {cancelError && <p role="alert">{cancelError}</p>}
-        {cancelNotice && <p role="status">{cancelNotice}</p>}
-        {prepareError && <p role="alert">{prepareError}</p>}
-        {prepareNotice && <p role="status">{prepareNotice}</p>}
-        {dispatchError && <p role="alert">{dispatchError}</p>}
-        {dispatchNotice && <p role="status">{dispatchNotice}</p>}
-        {deliveryError && <p role="alert">{deliveryError}</p>}
-        {deliveryNotice && <p role="status">{deliveryNotice}</p>}
-        {issueError && <p role="alert">{issueError}</p>}
-        {issueNotice && <p role="status">{issueNotice}</p>}
         {detail && <>
-          <h2>Order {detail.order_id.slice(0, 8)}</h2>
+          <h2 ref={detailHeading} tabIndex={-1}>Order {detail.order_id.slice(0, 8)}</h2>
           <dl className="orders-facts">
-            <div><dt>Status</dt><dd>{detail.status}</dd></div>
+            <div><dt>Order status</dt><dd>{humanize(detail.status)}</dd></div>
             <div><dt>Accepted total</dt><dd>{formatAmount(detail.total_cdf, detail.currency)}</dd></div>
             <div><dt>Created</dt><dd><time dateTime={detail.created_at}>{formatDate(detail.created_at)}</time></dd></div>
             <div><dt>Recorded zone</dt><dd>{detail.delivery_zone}</dd></div>
             {detail.delivered_at && <div><dt>Customer message received</dt><dd><time dateTime={detail.delivered_at}>{formatDate(detail.delivered_at)}</time></dd></div>}
           </dl>
-          <section className="orders-preparation" aria-labelledby="order-preparation-heading">
+          <section className="orders-current-state" aria-labelledby="order-current-state-heading">
+            <h3 id="order-current-state-heading">Current operational state</h3>
+            <p>Current focus — {currentOperationalState(detail)}</p>
+            <dl className="orders-state-summary">
+              <div><dt>Order</dt><dd>{humanize(detail.status)}</dd></div>
+              <div><dt>Payment</dt><dd>{queuePayment(detail.preparation.payment_state)}</dd></div>
+              <div><dt>Stock</dt><dd>{detailStock(detail)}</dd></div>
+              <div><dt>Delivery</dt><dd>{detailDelivery(detail)}</dd></div>
+              <div><dt>Issue</dt><dd>{detail.delivery.issue_state === 'open' ? 'Open' : 'None open'}</dd></div>
+            </dl>
+            {prepareNotice && detail.status !== 'confirmed' && <p role="status">{prepareNotice}</p>}
+            {dispatchNotice && detail.status !== 'preparing' && <p role="status">{dispatchNotice}</p>}
+            {cancelError && <p role="alert">{cancelError}</p>}
+            {cancelNotice && <p role="status">{cancelNotice}</p>}
+            {canCancel && detail.status === 'pending' && !cancelOpen && <div className="orders-actions">
+              <button className="button button--secondary" onClick={() => {
+                setCancelOpen(true); setCancelError(null); setCancelNotice(null)
+              }}>Cancel Order</button>
+            </div>}
+            {canCancel && detail.status === 'pending' && cancelOpen && <form className="orders-cancellation" onSubmit={(event) => void submitCancellation(event)}>
+              <h3>Cancel pending Order</h3>
+              <p>This records an authoritative cancellation. It does not change Payment or Stock.</p>
+              <label htmlFor="order-cancellation-reason">Cancellation reason</label>
+              <select id="order-cancellation-reason" required value={cancelReason} disabled={cancelBusy}
+                onChange={(event) => {
+                  setCancelReason(event.target.value as OrderCancellationReason | '')
+                  attempt.current = null
+                }}>
+                <option value="">Select a reason</option>
+                {cancellationReasons.map((reason) => <option key={reason.value} value={reason.value}>{reason.label}</option>)}
+              </select>
+              <div className="orders-actions">
+                <button className="button button--primary" disabled={cancelBusy || !cancelReason || reauth}>Confirm cancellation</button>
+                <button type="button" className="button button--secondary" disabled={cancelBusy} onClick={() => {
+                  setCancelOpen(false); setCancelReason(''); setCancelError(null); setReauth(false); setPassword(''); attempt.current = null
+                }}>Keep pending</button>
+              </div>
+            </form>}
+            {canCancel && cancelOpen && reauth && <form className="orders-cancellation" onSubmit={(event) => void confirmPassword(event)}>
+              <PasswordField id="order-cancellation-password" label="Confirm Administrator password" autoComplete="current-password"
+                value={password} disabled={cancelBusy} required onChange={(event) => setPassword(event.target.value)} />
+              <button className="button button--primary" disabled={cancelBusy}>Confirm password</button>
+            </form>}
+          </section>
+          <section className="orders-commercial" aria-labelledby="order-commercial-heading">
+            <h3 id="order-commercial-heading">Accepted commercial snapshot</h3>
+            <ul className="orders-lines">{detail.items.map((line, index) => <li key={`${line.product_id}-${index}`}>
+              <strong>{line.product_name ?? `Product ${line.product_id}`}{line.model_label ? ` · ${line.model_label}` : ''}</strong>
+              <span>Quantity {line.quantity} · {formatAmount(line.unit_price_cdf, 'CDF')} per unit</span>
+              {line.unit_price_usd && <span>Accepted USD price {formatAmount(line.unit_price_usd, 'USD')}</span>}
+              {line.usd_to_cdf_rate && <span>Accepted USD/CDF rate {line.usd_to_cdf_rate}</span>}
+              <div className="orders-links">
+                {uuidPattern.test(line.product_id) && <Link to={`/business/products/${line.product_id}`}>Current Product</Link>}
+                {line.sellable_item_id && <Link to={`/business/stock?item=${line.sellable_item_id}`}>Current Stock</Link>}
+              </div>
+            </li>)}</ul>
+            <p className="orders-current-note">Product and Stock links show current facts, which may differ from this accepted snapshot.</p>
+            {detail.conversation_id && <nav className="orders-related-links" aria-label="Related customer records">
+              <Link to={`/business/customers/${detail.conversation_id}`}>Open Customer profile</Link>
+              <Link to={`/inbox/${detail.conversation_id}`}>Open associated Inbox conversation</Link>
+            </nav>}
+          </section>
+          {(detail.status === 'confirmed' || detail.status === 'preparing' || detail.status === 'delivering' || detail.status === 'delivered' || detail.delivery_issues.length > 0)
+            && <h3 className="orders-lifecycle-heading">Lifecycle details</h3>}
+          {detail.status === 'confirmed' && <section className="orders-preparation" aria-labelledby="order-preparation-heading">
             <h3 id="order-preparation-heading">Preparation readiness</h3>
+            {prepareError && <p role="alert">{prepareError}</p>}
+            {prepareNotice && <p role="status">{prepareNotice}</p>}
             <dl className="orders-facts">
               <div><dt>Payment verification</dt><dd>{paymentReadiness(detail.preparation.payment_state)}</dd></div>
               <div><dt>Stock allocation</dt><dd>{allocationReadiness(detail.preparation)}</dd></div>
@@ -791,9 +937,11 @@ export function OrdersPage() {
                 }}>Keep confirmed</button>
               </div>
             </form>}
-          </section>
-          <section className="orders-dispatch" aria-labelledby="order-dispatch-heading">
+          </section>}
+          {detail.status === 'preparing' && <section className="orders-dispatch" aria-labelledby="order-dispatch-heading">
             <h3 id="order-dispatch-heading">Dispatch readiness</h3>
+            {dispatchError && <p role="alert">{dispatchError}</p>}
+            {dispatchNotice && <p role="status">{dispatchNotice}</p>}
             <dl className="orders-facts">
               <div><dt>Payment verification</dt><dd>{paymentReadiness(detail.dispatch.payment_state)}</dd></div>
               <div><dt>Allocated Stock</dt><dd>{dispatchStockReadiness(detail.dispatch)}</dd></div>
@@ -829,9 +977,11 @@ export function OrdersPage() {
                 value={dispatchPassword} disabled={dispatchBusy} required onChange={(event) => setDispatchPassword(event.target.value)} />
               <button className="button button--primary" disabled={dispatchBusy}>Confirm password</button>
             </form>}
-          </section>
-          <section className="orders-delivery" aria-labelledby="order-delivery-heading">
+          </section>}
+          {(detail.status === 'delivering' || detail.status === 'delivered') && <section className="orders-delivery" aria-labelledby="order-delivery-heading">
             <h3 id="order-delivery-heading">Delivery confirmation</h3>
+            {deliveryError && <p role="alert">{deliveryError}</p>}
+            {deliveryNotice && <p role="status">{deliveryNotice}</p>}
             <p className="orders-current-note">Delivery confirmation records when MBB received the customer&apos;s message. It is not the exact physical handoff time.</p>
             <dl className="orders-facts">
               <div><dt>Dispatch evidence</dt><dd>{detail.delivery.dispatch_state === 'matched' ? 'Matched immutable dispatch record' : 'Not available'}</dd></div>
@@ -892,9 +1042,11 @@ export function OrdersPage() {
                 value={deliveryPassword} disabled={deliveryBusy} required onChange={(event) => setDeliveryPassword(event.target.value)} />
               <button className="button button--primary" disabled={deliveryBusy}>Confirm password</button>
             </form>}
-          </section>
-          <section className="orders-delivery-issues" aria-labelledby="order-delivery-issues-heading">
+          </section>}
+          {(detail.status === 'delivering' || detail.status === 'delivered' || detail.delivery_issues.length > 0) && <section className="orders-delivery-issues" aria-labelledby="order-delivery-issues-heading">
             <h3 id="order-delivery-issues-heading">Delivery issues</h3>
+            {issueError && <p role="alert">{issueError}</p>}
+            {issueNotice && <p role="status">{issueNotice}</p>}
             <p className="orders-current-note">Issue reports and triage do not change Order, Payment, dispatch, delivery evidence or Stock facts.</p>
             {detail.delivery_issues.length === 0 && <p>No delivery issues recorded.</p>}
             {detail.delivery_issues.map((issue) => <article key={issue.issue_id} className="orders-evidence-message">
@@ -988,49 +1140,7 @@ export function OrdersPage() {
                 }}>Cancel report</button>
               </div>
             </form>}
-          </section>
-          <h3>Accepted commercial snapshot</h3>
-          <ul className="orders-lines">{detail.items.map((line, index) => <li key={`${line.product_id}-${index}`}>
-            <strong>{line.product_name ?? `Product ${line.product_id}`}{line.model_label ? ` · ${line.model_label}` : ''}</strong>
-            <span>Quantity {line.quantity} · {formatAmount(line.unit_price_cdf, 'CDF')} per unit</span>
-            {line.unit_price_usd && <span>Accepted USD price {formatAmount(line.unit_price_usd, 'USD')}</span>}
-            {line.usd_to_cdf_rate && <span>Accepted USD/CDF rate {line.usd_to_cdf_rate}</span>}
-            <div className="orders-links">
-              {uuidPattern.test(line.product_id) && <Link to={`/business/products/${line.product_id}`}>Current Product</Link>}
-              {line.sellable_item_id && <Link to={`/business/stock?item=${line.sellable_item_id}`}>Current Stock</Link>}
-            </div>
-          </li>)}</ul>
-          <p className="orders-current-note">Product and Stock links show current facts, which may differ from this accepted snapshot.</p>
-          {detail.conversation_id && <Link to={`/inbox/${detail.conversation_id}`}>Open associated Inbox conversation</Link>}
-          {canCancel && detail.status === 'pending' && !cancelOpen && <div className="orders-actions">
-            <button className="button button--secondary" onClick={() => {
-              setCancelOpen(true); setCancelError(null); setCancelNotice(null)
-            }}>Cancel Order</button>
-          </div>}
-          {canCancel && detail.status === 'pending' && cancelOpen && <form className="orders-cancellation" onSubmit={(event) => void submitCancellation(event)}>
-            <h3>Cancel pending Order</h3>
-            <p>This records an authoritative cancellation. It does not change Payment or Stock.</p>
-            <label htmlFor="order-cancellation-reason">Cancellation reason</label>
-            <select id="order-cancellation-reason" required value={cancelReason} disabled={cancelBusy}
-              onChange={(event) => {
-                setCancelReason(event.target.value as OrderCancellationReason | '')
-                attempt.current = null
-              }}>
-              <option value="">Select a reason</option>
-              {cancellationReasons.map((reason) => <option key={reason.value} value={reason.value}>{reason.label}</option>)}
-            </select>
-            <div className="orders-actions">
-              <button className="button button--primary" disabled={cancelBusy || !cancelReason || reauth}>Confirm cancellation</button>
-              <button type="button" className="button button--secondary" disabled={cancelBusy} onClick={() => {
-                setCancelOpen(false); setCancelReason(''); setCancelError(null); setReauth(false); setPassword(''); attempt.current = null
-              }}>Keep pending</button>
-            </div>
-          </form>}
-          {canCancel && cancelOpen && reauth && <form className="orders-cancellation" onSubmit={(event) => void confirmPassword(event)}>
-            <PasswordField id="order-cancellation-password" label="Confirm Administrator password" autoComplete="current-password"
-              value={password} disabled={cancelBusy} required onChange={(event) => setPassword(event.target.value)} />
-            <button className="button button--primary" disabled={cancelBusy}>Confirm password</button>
-          </form>}
+          </section>}
         </>}
       </section>}
     </div>

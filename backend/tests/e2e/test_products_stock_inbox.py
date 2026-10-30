@@ -17,7 +17,11 @@ import pytest
 from sqlalchemy import func, select, text
 
 from app.database import async_session_factory, engine
-from app.ai.provider_contract import ProviderFinishReason, ProviderToolCall, ProviderTurnResult
+from app.ai.provider_contract import (
+    ProviderFinishReason,
+    ProviderToolCall,
+    ProviderTurnResult,
+)
 from app.ai.turn import AITurn, AITurnService
 from app.models import (
     Conversation,
@@ -36,7 +40,11 @@ from app.models.payment import Payment
 from app.models.operator_audit import OperatorAuditEvent
 from app.models.stock_allocation import StockAllocation
 from app.models.stock_movement import StockMovement
-from app.modules.m1_gateway.turn_recovery import add_pending_turn, claim_turn, mark_outcome_committed
+from app.modules.m1_gateway.turn_recovery import (
+    add_pending_turn,
+    claim_turn,
+    mark_outcome_committed,
+)
 from app.modules.product_offer.service import get_product_offer
 from app.modules.m7_conversion.order_allocation import allocate_paid_order_stock
 from app.operator_identity.passwords import hash_password
@@ -182,15 +190,17 @@ async def _seed_customer_opt_out_request() -> uuid.UUID:
     message_id = uuid.uuid4()
     try:
         async with async_session_factory() as session:
-            session.add(Message(
-                message_id=message_id,
-                conversation_id=CONVERSATION_ID,
-                direction="inbound",
-                content="Arrête, ne plus contacter s'il vous plaît.",
-                content_type="text",
-                language="french",
-                whatsapp_message_id=f"e2e-customer-opt-out-{message_id}",
-            ))
+            session.add(
+                Message(
+                    message_id=message_id,
+                    conversation_id=CONVERSATION_ID,
+                    direction="inbound",
+                    content="Arrête, ne plus contacter s'il vous plaît.",
+                    content_type="text",
+                    language="french",
+                    whatsapp_message_id=f"e2e-customer-opt-out-{message_id}",
+                )
+            )
             await session.commit()
         return message_id
     finally:
@@ -203,18 +213,31 @@ async def _assert_customer_profile_change(evidence_message_id: uuid.UUID) -> Non
             customer = await session.get(Customer, "+243812345678")
             assert customer is not None
             assert (customer.name, customer.city, customer.preferred_language) == (
-                "E2E Customer Updated", "Matadi", "lingala",
+                "E2E Customer Updated",
+                "Matadi",
+                "lingala",
             )
             assert customer.opt_out_flag is True and customer.opt_out_at is not None
-            audits = (await session.scalars(
-                select(OperatorAuditEvent).where(OperatorAuditEvent.action.in_((
-                    "customer.profile.update", "customer.contact.opt_out",
-                ))).order_by(
-                    OperatorAuditEvent.occurred_at, OperatorAuditEvent.event_id,
+            audits = (
+                await session.scalars(
+                    select(OperatorAuditEvent)
+                    .where(
+                        OperatorAuditEvent.action.in_(
+                            (
+                                "customer.profile.update",
+                                "customer.contact.opt_out",
+                            )
+                        )
+                    )
+                    .order_by(
+                        OperatorAuditEvent.occurred_at,
+                        OperatorAuditEvent.event_id,
+                    )
                 )
-            )).all()
+            ).all()
             assert [event.action for event in audits] == [
-                "customer.profile.update", "customer.contact.opt_out",
+                "customer.profile.update",
+                "customer.contact.opt_out",
             ]
             assert audits[1].event_metadata["evidence_message_id"] == str(
                 evidence_message_id
@@ -251,9 +274,7 @@ async def _make_order_ready_for_preparation(order_id: uuid.UUID) -> datetime:
         await engine.dispose()
 
 
-async def _assert_dispatched_order(
-    order_id: uuid.UUID, reviewed_at: datetime
-) -> None:
+async def _assert_dispatched_order(order_id: uuid.UUID, reviewed_at: datetime) -> None:
     try:
         async with async_session_factory() as session:
             order = await session.get(Order, order_id)
@@ -289,7 +310,9 @@ async def _assert_dispatched_order(
             assert order.updated_at > reviewed_at
             assert order.delivered_at is None
             assert payment is not None and payment.status == "completed"
-            assert movement is not None and movement.handoff_reference == "E2E-HANDOFF-001"
+            assert (
+                movement is not None and movement.handoff_reference == "E2E-HANDOFF-001"
+            )
             assert movement.before_quantity == 3 and movement.after_quantity == 1
             assert inventory is not None and inventory.quantity == 1
             assert inventory.allocated_quantity == 0
@@ -397,9 +420,9 @@ def _stock_change(page: Page, kind: str, value: int, reason: str | None = None) 
     page.get_by_role("button", name="Review change").click()
     expect(page.get_by_role("region", name="Confirm stock change")).to_be_visible()
     page.get_by_role("button", name="Confirm stock change").click()
-    expect(page.get_by_text("Stock change saved. Showing current stock.")).to_be_visible(
-        timeout=15_000
-    )
+    expect(
+        page.get_by_text("Stock change saved. Showing current stock.")
+    ).to_be_visible(timeout=15_000)
 
 
 def _open_offer(page: Page):
@@ -424,30 +447,48 @@ async def _assert_order_acceptance(monkeypatch: pytest.MonkeyPatch) -> uuid.UUID
     factory = async_session_factory
     try:
         async with factory() as session:
-            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "d2e3f4a5b6c7"
-            item = await session.scalar(select(SellableItem).where(SellableItem.sku == SKU))
+            assert (
+                await session.scalar(text("SELECT version_num FROM alembic_version"))
+                == "d2e3f4a5b6c7"
+            )
+            item = await session.scalar(
+                select(SellableItem).where(SellableItem.sku == SKU)
+            )
             conversation = await session.get(Conversation, CONVERSATION_ID)
-            lead = await session.scalar(select(Lead).where(Lead.conversation_id == CONVERSATION_ID))
+            lead = await session.scalar(
+                select(Lead).where(Lead.conversation_id == CONVERSATION_ID)
+            )
             assert item is not None and conversation is not None and lead is not None
             assert conversation.customer_id == "+243812345678"
-            assert conversation.owner_type == "ai" and conversation.ai_execution_state == "eligible"
+            assert (
+                conversation.owner_type == "ai"
+                and conversation.ai_execution_state == "eligible"
+            )
             offer = await get_product_offer(session, item.sellable_item_id)
             inventory = await session.scalar(
-                select(InventoryRecord).where(InventoryRecord.sellable_item_id == item.sellable_item_id)
+                select(InventoryRecord).where(
+                    InventoryRecord.sellable_item_id == item.sellable_item_id
+                )
             )
             assert offer is not None and inventory is not None
-            assert offer.product_name == PRODUCT and offer.current_usd_price == Decimal("55.25")
+            assert offer.product_name == PRODUCT and offer.current_usd_price == Decimal(
+                "55.25"
+            )
             assert offer.inventory_status == "available" and offer.is_sellable_now
             quote = offer.derived_cdf_quote
             assert quote is not None
             assert quote.usd_to_cdf_rate == Decimal("2800")
             assert quote.cdf_amount == Decimal("154700.00")
             assert inventory.quantity == 3
-            inventory_before = (inventory.quantity, inventory.status, inventory.updated_at)
+            inventory_before = (
+                inventory.quantity,
+                inventory.status,
+                inventory.updated_at,
+            )
             movement_count = await session.scalar(
-                select(func.count()).select_from(StockMovement).where(
-                    StockMovement.sellable_item_id == item.sellable_item_id
-                )
+                select(func.count())
+                .select_from(StockMovement)
+                .where(StockMovement.sellable_item_id == item.sellable_item_id)
             )
             assert movement_count == 3
             assert await session.scalar(select(func.count()).select_from(Order)) == 0
@@ -458,16 +499,18 @@ async def _assert_order_acceptance(monkeypatch: pytest.MonkeyPatch) -> uuid.UUID
             lead.score = "hot"
             lead.score_value = 9
             lead.stage = "decision"
-            session.add(Message(
-                message_id=ORDER_SOURCE_ID,
-                conversation_id=CONVERSATION_ID,
-                timestamp=datetime.now(UTC),
-                direction="inbound",
-                content="Je le prends.",
-                content_type="text",
-                language="french",
-                whatsapp_message_id="e2e-order-source",
-            ))
+            session.add(
+                Message(
+                    message_id=ORDER_SOURCE_ID,
+                    conversation_id=CONVERSATION_ID,
+                    timestamp=datetime.now(UTC),
+                    direction="inbound",
+                    content="Je le prends.",
+                    content_type="text",
+                    language="french",
+                    whatsapp_message_id="e2e-order-source",
+                )
+            )
             await session.flush()
             add_pending_turn(
                 session,
@@ -481,9 +524,13 @@ async def _assert_order_acceptance(monkeypatch: pytest.MonkeyPatch) -> uuid.UUID
         # inventory-adapter, FX, and Celery guards. Enable the send gate to
         # prove Order acceptance itself still takes the no-send path.
         external_calls = _block_m1_external_effects(
-            monkeypatch, factory, whatsapp_send_enabled=True,
+            monkeypatch,
+            factory,
+            whatsapp_send_enabled=True,
         )
-        assert (await claim_turn(ORDER_SOURCE_ID, attempt_id="e2e-draft")).action == "process"
+        assert (
+            await claim_turn(ORDER_SOURCE_ID, attempt_id="e2e-draft")
+        ).action == "process"
 
         class ScriptedDraftAdapter:
             calls = 0
@@ -491,14 +538,16 @@ async def _assert_order_acceptance(monkeypatch: pytest.MonkeyPatch) -> uuid.UUID
             async def generate_turn(self, _request):
                 self.calls += 1
                 return ProviderTurnResult(
-                    tool_calls=(ProviderToolCall(
-                        call_id="e2e-order-draft",
-                        capability_name="prepare_order_draft",
-                        arguments={
-                            "selected_sellable_item_id": str(item.sellable_item_id),
-                            "quantity": 2,
-                        },
-                    ),),
+                    tool_calls=(
+                        ProviderToolCall(
+                            call_id="e2e-order-draft",
+                            capability_name="prepare_order_draft",
+                            arguments={
+                                "selected_sellable_item_id": str(item.sellable_item_id),
+                                "quantity": 2,
+                            },
+                        ),
+                    ),
                     finish_reason=ProviderFinishReason.tool_call,
                 )
 
@@ -516,23 +565,25 @@ async def _assert_order_acceptance(monkeypatch: pytest.MonkeyPatch) -> uuid.UUID
             commercial_state_loader=load_state,
             turn_lifecycle_recorder=mark_outcome_committed,
         )
-        presented = await service.generate_finalized(AITurn(
-            user_content="Je le prends.",
-            language="french",
-            expected_ownership_version=conversation.ownership_version,
-            conversation_id=CONVERSATION_ID,
-            source_message_id=ORDER_SOURCE_ID,
-            allowed_capabilities=("prepare_order_draft",),
-        ))
+        presented = await service.generate_finalized(
+            AITurn(
+                user_content="Je le prends.",
+                language="french",
+                expected_ownership_version=conversation.ownership_version,
+                conversation_id=CONVERSATION_ID,
+                source_message_id=ORDER_SOURCE_ID,
+                allowed_capabilities=("prepare_order_draft",),
+            )
+        )
         assert adapter.calls == 1
         assert presented.audit_persisted
         assert presented.audit_record.outcome.value == "order_draft_presented"
         assert presented.text is not None and "309 400 CDF" in presented.text
 
         async with factory() as session:
-            draft = await session.scalar(select(OrderDraft).where(
-                OrderDraft.conversation_id == CONVERSATION_ID
-            ))
+            draft = await session.scalar(
+                select(OrderDraft).where(OrderDraft.conversation_id == CONVERSATION_ID)
+            )
             assert draft is not None and draft.status == "awaiting_confirmation"
             assert draft.source_message_id == ORDER_SOURCE_ID and draft.quantity == 2
             assert draft.product_id == offer.product_id
@@ -578,8 +629,12 @@ async def _assert_order_acceptance(monkeypatch: pytest.MonkeyPatch) -> uuid.UUID
             assert len(orders) == 1
             order = orders[0]
             assert order.order_id == uuid.UUID(first["order_id"])
-            assert order.status == "pending" and order.total_amount == Decimal("309400.00")
-            assert order.customer_id == "+243812345678" and order.lead_id == lead.lead_id
+            assert order.status == "pending" and order.total_amount == Decimal(
+                "309400.00"
+            )
+            assert (
+                order.customer_id == "+243812345678" and order.lead_id == lead.lead_id
+            )
             assert order.confirmed_at is None and order.delivered_at is None
             assert order.hub_crm_synced is False and order.hub_crm_order_id is None
             assert len(order.items) == 1
@@ -592,32 +647,56 @@ async def _assert_order_acceptance(monkeypatch: pytest.MonkeyPatch) -> uuid.UUID
             assert Decimal(line["unit_price_usd"]) == Decimal("55.25")
             assert Decimal(line["usd_to_cdf_rate"]) == Decimal("2800")
             assert Decimal(line["unit_price_cdf"]) == Decimal("154700.00")
-            stored_draft = await session.get(OrderDraft, (draft.draft_id, draft.draft_version))
+            stored_draft = await session.get(
+                OrderDraft, (draft.draft_id, draft.draft_version)
+            )
             assert stored_draft is not None and stored_draft.status == "confirmed"
             assert stored_draft.order_id == order.order_id
             inventory_after = await session.get(InventoryRecord, inventory.inventory_id)
             assert inventory_after is not None
-            assert (inventory_after.quantity, inventory_after.status, inventory_after.updated_at) == inventory_before
-            assert await session.scalar(
-                select(func.count()).select_from(StockMovement).where(
-                    StockMovement.sellable_item_id == item.sellable_item_id
+            assert (
+                inventory_after.quantity,
+                inventory_after.status,
+                inventory_after.updated_at,
+            ) == inventory_before
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(StockMovement)
+                    .where(StockMovement.sellable_item_id == item.sellable_item_id)
                 )
-            ) == movement_count
+                == movement_count
+            )
             assert await session.scalar(select(func.count()).select_from(Payment)) == 0
-            assert await session.scalar(
-                select(func.count()).select_from(Message).where(
-                    Message.whatsapp_message_id == "e2e-order-confirm-first"
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(Message)
+                    .where(Message.whatsapp_message_id == "e2e-order-confirm-first")
                 )
-            ) == 1
-            receipt_orders = dict((await session.execute(
-                select(Message.message_id, Message.inbound_receipt_order).where(Message.message_id.in_((
-                    ORDER_SOURCE_ID, FIRST_CONFIRMATION_ID, REPLAY_CONFIRMATION_ID,
-                )))
-            )).all())
+                == 1
+            )
+            receipt_orders = dict(
+                (
+                    await session.execute(
+                        select(Message.message_id, Message.inbound_receipt_order).where(
+                            Message.message_id.in_(
+                                (
+                                    ORDER_SOURCE_ID,
+                                    FIRST_CONFIRMATION_ID,
+                                    REPLAY_CONFIRMATION_ID,
+                                )
+                            )
+                        )
+                    )
+                ).all()
+            )
             assert len(receipt_orders) == 3
-            assert (receipt_orders[ORDER_SOURCE_ID]
-                    < receipt_orders[FIRST_CONFIRMATION_ID]
-                    < receipt_orders[REPLAY_CONFIRMATION_ID])
+            assert (
+                receipt_orders[ORDER_SOURCE_ID]
+                < receipt_orders[FIRST_CONFIRMATION_ID]
+                < receipt_orders[REPLAY_CONFIRMATION_ID]
+            )
         assert external_calls == []
         return order.order_id
     finally:
@@ -630,17 +709,24 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     responses: list[tuple[str, str, int]] = []
     with sync_playwright() as playwright:
+
         def run_browser() -> None:
             browser = playwright.chromium.launch(headless=True)
             admin_context = browser.new_context(ignore_https_errors=True)
             page = admin_context.new_page()
             page.on(
                 "response",
-                lambda response: responses.append(
-                    (response.request.method, urlparse(response.url).path, response.status)
-                )
-                if "/api/v1/" in response.url
-                else None,
+                lambda response: (
+                    responses.append(
+                        (
+                            response.request.method,
+                            urlparse(response.url).path,
+                            response.status,
+                        )
+                    )
+                    if "/api/v1/" in response.url
+                    else None
+                ),
             )
             _login(page, "e2e.admin", ADMIN_PASSWORD)
 
@@ -662,9 +748,9 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
                 re.compile(r"/business/stock\?.*item="), timeout=15_000
             )
             item_id = parse_qs(urlparse(page.url).query)["item"][0]
-            expect(page.get_by_role("heading", name=f"{PRODUCT} · {VARIANT}")).to_be_visible(
-                timeout=15_000
-            )
+            expect(
+                page.get_by_role("heading", name=f"{PRODUCT} · {VARIANT}")
+            ).to_be_visible(timeout=15_000)
             initial = page.locator(".stock-detail").inner_text()
             assert "Inactive" in initial
             assert "Current USD price\nNot set" in initial
@@ -674,24 +760,28 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
             page.get_by_role("button", name="Set price").click()
             page.get_by_label("New USD price").fill("55.25")
             page.get_by_role("button", name="Save price").click()
-            expect(page.get_by_text("Price saved. Showing current facts.")).to_be_visible(
-                timeout=15_000
-            )
+            expect(
+                page.get_by_text("Price saved. Showing current facts.")
+            ).to_be_visible(timeout=15_000)
             expect(page.get_by_role("heading", name="Adjust stock")).to_be_visible()
             page.get_by_label("Corrected quantity").fill("0")
             page.get_by_label("Reason for correction").fill("Initial verified count")
             page.get_by_role("button", name="Review change").click()
             page.get_by_role("button", name="Confirm stock change").click()
-            expect(page.get_by_text("Stock change saved. Showing current stock.")).to_be_visible(
-                timeout=15_000
-            )
+            expect(
+                page.get_by_text("Stock change saved. Showing current stock.")
+            ).to_be_visible(timeout=15_000)
             zero_stock = page.locator(".stock-detail").inner_text()
             assert "Current quantity\n0" in zero_stock
             assert "Out of stock" in zero_stock
-            product_href = page.get_by_role("link", name="View product").get_attribute("href")
+            product_href = page.get_by_role("link", name="View product").get_attribute(
+                "href"
+            )
             assert product_href
 
-            page.goto(f"{BASE_URL}/inbox/{CONVERSATION_ID}", wait_until="domcontentloaded")
+            page.goto(
+                f"{BASE_URL}/inbox/{CONVERSATION_ID}", wait_until="domcontentloaded"
+            )
             page.get_by_role("button", name="Find a product").click()
             inactive_dialog = page.get_by_role("dialog", name="Find a product")
             inactive_dialog.get_by_label("Product name, model or SKU").fill(SKU)
@@ -710,9 +800,9 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
             expect(page.get_by_text("Active variant")).to_be_visible(timeout=15_000)
             page.wait_for_load_state("networkidle")
             page.get_by_role("button", name="Activate product").click()
-            expect(page.get_by_role("button", name="Confirm activate product")).to_be_visible(
-                timeout=15_000
-            )
+            expect(
+                page.get_by_role("button", name="Confirm activate product")
+            ).to_be_visible(timeout=15_000)
             page.get_by_role("button", name="Confirm activate product").click()
             expect(page.get_by_text("Active product")).to_be_visible(timeout=15_000)
 
@@ -726,10 +816,13 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
                 "button", name="Back to conversation"
             ).click()
 
-            page.goto(f"{BASE_URL}/business/stock?item={item_id}", wait_until="domcontentloaded")
-            expect(page.get_by_role("heading", name=f"{PRODUCT} · {VARIANT}")).to_be_visible(
-                timeout=15_000
+            page.goto(
+                f"{BASE_URL}/business/stock?item={item_id}",
+                wait_until="domcontentloaded",
             )
+            expect(
+                page.get_by_role("heading", name=f"{PRODUCT} · {VARIANT}")
+            ).to_be_visible(timeout=15_000)
             _stock_change(page, "Receive stock", 5)
             five = page.locator(".stock-detail").inner_text()
             assert "Current quantity\n5" in five and "Available" in five
@@ -778,7 +871,8 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
             operator_page = operator_context.new_page()
             _login(operator_page, "e2e.operator", OPERATOR_PASSWORD)
             operator_page.goto(
-                f"{BASE_URL}/business/stock?item={item_id}", wait_until="domcontentloaded"
+                f"{BASE_URL}/business/stock?item={item_id}",
+                wait_until="domcontentloaded",
             )
             expect(
                 operator_page.get_by_role("heading", name=f"{PRODUCT} · {VARIANT}")
@@ -787,7 +881,9 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
             assert "Availability\nAvailable" in operator_stock
             assert "Current quantity" not in operator_stock
             assert "Current USD price" not in operator_stock
-            assert not operator_page.get_by_role("button", name="Adjust stock").is_visible()
+            assert not operator_page.get_by_role(
+                "button", name="Adjust stock"
+            ).is_visible()
             forbidden = operator_page.evaluate(
                 """async (id) => {
                   const csrf = await (await fetch('/api/v1/auth/csrf')).json();
@@ -820,51 +916,94 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
     assert state["inventory_status"] == "available"
     assert state["movements"] == [
         {
-            "kind": "adjust", "before": None, "after": 0,
-            "received": None, "corrected": 0, "reason": "Initial verified count",
+            "kind": "adjust",
+            "before": None,
+            "after": 0,
+            "received": None,
+            "corrected": 0,
+            "reason": "Initial verified count",
         },
         {
-            "kind": "receive", "before": 0, "after": 5,
-            "received": 5, "corrected": None, "reason": None,
+            "kind": "receive",
+            "before": 0,
+            "after": 5,
+            "received": 5,
+            "corrected": None,
+            "reason": None,
         },
         {
-            "kind": "adjust", "before": 5, "after": 3,
-            "received": None, "corrected": 3, "reason": "Cycle count correction",
+            "kind": "adjust",
+            "before": 5,
+            "after": 3,
+            "received": None,
+            "corrected": 3,
+            "reason": "Cycle count correction",
         },
     ]
     assert state["order_count"] == 0
     assert state["payment_count"] == 0
 
     assert ("POST", "/api/v1/operator/commerce/products", 201) in responses
-    assert any(method == "PUT" and path.endswith("/price") and status == 200 for method, path, status in responses)
-    assert any(method == "POST" and path.endswith("/inventory/receive") and status == 200 for method, path, status in responses)
-    assert any(method == "POST" and path.endswith("/inventory/adjust") and status == 409 for method, path, status in responses)
-    assert any(method == "GET" and path == "/api/v1/operator/product-offers" and status == 200 for method, path, status in responses)
+    assert any(
+        method == "PUT" and path.endswith("/price") and status == 200
+        for method, path, status in responses
+    )
+    assert any(
+        method == "POST" and path.endswith("/inventory/receive") and status == 200
+        for method, path, status in responses
+    )
+    assert any(
+        method == "POST" and path.endswith("/inventory/adjust") and status == 409
+        for method, path, status in responses
+    )
+    assert any(
+        method == "GET" and path == "/api/v1/operator/product-offers" and status == 200
+        for method, path, status in responses
+    )
     order_id = asyncio.run(_assert_order_acceptance(monkeypatch))
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
-        context = browser.new_context(ignore_https_errors=True, viewport={"width": 390, "height": 844})
+        context = browser.new_context(
+            ignore_https_errors=True, viewport={"width": 390, "height": 844}
+        )
         page = context.new_page()
         _login(page, "e2e.operator", OPERATOR_PASSWORD)
         page.goto(f"{BASE_URL}/business/stock", wait_until="domcontentloaded")
         page.get_by_label("Business", exact=True).select_option("orders")
         expect(page).to_have_url(re.compile(r"/business/orders$"))
         expect(page.get_by_role("heading", name="Orders", exact=True)).to_be_visible()
-        expect(page.get_by_role("link", name=re.compile(PRODUCT))).to_be_visible(timeout=15_000)
+        expect(page.get_by_role("link", name=re.compile(PRODUCT))).to_be_visible(
+            timeout=15_000
+        )
         page.get_by_role("link", name=re.compile(PRODUCT)).click()
         expect(page).to_have_url(re.compile(rf"/business/orders/{order_id}"))
         detail = page.get_by_role("region", name="Order detail")
-        expect(detail.get_by_text("pending", exact=True)).to_be_visible(timeout=15_000)
+        expect(detail.get_by_text("Pending", exact=True).first).to_be_visible(
+            timeout=15_000
+        )
         expect(detail.get_by_text("CDF 309,400.00")).to_be_visible()
         expect(detail.get_by_text("USD 55.25")).to_be_visible()
         expect(detail.get_by_text("Accepted USD/CDF rate 2800")).to_be_visible()
-        expect(detail.get_by_role("link", name="Open associated Inbox conversation")).to_have_attribute(
-            "href", f"/inbox/{CONVERSATION_ID}"
-        )
+        expect(
+            detail.get_by_role("link", name="Open associated Inbox conversation")
+        ).to_have_attribute("href", f"/inbox/{CONVERSATION_ID}")
+        expect(
+            detail.get_by_role("link", name="Open Customer profile")
+        ).to_have_attribute("href", f"/business/customers/{CONVERSATION_ID}")
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         assert not detail.get_by_role("button").count()
+
+        expect(page.get_by_role("region", name="Orders queue")).to_be_hidden()
+        detail.get_by_role("link", name="Back to Orders").click()
+        expect(page).to_have_url(
+            re.compile(r"/business/orders\?status=pending&offset=0$")
+        )
+        expect(page.get_by_role("region", name="Orders queue")).to_be_visible()
+        page.get_by_role("link", name=re.compile(PRODUCT)).click()
+        expect(page).to_have_url(re.compile(rf"/business/orders/{order_id}"))
+        expect(detail).to_be_visible()
 
         detail.get_by_role("link", name="Open associated Inbox conversation").click()
         expect(page).to_have_url(re.compile(rf"/inbox/{CONVERSATION_ID}"))
@@ -884,17 +1023,23 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
         activity_dialog.get_by_role("link", name="Open Customer profile").click()
         expect(page).to_have_url(re.compile(rf"/business/customers/{CONVERSATION_ID}"))
         customer_profile = page.locator(".customer-profile-page")
-        expect(customer_profile.get_by_role(
-            "heading", name="Profile & contact preferences"
-        )).to_be_visible(timeout=15_000)
         expect(
-            customer_profile.get_by_text("Phone", exact=True).locator("..").locator("dd")
+            customer_profile.get_by_role(
+                "heading", name="Profile & contact preferences"
+            )
+        ).to_be_visible(timeout=15_000)
+        expect(
+            customer_profile.get_by_text("Phone", exact=True)
+            .locator("..")
+            .locator("dd")
         ).to_have_text("+243812345678", timeout=15_000)
         expect(page.get_by_text("WhatsApp · verified provider message")).to_be_visible()
         expect(customer_profile.get_by_text("E2e", exact=True)).to_be_visible()
-        expect(page.get_by_text(
-            "Administrator permission is required to edit Customer details."
-        )).to_be_visible()
+        expect(
+            page.get_by_text(
+                "Administrator permission is required to edit Customer details."
+            )
+        ).to_be_visible()
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         context.close()
         browser.close()
@@ -920,9 +1065,9 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
         admin_page.get_by_label("Preferred language").select_option("lingala")
         admin_page.get_by_label("Reason").select_option("operator_correction")
         admin_page.get_by_role("button", name="Save profile").click()
-        expect(admin_page.get_by_text(
-            "Customer profile updated and audited."
-        )).to_be_visible(timeout=15_000)
+        expect(
+            admin_page.get_by_text("Customer profile updated and audited.")
+        ).to_be_visible(timeout=15_000)
         admin_page.get_by_label("Customer opt-out message").select_option(
             str(opt_out_message_id)
         )
@@ -930,10 +1075,12 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
             "I confirm this message is the Customer’s opt-out request."
         ).check()
         admin_page.get_by_role("button", name="Record opt-out").click()
-        expect(admin_page.get_by_text(
-            "Customer opt-out recorded with message evidence. "
-            "Pending follow-ups were stopped."
-        )).to_be_visible(timeout=15_000)
+        expect(
+            admin_page.get_by_text(
+                "Customer opt-out recorded with message evidence. "
+                "Pending follow-ups were stopped."
+            )
+        ).to_be_visible(timeout=15_000)
         expect(admin_page.get_by_text(re.compile(r"Recorded ·"))).to_be_visible()
         assert admin_page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         admin_context.close()
@@ -951,13 +1098,18 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
             wait_until="domcontentloaded",
         )
         admin_detail = admin_page.get_by_role("region", name="Order detail")
-        expect(admin_detail.get_by_text("Ready to prepare")).to_be_visible(timeout=15_000)
+        expect(admin_detail.get_by_text("Ready to prepare")).to_be_visible(
+            timeout=15_000
+        )
         expect(
-            admin_detail.get_by_role("region", name="Preparation readiness").get_by_text(
-                "Verified completed Payment matches the accepted Order"
-            )
+            admin_detail.get_by_role(
+                "region", name="Preparation readiness"
+            ).get_by_text("Verified completed Payment matches the accepted Order")
         ).to_be_visible()
         expect(admin_detail.get_by_text("Full allocation · 2 of 2")).to_be_visible()
+        admin_page.set_viewport_size({"width": 1024, "height": 768})
+        expect(admin_page.get_by_role("region", name="Orders queue")).to_be_hidden()
+        assert admin_page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         admin_page.set_viewport_size({"width": 390, "height": 844})
         assert admin_page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         expect(admin_detail.get_by_role("button", name="Prepare Order")).to_be_visible()
@@ -974,11 +1126,13 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
         expect(admin_detail.get_by_text("Order preparation started.")).to_be_visible(
             timeout=15_000
         )
-        expect(admin_detail.get_by_text("preparing", exact=True)).to_be_visible()
+        expect(admin_detail.get_by_text("Preparing", exact=True).first).to_be_visible()
         expect(admin_detail.get_by_text("Ready to dispatch")).to_be_visible()
         admin_page.set_viewport_size({"width": 390, "height": 844})
         assert admin_page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-        expect(admin_detail.get_by_role("button", name="Dispatch Order")).to_be_visible()
+        expect(
+            admin_detail.get_by_role("button", name="Dispatch Order")
+        ).to_be_visible()
         admin_page.set_viewport_size({"width": 1280, "height": 900})
         admin_detail.get_by_role("button", name="Dispatch Order").click()
         expect(admin_detail.get_by_text("Confirm physical dispatch")).to_be_visible()
@@ -992,21 +1146,27 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
                 "Order dispatched. Customer delivery is not confirmed."
             )
         ).to_be_visible(timeout=15_000)
-        expect(admin_detail.get_by_text("delivering", exact=True)).to_be_visible()
-        expect(admin_detail.get_by_text("Allocation consumed at dispatch")).to_be_visible()
+        expect(admin_detail.get_by_text("Delivering", exact=True).first).to_be_visible()
+        expect(admin_detail.get_by_text("Dispatched", exact=True).first).to_be_visible()
         admin_page.goto(f"{BASE_URL}/business/stock", wait_until="domcontentloaded")
         admin_page.get_by_label("Product, variant, or SKU").fill(SKU)
         admin_page.get_by_role("button", name="Search").click()
         admin_page.get_by_role("link", name=f"{PRODUCT} · {VARIANT}").click()
         activity = admin_page.get_by_role("region", name="Recent stock activity")
-        expect(activity.get_by_text("Dispatch", exact=True)).to_be_visible(timeout=15_000)
+        expect(activity.get_by_text("Dispatch", exact=True)).to_be_visible(
+            timeout=15_000
+        )
         expect(activity.get_by_text("Receive", exact=True)).to_be_visible()
         expect(activity.get_by_text("Adjust", exact=True).first).to_be_visible()
         expect(activity.get_by_text("3 → 1", exact=True)).to_be_visible()
         expect(activity.get_by_text("−2 dispatched", exact=True)).to_be_visible()
         expect(activity.get_by_text(f"Order: {order_id}", exact=True)).to_be_visible()
-        expect(activity.get_by_text("Handoff: E2E-HANDOFF-001", exact=True)).to_be_visible()
-        expect(activity.get_by_text(f"Actor: {ADMIN_ID}", exact=True).last).to_be_visible()
+        expect(
+            activity.get_by_text("Handoff: E2E-HANDOFF-001", exact=True)
+        ).to_be_visible()
+        expect(
+            activity.get_by_text(f"Actor: {ADMIN_ID}", exact=True).last
+        ).to_be_visible()
         admin_context.close()
         browser.close()
     asyncio.run(_assert_dispatched_order(order_id, reviewed_at))
@@ -1025,7 +1185,8 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
         admin_detail = admin_page.get_by_role("region", name="Order detail")
         expect(
             admin_detail.get_by_text(
-                "Customer receipt evidence is ready for Administrator review"
+                "Customer receipt evidence is ready for Administrator review",
+                exact=True,
             )
         ).to_be_visible(timeout=15_000)
         expect(
@@ -1033,7 +1194,9 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
                 "Commande reçue, matondo mingi — nimepokea vizuri."
             )
         ).to_be_visible()
-        expect(admin_detail.get_by_text("not the exact physical handoff time")).to_be_visible()
+        expect(
+            admin_detail.get_by_text("not the exact physical handoff time")
+        ).to_be_visible()
         admin_page.set_viewport_size({"width": 390, "height": 844})
         assert admin_page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         admin_detail.get_by_role("button", name="Confirm customer receipt").click()
@@ -1049,7 +1212,7 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
                 "physical handoff time."
             )
         ).to_be_visible(timeout=15_000)
-        expect(admin_detail.get_by_text("delivered", exact=True)).to_be_visible()
+        expect(admin_detail.get_by_text("Delivered", exact=True).first).to_be_visible()
         expect(admin_detail.get_by_text("Customer message received")).to_be_visible()
         admin_context.close()
         browser.close()

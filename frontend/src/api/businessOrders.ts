@@ -12,6 +12,16 @@ export interface OrderQueueItem {
   item_count: number
   first_product_name: string | null
   conversation_id: string | null
+  readiness: OrderQueueReadiness
+}
+
+export interface OrderQueueReadiness {
+  payment_state: 'verified' | 'missing' | 'not_verified' | 'mismatch'
+  stock_state: 'full_unconsumed' | 'missing' | 'mismatch' | 'consumed' | 'unsupported'
+  inventory_state: 'ready' | 'conflict' | 'unsupported'
+  dispatch_state: 'matched' | 'missing'
+  delivery_state: 'delivering' | 'delivered' | 'not_delivering'
+  issue_state: 'none' | 'open'
 }
 
 export interface OrderLineSnapshot {

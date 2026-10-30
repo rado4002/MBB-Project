@@ -58,7 +58,11 @@ from app.modules.m7_conversion.order_fulfillment import (
     get_order_preparation_eligibility,
     prepare_confirmed_order,
 )
-from app.modules.m7_conversion.order_reads import verified_order_conversations
+from app.modules.m7_conversion.order_reads import (
+    OrderQueueReadiness,
+    read_order_queue_readiness,
+    verified_order_conversations,
+)
 from app.modules.m7_conversion.order_dispatch import (
     OrderDispatchAllocationRequired,
     OrderDispatchForbidden,
@@ -149,6 +153,16 @@ class OrderQueueItem(StrictOrderRead):
     item_count: int
     first_product_name: str | None
     conversation_id: UUID | None
+    readiness: "OrderQueueReadinessResponse"
+
+
+class OrderQueueReadinessResponse(StrictOrderRead):
+    payment_state: str
+    stock_state: str
+    inventory_state: str
+    dispatch_state: str
+    delivery_state: str
+    issue_state: Literal["none", "open"]
 
 
 class OrderQueueResponse(StrictOrderRead):
@@ -277,7 +291,9 @@ class OrderDeliveryIssueReportRequest(StrictOrderRead):
             OrderDeliveryIssueReason.item_disputed,
             OrderDeliveryIssueReason.other,
         }
-        allowed = failed if self.issue_type == OrderDeliveryIssueType.failed else disputed
+        allowed = (
+            failed if self.issue_type == OrderDeliveryIssueType.failed else disputed
+        )
         if self.reason_code not in allowed:
             raise ValueError("reason_code does not match issue_type")
         return self
@@ -377,8 +393,7 @@ class OrderDispatchRequest(StrictOrderRead):
     def normalize_reference(cls, value: str) -> str:
         normalized = value.strip()
         if not normalized or any(
-            ord(character) < 32 or ord(character) == 127
-            for character in normalized
+            ord(character) < 32 or ord(character) == 127 for character in normalized
         ):
             raise ValueError("handoff_reference is invalid")
         return normalized
@@ -428,6 +443,7 @@ def _summary(
     order: Order,
     lines: list[OrderLineSnapshot],
     conversation_id: UUID | None,
+    readiness: OrderQueueReadiness,
 ) -> OrderQueueItem:
     return OrderQueueItem(
         order_id=order.order_id,
@@ -439,6 +455,7 @@ def _summary(
         item_count=len(lines),
         first_product_name=lines[0].product_name if lines else None,
         conversation_id=conversation_id,
+        readiness=OrderQueueReadinessResponse(**readiness.__dict__),
     )
 
 
@@ -496,9 +513,18 @@ async def list_orders(
             ).all()
         )
         shown = orders[: params.limit]
-        links = await verified_order_conversations(db, [order.order_id for order in shown])
+        links = await verified_order_conversations(
+            db, [order.order_id for order in shown]
+        )
+        readiness = await read_order_queue_readiness(db, shown)
         items = [
-            _summary(order, _lines(order), links.get(order.order_id)) for order in shown
+            _summary(
+                order,
+                _lines(order),
+                links.get(order.order_id),
+                readiness[order.order_id],
+            )
+            for order in shown
         ]
     except (SQLAlchemyError, OSError, ValidationError, TypeError, ValueError) as exc:
         raise _unavailable() from exc
@@ -523,10 +549,22 @@ async def get_order(
             )
         links = await verified_order_conversations(db, [order_id])
         lines = _lines(order)
-        summary = _summary(order, lines, links.get(order_id))
         eligibility = await get_order_preparation_eligibility(db, order=order)
         dispatch = await get_order_dispatch_eligibility(db, order=order)
         delivery = await get_order_delivery_eligibility(db, order=order)
+        summary = _summary(
+            order,
+            lines,
+            links.get(order_id),
+            OrderQueueReadiness(
+                payment_state=eligibility.payment_state,
+                stock_state=dispatch.allocation_state,
+                inventory_state=dispatch.inventory_state,
+                dispatch_state=delivery.dispatch_state,
+                delivery_state=delivery.order_state,
+                issue_state=delivery.issue_state,
+            ),
+        )
         delivery_issues = await _delivery_issue_responses(db, order_id=order_id)
         detail = OrderDetail(
             **summary.model_dump(),
@@ -813,7 +851,9 @@ async def prepare_order(
     body: OrderPreparationRequest,
     request: Request,
     response: Response,
-    principal: Annotated[BrowserPrincipal, Depends(require_capability("order.prepare"))],
+    principal: Annotated[
+        BrowserPrincipal, Depends(require_capability("order.prepare"))
+    ],
     _csrf: Annotated[BrowserPrincipal, Depends(require_csrf)],
     settings: Annotated[Settings, Depends(get_browser_settings)],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -841,21 +881,51 @@ async def prepare_order(
             user_agent_fingerprint=principal.session.record.user_agent_fingerprint,
         )
     except OrderPreparationNotFound as exc:
-        raise BrowserAuthError(status_code=404, code="ORDER_NOT_FOUND", message="Order not found.") from exc
+        raise BrowserAuthError(
+            status_code=404, code="ORDER_NOT_FOUND", message="Order not found."
+        ) from exc
     except OrderPreparationForbidden as exc:
-        raise BrowserAuthError(status_code=403, code="FORBIDDEN", message="Administrator permission is required.") from exc
+        raise BrowserAuthError(
+            status_code=403,
+            code="FORBIDDEN",
+            message="Administrator permission is required.",
+        ) from exc
     except OrderPreparationIdempotencyConflict as exc:
-        raise BrowserAuthError(status_code=409, code="IDEMPOTENCY_CONFLICT", message="The idempotency key was already used for another request.") from exc
+        raise BrowserAuthError(
+            status_code=409,
+            code="IDEMPOTENCY_CONFLICT",
+            message="The idempotency key was already used for another request.",
+        ) from exc
     except OrderPreparationStale as exc:
-        raise BrowserAuthError(status_code=409, code="ORDER_STALE", message="The Order changed since it was reviewed.") from exc
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_STALE",
+            message="The Order changed since it was reviewed.",
+        ) from exc
     except OrderPreparationStateConflict as exc:
-        raise BrowserAuthError(status_code=409, code="ORDER_STATE_CONFLICT", message="Only a confirmed Order can begin preparation.") from exc
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_STATE_CONFLICT",
+            message="Only a confirmed Order can begin preparation.",
+        ) from exc
     except OrderPreparationPaymentRequired as exc:
-        raise BrowserAuthError(status_code=409, code="ORDER_PAYMENT_REQUIRED", message="A matching verified completed Payment is required.") from exc
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_PAYMENT_REQUIRED",
+            message="A matching verified completed Payment is required.",
+        ) from exc
     except OrderPreparationAllocationRequired as exc:
-        raise BrowserAuthError(status_code=409, code="ORDER_ALLOCATION_REQUIRED", message="A full durable Stock allocation is required.") from exc
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_ALLOCATION_REQUIRED",
+            message="A full durable Stock allocation is required.",
+        ) from exc
     except UnsupportedOrderPreparation as exc:
-        raise BrowserAuthError(status_code=409, code="ORDER_PREPARATION_UNSUPPORTED", message="This Order cannot be prepared in this workflow.") from exc
+        raise BrowserAuthError(
+            status_code=409,
+            code="ORDER_PREPARATION_UNSUPPORTED",
+            message="This Order cannot be prepared in this workflow.",
+        ) from exc
     except OrderPreparationUnavailable as exc:
         raise _unavailable() from exc
     response.headers["Cache-Control"] = "no-store"
@@ -873,7 +943,9 @@ async def dispatch_order(
     body: OrderDispatchRequest,
     request: Request,
     response: Response,
-    principal: Annotated[BrowserPrincipal, Depends(require_capability("order.dispatch"))],
+    principal: Annotated[
+        BrowserPrincipal, Depends(require_capability("order.dispatch"))
+    ],
     _csrf: Annotated[BrowserPrincipal, Depends(require_csrf)],
     _recent: Annotated[BrowserPrincipal, Depends(require_recent_reauthentication)],
     settings: Annotated[Settings, Depends(get_browser_settings)],

@@ -9,7 +9,7 @@ from decimal import Decimal
 import httpx
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select, text, update
+from sqlalchemy import event, func, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 
 from app import adapters
@@ -353,6 +353,43 @@ async def test_authoritative_snapshot_survives_current_commercial_changes(
 
 
 @pytest.mark.asyncio
+async def test_queue_readiness_is_batched_and_matches_detail(accepted_order):
+    transport, factory, seeded, ready_order_id = accepted_order
+    pending_order_id = await _next_accepted_order(factory, seeded)
+    await _make_ready_for_preparation(factory, ready_order_id)
+
+    async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as client:
+        await _login(client, "commerce.operator", OPERATOR_PASSWORD)
+        statements = 0
+        engine = factory.kw["bind"].sync_engine
+
+        def count_statement(*_args):
+            nonlocal statements
+            statements += 1
+
+        event.listen(engine, "before_cursor_execute", count_statement)
+        try:
+            listing = await client.get("/api/v1/business/orders?limit=20")
+        finally:
+            event.remove(engine, "before_cursor_execute", count_statement)
+
+        assert listing.status_code == 200
+        assert statements <= 8, "queue readiness must use a fixed set of batched reads"
+        items = {item["order_id"]: item for item in listing.json()["items"]}
+        assert set(items) == {str(ready_order_id), str(pending_order_id)}
+        for order_id, item in items.items():
+            detail = (await client.get(f"/api/v1/business/orders/{order_id}")).json()
+            assert item["readiness"] == {
+                "payment_state": detail["preparation"]["payment_state"],
+                "stock_state": detail["dispatch"]["allocation_state"],
+                "inventory_state": detail["dispatch"]["inventory_state"],
+                "dispatch_state": detail["delivery"]["dispatch_state"],
+                "delivery_state": detail["delivery"]["order_state"],
+                "issue_state": detail["delivery"]["issue_state"],
+            }
+
+
+@pytest.mark.asyncio
 async def test_administrator_prepares_ready_order_with_browser_guard_and_audit(
     accepted_order,
 ):
@@ -440,11 +477,14 @@ async def test_preparation_browser_permissions_and_stale_write_are_enforced(
 
     async with factory() as db:
         assert (await db.get(Order, order_id)).status == "confirmed"
-        assert await db.scalar(
-            select(func.count())
-            .select_from(OperatorAuditEvent)
-            .where(OperatorAuditEvent.action == "order.prepared")
-        ) == 0
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(OperatorAuditEvent)
+                .where(OperatorAuditEvent.action == "order.prepared")
+            )
+            == 0
+        )
 
 
 @pytest.mark.asyncio
@@ -511,7 +551,10 @@ async def test_administrator_dispatch_requires_reauth_and_deducts_stock_once(
             json=body,
         )
         assert reauth_required.status_code == 403
-        assert reauth_required.json()["error"]["code"] == "recent_reauthentication_required"
+        assert (
+            reauth_required.json()["error"]["code"]
+            == "recent_reauthentication_required"
+        )
         csrf = await _reauthenticate(client, csrf)
         first = await client.post(
             url,
@@ -531,7 +574,9 @@ async def test_administrator_dispatch_requires_reauth_and_deducts_stock_once(
         assert activity.status_code == 200, activity.text
         movements = activity.json()["items"]
         assert [item["operation_kind"] for item in movements[:3]] == [
-            "dispatch", "receive", "adjust",
+            "dispatch",
+            "receive",
+            "adjust",
         ]
         assert movements[0] == {
             "movement_id": movements[0]["movement_id"],
@@ -560,11 +605,14 @@ async def test_administrator_dispatch_requires_reauth_and_deducts_stock_once(
         assert order.status == "delivering" and order.delivered_at is None
         assert inventory.quantity == 3 and inventory.allocated_quantity == 0
         assert movement.handoff_reference == "MBB-HANDOFF-API-1"
-        assert await db.scalar(
-            select(func.count())
-            .select_from(OperatorAuditEvent)
-            .where(OperatorAuditEvent.action == "order.dispatched")
-        ) == 1
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(OperatorAuditEvent)
+                .where(OperatorAuditEvent.action == "order.dispatched")
+            )
+            == 1
+        )
 
 
 @pytest.mark.asyncio
@@ -585,11 +633,14 @@ async def test_operator_cannot_dispatch_prepared_order(accepted_order):
         assert response.status_code == 403
     async with factory() as db:
         assert (await db.get(Order, order_id)).status == "preparing"
-        assert await db.scalar(
-            select(func.count())
-            .select_from(StockMovement)
-            .where(StockMovement.operation_kind == "dispatch")
-        ) == 0
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(StockMovement)
+                .where(StockMovement.operation_kind == "dispatch")
+            )
+            == 0
+        )
 
 
 @pytest.mark.asyncio
@@ -778,7 +829,9 @@ async def test_delivery_evidence_read_is_bounded_ordered_and_truncated(accepted_
                     timestamp=received_at,
                     created_at=received_at,
                     direction="inbound",
-                    content=("x" * 501 if index == 20 else f"Receipt candidate {index}"),
+                    content=(
+                        "x" * 501 if index == 20 else f"Receipt candidate {index}"
+                    ),
                     content_type="text",
                     language="french",
                     whatsapp_message_id=f"bounded-delivery-evidence-{index}",
@@ -960,7 +1013,9 @@ async def test_delivery_rejects_ambiguous_and_reused_customer_evidence(accepted_
     _transport, factory, seeded, first_order_id = accepted_order
     first_reviewed_at, first_movement = await _make_delivering(factory, first_order_id)
     second_order_id = await _next_accepted_order(factory, seeded)
-    second_reviewed_at, second_movement = await _make_delivering(factory, second_order_id)
+    second_reviewed_at, second_movement = await _make_delivering(
+        factory, second_order_id
+    )
     first_evidence = await _receipt_message(
         factory,
         seeded.conversation_id,
@@ -1627,7 +1682,9 @@ async def test_blocked_legacy_confirmation_preserves_cancellation_audit(
 
 
 @pytest.mark.asyncio
-async def test_cancellation_waits_for_order_lock_despite_blocked_legacy_confirmation(accepted_order):
+async def test_cancellation_waits_for_order_lock_despite_blocked_legacy_confirmation(
+    accepted_order,
+):
     transport, factory, seeded, order_id = accepted_order
     async with factory() as db:
         reviewed_at = (await db.get(Order, order_id)).updated_at
@@ -1752,7 +1809,9 @@ async def test_operator_reports_one_delivery_issue_with_replay_and_no_commerce_m
 
         first, second = await asyncio.gather(report(first_key), report(second_key))
         assert sorted((first.status_code, second.status_code)) == [201, 409]
-        created, created_key = (first, first_key) if first.status_code == 201 else (second, second_key)
+        created, created_key = (
+            (first, first_key) if first.status_code == 201 else (second, second_key)
+        )
         assert created.json()["status"] == "open"
         assert created.json()["reported_by_display_name"] == "Commerce.Operator"
         replay = await report(created_key)
@@ -1839,12 +1898,16 @@ async def test_open_issue_blocks_confirmation_until_administrator_closes_it(
         )
         assert reported.status_code == 201
         issue_id = reported.json()["issue_id"]
-        close_url = f"/api/v1/business/orders/{order_id}/delivery-issues/{issue_id}/close"
+        close_url = (
+            f"/api/v1/business/orders/{order_id}/delivery-issues/{issue_id}/close"
+        )
         close_body = {
             "resolution_code": "delivery_continuing",
             "resolution_reason": "Courier reached the customer and delivery is continuing safely.",
         }
-        async with httpx.AsyncClient(transport=transport, base_url=ORIGIN) as operator_client:
+        async with httpx.AsyncClient(
+            transport=transport, base_url=ORIGIN
+        ) as operator_client:
             operator_csrf = await _login(
                 operator_client, "commerce.operator", OPERATOR_PASSWORD
             )

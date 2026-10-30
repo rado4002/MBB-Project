@@ -18,6 +18,10 @@ const summary = {
   updated_at: '2026-10-01T12:00:00Z',
   total_cdf: '309400.00', currency: 'CDF', item_count: 1,
   first_product_name: 'Fictional Air Fryer', conversation_id: conversationId,
+  readiness: {
+    payment_state: 'missing', stock_state: 'missing', inventory_state: 'conflict',
+    dispatch_state: 'missing', delivery_state: 'not_delivering', issue_state: 'none',
+  },
 }
 const detail = {
   ...summary, delivery_zone: 'Kinshasa', delivered_at: null, items: [{
@@ -63,14 +67,13 @@ describe('read-only Business Orders', () => {
     setup()
     const user = userEvent.setup()
     renderApp('/business/orders')
-    await user.click(await screen.findByRole('link', { name: /Fictional Air Fryer.*pending/ }))
+    await user.click(await screen.findByRole('link', { name: /Order 11111111.*Fictional Air Fryer/i }))
     const region = await screen.findByRole('region', { name: 'Order detail' })
-    expect(await within(region).findByText('pending')).toBeInTheDocument()
+    expect(await within(region).findAllByText('Pending')).not.toHaveLength(0)
     expect(within(region).getByText('CDF 309,400.00')).toBeInTheDocument()
     expect(within(region).getByText(/Accepted USD price USD 55.25/)).toBeInTheDocument()
     expect(within(region).getByText(/Accepted USD\/CDF rate 2800/)).toBeInTheDocument()
-    expect(within(region).getAllByText('No Payment recorded')).toHaveLength(2)
-    expect(within(region).getAllByText('No durable Stock allocation recorded')).toHaveLength(2)
+    expect(within(region).getByText(/Current focus.*No Payment recorded/)).toBeInTheDocument()
     expect(within(region).getByRole('link', { name: 'Open associated Inbox conversation' })).toHaveAttribute('href', `/inbox/${conversationId}`)
     expect(within(region).queryByRole('button')).not.toBeInTheDocument()
   })
@@ -112,7 +115,7 @@ describe('read-only Business Orders', () => {
     await expectAccessible(document.body)
     await user.click(within(region).getByRole('button', { name: 'Confirm preparation' }))
     expect(await within(region).findByText('Order preparation started.')).toBeInTheDocument()
-    expect(within(region).getByText('preparing')).toBeInTheDocument()
+    expect(within(region).getAllByText('Preparing')).not.toHaveLength(0)
     expect(submissions).toHaveLength(1)
     expect(submissions[0]).toMatchObject({
       body: { expected_updated_at: detail.updated_at }, csrf: 'prepare-csrf',
@@ -228,8 +231,8 @@ describe('read-only Business Orders', () => {
     await expectAccessible(document.body)
     await user.click(within(region).getByRole('button', { name: 'Confirm dispatch' }))
     expect(await within(region).findByText('Order dispatched. Customer delivery is not confirmed.')).toBeInTheDocument()
-    expect(within(region).getByText('delivering')).toBeInTheDocument()
-    expect(within(region).getByText('Allocation consumed at dispatch')).toBeInTheDocument()
+    expect(within(region).getAllByText('Delivering')).not.toHaveLength(0)
+    expect(within(region).getAllByText('Dispatched')).not.toHaveLength(0)
     expect(submissions[0]).toMatchObject({
       body: {
         expected_updated_at: detail.updated_at,
@@ -288,8 +291,8 @@ describe('read-only Business Orders', () => {
     await user.click(within(region).getByLabelText(/attest that the customer unambiguously reported receiving/))
     await expectAccessible(document.body)
     await user.click(within(region).getByRole('button', { name: 'Confirm delivery' }))
-    expect(await within(region).findByText(/Customer-reported receipt recorded/)).toBeInTheDocument()
-    expect(within(region).getByText('delivered')).toBeInTheDocument()
+    expect(await within(region).findAllByText(/Customer-reported receipt recorded/)).not.toHaveLength(0)
+    expect(within(region).getAllByText('Delivered')).not.toHaveLength(0)
     expect(submissions[0]).toMatchObject({
       body: {
         expected_updated_at: '2026-10-01T12:03:00Z',
@@ -384,13 +387,13 @@ describe('read-only Business Orders', () => {
     await user.click(within(region).getByRole('button', { name: 'Record issue' }))
     expect(await within(region).findByText(/Delivery issue recorded/)).toBeInTheDocument()
     expect(within(region).getByText(issue.summary)).toBeInTheDocument()
-    expect(within(region).getByText(/Resolve the open delivery issue/)).toBeInTheDocument()
+    expect(within(region).getAllByText(/Resolve the open delivery issue/)).not.toHaveLength(0)
     await user.click(within(region).getByRole('button', { name: 'Review and close' }))
     await user.selectOptions(within(region).getByLabelText('Resolution'), 'delivery_continuing')
     await user.type(within(region).getByLabelText('Administrator reason'), 'Courier contacted the customer and delivery can continue.')
     await user.click(within(region).getByRole('button', { name: 'Close issue' }))
     expect(await within(region).findByText(/closed with documented Administrator review/)).toBeInTheDocument()
-    expect(within(region).getByText(/delivery continuing/)).toBeInTheDocument()
+    expect(within(region).getByText(/delivery continuing/i)).toBeInTheDocument()
     expect(within(region).queryByText(/restock|refund|reverse/i)).not.toBeInTheDocument()
     await expectAccessible(document.body)
   }, 15_000)
@@ -447,7 +450,7 @@ describe('read-only Business Orders', () => {
     await user.click(within(region).getByRole('button', { name: 'Confirm delivery' }))
     expect(await within(region).findByRole('alert')).toHaveTextContent(/result could not be confirmed/)
     await user.click(within(region).getByRole('button', { name: 'Confirm delivery' }))
-    expect(await within(region).findByText(/already recorded/)).toBeInTheDocument()
+    expect(await within(region).findAllByText(/already recorded/)).not.toHaveLength(0)
     expect(keys).toHaveLength(2)
     expect(keys[0]).toBe(keys[1])
   })
@@ -515,12 +518,12 @@ describe('read-only Business Orders', () => {
     const user = userEvent.setup()
     renderApp(`/business/orders/${orderId}`)
     const region = await screen.findByRole('region', { name: 'Order detail' })
-    await within(region).findByText('pending')
+    expect(await within(region).findAllByText('Pending')).not.toHaveLength(0)
     await user.click(within(region).getByRole('button', { name: 'Cancel Order' }))
     await user.selectOptions(within(region).getByLabelText('Cancellation reason'), 'customer_requested')
     await user.click(within(region).getByRole('button', { name: 'Confirm cancellation' }))
     expect(await within(region).findByText('Order cancelled.')).toBeInTheDocument()
-    expect(within(region).getByText('cancelled')).toBeInTheDocument()
+    expect(within(region).getAllByText('Cancelled')).not.toHaveLength(0)
     expect(submissions[0]).toMatchObject({
       body: { reason_code: 'customer_requested', expected_updated_at: detail.updated_at },
       csrf: 'cancel-csrf',
