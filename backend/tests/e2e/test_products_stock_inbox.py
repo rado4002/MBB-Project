@@ -887,9 +887,9 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
         expect(customer_profile.get_by_role(
             "heading", name="Profile & contact preferences"
         )).to_be_visible(timeout=15_000)
-        expect(customer_profile.get_by_text("***5678", exact=True)).to_be_visible(
-            timeout=15_000
-        )
+        expect(
+            customer_profile.get_by_text("Phone", exact=True).locator("..").locator("dd")
+        ).to_have_text("+243812345678", timeout=15_000)
         expect(page.get_by_text("WhatsApp · verified provider message")).to_be_visible()
         expect(customer_profile.get_by_text("E2e", exact=True)).to_be_visible()
         expect(page.get_by_text(
@@ -909,9 +909,12 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
             f"{BASE_URL}/business/customers/{CONVERSATION_ID}",
             wait_until="domcontentloaded",
         )
-        expect(admin_page.locator(".customer-profile-page").get_by_text(
-            "***5678", exact=True
-        )).to_be_visible(timeout=15_000)
+        expect(
+            admin_page.locator(".customer-profile-page")
+            .get_by_text("Phone", exact=True)
+            .locator("..")
+            .locator("dd")
+        ).to_have_text("+243812345678", timeout=15_000)
         admin_page.get_by_label("Name").fill("E2E Customer Updated")
         admin_page.get_by_label("City").fill("Matadi")
         admin_page.get_by_label("Preferred language").select_option("lingala")
