@@ -155,7 +155,7 @@ def test_operator_explicitly_reviews_and_submits_order_proposal() -> None:
     reply_requests: list[tuple[str, int]] = []
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
-        context = browser.new_context(ignore_https_errors=True)
+        context = browser.new_context(ignore_https_errors=True, viewport={"width": 1024, "height": 768})
         page = context.new_page()
         page.on(
             "response",
@@ -164,9 +164,11 @@ def test_operator_explicitly_reviews_and_submits_order_proposal() -> None:
             else None,
         )
         _login(page, "e2e.operator", OPERATOR_PASSWORD)
-        page.goto(f"{BASE_URL}/inbox/{CONVERSATION_ID}", wait_until="domcontentloaded")
-        page.get_by_role("button", name="Find a product").click()
+        page.goto(f"{BASE_URL}/business/orders", wait_until="domcontentloaded")
+        page.get_by_role("link", name="Create Order").click()
+        page.locator(f'a[href="/inbox/{CONVERSATION_ID}"]').click()
         dialog = page.get_by_role("dialog", name="Find a product")
+        expect(dialog).to_be_visible()
         dialog.get_by_label("Product name, model or SKU").fill(SKU)
         dialog.get_by_role("button", name="Search").click()
         dialog.get_by_role("button", name=f"{PRODUCT} — {VARIANT}").click()
@@ -184,7 +186,39 @@ def test_operator_explicitly_reviews_and_submits_order_proposal() -> None:
         expect(composer).to_have_value(proposal_text)
         expect(composer).to_have_attribute("readonly", "")
         assert reply_requests == []
-        page.get_by_role("button", name="Send").click()
+        send = page.get_by_role("button", name="Send")
+        expect(send).to_be_enabled()
+        for width in (390, 650, 1024, 1440):
+            page.set_viewport_size({"width": width, "height": 768})
+            geometry = send.evaluate("""button => {
+            const rect = element => {
+                const r = element.getBoundingClientRect();
+                return { x: r.x, y: r.y, width: r.width, height: r.height };
+            };
+            const center = rect(button);
+            const hit = document.elementFromPoint(center.x + center.width / 2, center.y + center.height / 2);
+            return {
+                send: center,
+                header: rect(document.querySelector('.workspace-header')),
+                hit: hit?.className,
+                hitTag: hit?.tagName,
+                inboxRows: getComputedStyle(document.querySelector('.inbox-page')).gridTemplateRows,
+                scroll: [...document.querySelectorAll('.app-main, .inbox-page, .inbox-layout, .conversation-workspace, .workspace-columns, .timeline-panel, .message-history')].map(e => ({className: e.className, clientHeight: e.clientHeight, scrollHeight: e.scrollHeight, overflowY: getComputedStyle(e).overflowY})),
+                horizontalOverflow: document.documentElement.scrollWidth > innerWidth,
+            };
+        }""")
+            print(f"Composer geometry at {width}px: {geometry}")
+            assert geometry["send"]["y"] >= geometry["header"]["y"] + geometry["header"]["height"]
+            assert geometry["send"]["y"] + geometry["send"]["height"] <= 768
+            assert geometry["hitTag"] == "BUTTON"
+            assert not geometry["horizontalOverflow"]
+        send.focus()
+        expect(send).to_be_focused()
+        page.keyboard.press("Tab")
+        page.keyboard.press("Shift+Tab")
+        expect(send).to_be_focused()
+        page.set_viewport_size({"width": 1024, "height": 768})
+        send.click()
         expect(page.get_by_text("Pending delivery")).to_be_visible(timeout=15_000)
         assert len(reply_requests) == 1 and reply_requests[0][1] == 202
         context.close()
