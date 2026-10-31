@@ -38,6 +38,15 @@ class ReviewSafetyTests(unittest.TestCase):
                 review.stop_owned(state)
             run.assert_not_called()
 
+    def test_owned_volumes_excludes_bind_mounts_and_unrelated_volumes(self):
+        mounts = [
+            {"Type": "bind", "Destination": "/docker-entrypoint-initdb.d/00-init.sql"},
+            {"Type": "volume", "Destination": "/var/lib/postgresql/data", "Name": "disposable-postgres"},
+            {"Type": "volume", "Destination": "/unrelated", "Name": "unrelated-volume"},
+        ]
+        with patch.object(review, "command", return_value=review.json.dumps(mounts)):
+            self.assertEqual(review.owned_data_volumes("owned-postgres"), ["disposable-postgres"])
+
 
 if __name__ == "__main__":
     unittest.main()

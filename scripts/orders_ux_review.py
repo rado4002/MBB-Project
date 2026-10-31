@@ -69,10 +69,18 @@ def owned_container(name: str, expected_id: str, token: str) -> bool:
     return True
 
 
+def owned_data_volumes(name: str) -> list[str]:
+    mounts = json.loads(command("docker", "inspect", "--format", "{{json .Mounts}}", name))
+    return [mount["Name"] for mount in mounts
+            if mount.get("Type") == "volume" and mount.get("Destination") in
+            ("/var/lib/postgresql/data", "/data")]
+
+
 def stop_owned(state: dict) -> None:
     token = state["token"]
     # Validate every existing target before stopping any resource.
     existing = [name for name, identity in state["containers"].items() if owned_container(name, identity, token)]
+    volumes = [volume for name in existing for volume in owned_data_volumes(name)]
     pid = state.get("api_pid")
     if pid:
         import psutil
@@ -92,6 +100,8 @@ def stop_owned(state: dict) -> None:
             process.kill()
     for name in existing:
         subprocess.run(["docker", "rm", "-f", name], check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+    for volume in volumes:
+        subprocess.run(["docker", "volume", "rm", volume], check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
     runtime = Path(state["runtime_dir"]).resolve()
     allowed = STATE.parent.resolve()
     if runtime.parent != allowed or runtime.name != token:
