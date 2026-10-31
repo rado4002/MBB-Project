@@ -811,7 +811,7 @@ export function OrdersPage() {
   const chooseOffset = (value: number) => setParams({ status: status ?? 'all', offset: String(value) })
 
   return <section className="orders-page">
-    <header className="business-page-heading"><div><p className="eyebrow">Business · Orders</p><h1>Orders</h1></div></header>
+    <header className="business-page-heading"><div><p className="eyebrow">Business · Orders</p><h1>Orders</h1></div>{!orderId && auth.session?.capabilities.includes('order_draft.prepare') && auth.session.capabilities.includes('conversation.read') && <Link className="button button--primary" to="/inbox" state={{ createOrder: true, returnToOrders: listPath }}>Create Order</Link>}</header>
     <p className="orders-caution">Accepted Orders are not proof of payment, reserved stock, or delivery.</p>
     <div className={`orders-workspace${orderId ? ' orders-workspace--selected' : ''}`}>
       <section className="orders-list" aria-label="Orders queue">

@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { expectAccessible } from '../../test/accessibility'
-import { sessionFixture } from '../../test/fixtures'
+import { conversationDetailFixture, conversationFixture, sessionFixture } from '../../test/fixtures'
 import { renderApp } from '../../test/renderApp'
 import { server } from '../../test/server'
 
@@ -63,6 +63,70 @@ function setup(conversation: string | null = conversationId, role: 'operator' | 
 }
 
 describe('read-only Business Orders', () => {
+  it.each(['administrator', 'operator'] as const)('guides %s from Orders to an owned Conversation without creating an Order', async (role) => {
+    setup(conversationId, role)
+    let writes = 0
+    server.use(
+      http.get('/api/v1/operator/conversations', () => HttpResponse.json({ items: [conversationFixture(conversationId)], next_cursor: null })),
+      http.get('/api/v1/operator/conversations/:conversationId', () => HttpResponse.json({
+        ...conversationDetailFixture(conversationId),
+        ownership: { owner_type: 'human', human_owner: { account_id: 'account-test-only', display_name: 'Owner' }, ai_execution_state: 'paused', version: 2, updated_at: '2026-10-01T12:00:00Z' },
+      })),
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', () => HttpResponse.json({ items: [], next_older_cursor: null })),
+      http.post('/api/v1/operator/conversations/:conversationId/order-drafts', () => { writes++; return HttpResponse.json({}, { status: 500 }) }),
+    )
+    const user = userEvent.setup()
+    renderApp('/business/orders?status=pending&offset=0')
+    await user.click(await screen.findByRole('link', { name: 'Create Order' }))
+    expect(screen.getByRole('note')).toHaveTextContent('Customer must confirm it exactly')
+    expect(screen.getByRole('link', { name: 'Back to Orders' })).toHaveAttribute('href', '/business/orders?status=pending&offset=0')
+    await user.click(await screen.findByRole('link', { name: /Conversation with Marie Client/ }))
+    expect(await screen.findByRole('dialog', { name: 'Find a product' })).toBeInTheDocument()
+    await expectAccessible(document.body)
+    expect(writes).toBe(0)
+    await user.click(screen.getByRole('button', { name: 'Back to conversation' }))
+    await user.click(screen.getByRole('link', { name: 'Back to Inbox' }))
+    await user.click(screen.getByRole('link', { name: 'Back to Orders' }))
+    expect(await screen.findByRole('combobox', { name: 'Order status' })).toHaveValue('pending')
+  })
+
+  it('does not open draft preparation for a Conversation missing a Lead', async () => {
+    setup()
+    server.use(
+      http.get('/api/v1/operator/conversations', () => HttpResponse.json({ items: [conversationFixture(conversationId)], next_cursor: null })),
+      http.get('/api/v1/operator/conversations/:conversationId', () => HttpResponse.json({ ...conversationDetailFixture(conversationId), lead: null })),
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', () => HttpResponse.json({ items: [], next_older_cursor: null })),
+    )
+    const user = userEvent.setup()
+    renderApp('/business/orders')
+    await user.click(await screen.findByRole('link', { name: 'Create Order' }))
+    await user.click(await screen.findByRole('link', { name: /Conversation with Marie Client/ }))
+    expect(await screen.findByText(/No verified Lead is linked/)).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: 'Find a product' })).not.toBeInTheDocument()
+  })
+
+  it('keeps an unowned Conversation read-only and explains the ownership requirement', async () => {
+    setup()
+    server.use(
+      http.get('/api/v1/operator/conversations', () => HttpResponse.json({ items: [conversationFixture(conversationId)], next_cursor: null })),
+      http.get('/api/v1/operator/conversations/:conversationId', () => HttpResponse.json(conversationDetailFixture(conversationId))),
+      http.get('/api/v1/operator/conversations/:conversationId/timeline', () => HttpResponse.json({ items: [], next_older_cursor: null })),
+    )
+    const user = userEvent.setup()
+    renderApp('/business/orders')
+    await user.click(await screen.findByRole('link', { name: 'Create Order' }))
+    await user.click(await screen.findByRole('link', { name: /Conversation with Marie Client/ }))
+    expect(await screen.findByText(/not ready for an Order draft/)).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: 'Find a product' })).not.toBeInTheDocument()
+  })
+
+  it('does not offer Create Order without draft capability', async () => {
+    setup()
+    server.use(http.get('/api/v1/auth/session', () => HttpResponse.json({ ...sessionFixture('operator'), capabilities: ['product_offer.read', 'order.read', 'conversation.read'] })))
+    renderApp('/business/orders')
+    expect(await screen.findByRole('heading', { name: 'Orders' })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Create Order' })).not.toBeInTheDocument()
+  })
   it('shows paging controls and keeps filtered Orders beyond the first 20 accessible', async () => {
     const orders = Array.from({ length: 23 }, (_, index) => ({
       ...summary,

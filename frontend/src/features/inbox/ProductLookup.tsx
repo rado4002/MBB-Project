@@ -53,11 +53,13 @@ export function ProductLookup({
   conversationId,
   expectedOwnershipVersion,
   canPrepareDraft,
+  guidedOpen = false,
   onUseInReply,
 }: {
   conversationId: string
   expectedOwnershipVersion: number | null
   canPrepareDraft: boolean
+  guidedOpen?: boolean
   onUseInReply: (draft: OperatorOrderDraft) => void
 }) {
   const auth = useAuth()
@@ -70,6 +72,13 @@ export function ProductLookup({
   const detailHeading = useRef<HTMLHeadingElement>(null)
   const controller = useRef<AbortController | null>(null)
   const [open, setOpen] = useState(false)
+  const guidedOpened = useRef(false)
+  useEffect(() => {
+    if (guidedOpen && !guidedOpened.current) {
+      guidedOpened.current = true
+      setOpen(true)
+    }
+  }, [guidedOpen])
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<ProductOffer[] | null>(null)
   const [offer, setOffer] = useState<ProductOffer | null>(null)

@@ -65,6 +65,7 @@ function QueueRow({
   selected,
   recentlyViewed,
   search,
+  guideState,
   linkRef,
   onSelect,
 }: {
@@ -72,6 +73,7 @@ function QueueRow({
   selected: boolean
   recentlyViewed: boolean
   search: string
+  guideState: { createOrder: true; returnToOrders: string } | null
   linkRef: Ref<HTMLAnchorElement>
   onSelect: (conversationId: string) => void
 }) {
@@ -84,6 +86,7 @@ function QueueRow({
       <Link
         className="conversation-row__link"
         to={{ pathname: `/inbox/${encodeURIComponent(item.conversation_id)}`, search }}
+        state={guideState}
         aria-current={selected ? 'page' : undefined}
         ref={linkRef}
         onClick={() => onSelect(item.conversation_id)}
@@ -127,6 +130,10 @@ export function ConversationQueuePage() {
   const queueScrollPositionRef = useRef<number | null>(null)
   const auth = useAuth()
   const location = useLocation()
+  const guideState = location.state?.createOrder === true && typeof location.state.returnToOrders === 'string'
+    && location.state.returnToOrders.startsWith('/business/orders?')
+    ? { createOrder: true as const, returnToOrders: location.state.returnToOrders }
+    : null
   const { conversationId } = useParams<{ conversationId?: string }>()
   const [lastConversationId, setLastConversationId] = useState<string | undefined>(conversationId)
   const [listSearch, setListSearch] = useState('')
@@ -228,6 +235,7 @@ export function ConversationQueuePage() {
           <h1 tabIndex={-1} ref={headingRef}>Inbox</h1>
         </div>
       </header>
+      {guideState && <div className="inbox-order-guide" role="note"><p><strong>Create Order:</strong> Select an eligible Customer conversation you own, then review a Product Offer and prepare a draft. Preparing or sending a proposal does not create an Order; the Customer must confirm it exactly.</p><p>Ownership is never changed automatically. If a conversation is unavailable, choose another or refresh the queue.</p><Link to={guideState.returnToOrders}>Back to Orders</Link></div>}
 
       <div className={`inbox-layout${conversationId ? ' inbox-layout--selected' : ''}`}>
         <section className="queue-panel" aria-labelledby="queue-heading" aria-busy={queue.loading || queue.refreshing}>
@@ -299,6 +307,7 @@ export function ConversationQueuePage() {
                     selected={item.conversation_id === conversationId}
                     recentlyViewed={!conversationId && item.conversation_id === lastConversationId}
                     search={location.search}
+                    guideState={guideState}
                     linkRef={(node) => {
                       if (node) rowLinksRef.current.set(item.conversation_id, node)
                       else rowLinksRef.current.delete(item.conversation_id)
@@ -325,6 +334,8 @@ export function ConversationQueuePage() {
             key={conversationId}
             client={client}
             conversationId={conversationId}
+            createOrderGuide={Boolean(guideState)}
+            createOrderReturnTo={guideState?.returnToOrders}
             backTo={`/inbox${location.search}`}
             onOwnershipChanged={() => queue.refresh()}
           />

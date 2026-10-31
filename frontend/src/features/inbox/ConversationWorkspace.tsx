@@ -1176,11 +1176,15 @@ export function ConversationWorkspace({
   conversationId,
   backTo,
   onOwnershipChanged,
+  createOrderGuide = false,
+  createOrderReturnTo,
 }: {
   client: ConversationApiClient
   conversationId: string
   backTo: string
   onOwnershipChanged: () => Promise<void>
+  createOrderGuide?: boolean
+  createOrderReturnTo?: string
 }) {
   const auth = useAuth()
   const detail = useConversationDetail(client, conversationId)
@@ -1283,7 +1287,7 @@ export function ConversationWorkspace({
   return (
     <section className="conversation-workspace" aria-labelledby="workspace-heading">
       <header className="workspace-header">
-        <Link className="button button--secondary" to={backTo} aria-label="Back to Inbox">
+        <Link className="button button--secondary" to={backTo} state={createOrderReturnTo ? { createOrder: true, returnToOrders: createOrderReturnTo } : undefined} aria-label="Back to Inbox">
           <span className="back-label back-label--long" aria-hidden="true">Back to Inbox</span>
           <span className="back-label back-label--short" aria-hidden="true">Back</span>
         </Link>
@@ -1309,13 +1313,16 @@ export function ConversationWorkspace({
           ) : null}
         />
         <div className="workspace-toolbar__actions">
+          {createOrderGuide && <p role="status">{detail.loading ? 'Checking Order draft eligibility…' : detail.error ? 'Conversation unavailable. Return to the queue and refresh or select another.' : !detail.detail?.lead ? 'No verified Lead is linked to this conversation. Select another conversation.' : currentReplyReason !== null ? 'This conversation is not ready for an Order draft. Review ownership and reply eligibility; no ownership change is automatic.' : 'Review the Product Offer. A draft or sent proposal creates no Order until the Customer confirms exactly.'}</p>}
           {auth.session?.capabilities.includes('product_offer.read') ? (
             <ProductLookup
               key={conversationId}
               conversationId={conversationId}
               expectedOwnershipVersion={ownership?.version ?? null}
+              guidedOpen={createOrderGuide && auth.session.capabilities.includes('order_draft.prepare') && Boolean(detail.detail?.lead) && currentReplyReason === null && ownership?.owner_type === 'human' && ownership.human_owner?.account_id === auth.session.human.account_id && ownership.ai_execution_state === 'paused'}
               canPrepareDraft={Boolean(
                 auth.session.capabilities.includes('order_draft.prepare')
+                && Boolean(detail.detail?.lead)
                 && ownership?.owner_type === 'human'
                 && ownership.human_owner?.account_id === auth.session.human.account_id
                 && ownership.ai_execution_state === 'paused'

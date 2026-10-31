@@ -845,6 +845,9 @@ h2 { font-size: 1.125rem; }
 .stock-activity time { color: #64748b; font-size: .8rem; }
 /* Read-only Orders queue and the Order-owned accepted snapshot. */
 .orders-page { max-width: 100rem; margin-inline: auto; padding: var(--space-8); overflow-wrap: anywhere; }
+.inbox-order-guide { margin: var(--space-3) var(--space-4); padding: var(--space-3) var(--space-4); border: 1px solid #bfdbfe; border-radius: .5rem; background: #eff6ff; color: #1e3a5f; }
+.inbox-order-guide p { margin: 0 0 var(--space-2); }
+.inbox-order-guide p:last-of-type { margin-bottom: var(--space-1); }
 .orders-caution, .orders-current-note { color: #64748b; font-size: .9rem; }
 .orders-caution { margin: calc(-1 * var(--space-3)) 0 var(--space-5); }
 .orders-workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-5); align-items: start; }
