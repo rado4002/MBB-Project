@@ -1098,15 +1098,29 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
             wait_until="domcontentloaded",
         )
         admin_detail = admin_page.get_by_role("region", name="Order detail")
-        expect(admin_detail.get_by_text("Ready to prepare")).to_be_visible(
-            timeout=15_000
-        )
         expect(
-            admin_detail.get_by_role(
-                "region", name="Preparation readiness"
-            ).get_by_text("Verified completed Payment matches the accepted Order")
-        ).to_be_visible()
-        expect(admin_detail.get_by_text("Full allocation · 2 of 2")).to_be_visible()
+            admin_detail.get_by_text(
+                re.compile(r"Current focus.*Ready for authorized preparation")
+            )
+        ).to_be_visible(timeout=15_000)
+        expect(admin_detail.get_by_role("button", name="Prepare Order")).to_be_visible()
+        preparation = admin_detail.get_by_role("region", name="Preparation readiness")
+        ready_evidence = preparation.get_by_text("Ready to prepare", exact=True)
+        payment_evidence = preparation.get_by_text(
+            "Verified completed Payment matches the accepted Order"
+        )
+        allocation_evidence = preparation.get_by_text("Full allocation · 2 of 2")
+        expect(ready_evidence).to_be_hidden()
+        expect(payment_evidence).to_be_hidden()
+        expect(allocation_evidence).to_be_hidden()
+        evidence_summary = preparation.get_by_text("Payment and Stock evidence")
+        evidence_summary.focus()
+        expect(evidence_summary).to_be_focused()
+        admin_page.keyboard.press("Enter")
+        expect(evidence_summary).to_be_focused()
+        expect(ready_evidence).to_be_visible()
+        expect(payment_evidence).to_be_visible()
+        expect(allocation_evidence).to_be_visible()
         admin_page.set_viewport_size({"width": 1024, "height": 768})
         expect(admin_page.get_by_role("region", name="Orders queue")).to_be_hidden()
         assert admin_page.evaluate("document.documentElement.scrollWidth <= innerWidth")
@@ -1127,7 +1141,22 @@ def test_products_stock_inbox_complete_journey(monkeypatch: pytest.MonkeyPatch) 
             timeout=15_000
         )
         expect(admin_detail.get_by_text("Preparing", exact=True).first).to_be_visible()
-        expect(admin_detail.get_by_text("Ready to dispatch")).to_be_visible()
+        expect(
+            admin_detail.get_by_text(
+                re.compile(r"Current focus.*Ready for authorized dispatch")
+            )
+        ).to_be_visible()
+        dispatch_readiness = admin_detail.get_by_role(
+            "region", name="Dispatch readiness"
+        )
+        dispatch_evidence = dispatch_readiness.get_by_text(
+            "Ready to dispatch", exact=True
+        )
+        expect(dispatch_evidence).to_be_hidden()
+        dispatch_readiness.get_by_text(
+            "Payment, Stock and dispatch evidence"
+        ).click()
+        expect(dispatch_evidence).to_be_visible()
         admin_page.set_viewport_size({"width": 390, "height": 844})
         assert admin_page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         expect(
