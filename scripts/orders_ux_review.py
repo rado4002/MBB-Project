@@ -1,7 +1,4 @@
-"""Start, inspect, and stop a disposable localhost Orders UX review runtime.
-
-This foundation creates no Orders. Run from the repository root with Python 3.12.
-"""
+"""Start, inspect, and stop a disposable localhost Orders UX review runtime."""
 
 from __future__ import annotations
 
@@ -74,6 +71,20 @@ def owned_data_volumes(name: str) -> list[str]:
     return [mount["Name"] for mount in mounts
             if mount.get("Type") == "volume" and mount.get("Destination") in
             ("/var/lib/postgresql/data", "/data")]
+
+
+def verify_seed_target(name: str, identity: str, token: str) -> None:
+    if not name.startswith(f"mbb-orders-ux-postgres-{token}") or not owned_container(name, identity, token):
+        raise RuntimeError("Review PostgreSQL ownership could not be established")
+    review_volumes = owned_data_volumes(name)
+    if len(review_volumes) != 1:
+        raise RuntimeError("Review PostgreSQL must have exactly one dedicated data volume")
+    try:
+        retained_volumes = owned_data_volumes("mbb-p2-postgres")
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError("Retained P2 PostgreSQL isolation could not be verified") from exc
+    if review_volumes[0] in retained_volumes:
+        raise RuntimeError("Review PostgreSQL shares retained P2 storage")
 
 
 def stop_owned(state: dict) -> None:
@@ -173,6 +184,9 @@ def start() -> None:
         environment = {**os.environ, "APP_ENV": "development", "DEBUG": "false", "PYTHONPATH": str(BACKEND), "POSTGRES_HOST": "127.0.0.1", "POSTGRES_PORT": str(postgres_port), "POSTGRES_DB": "mbb", "POSTGRES_USER": "mbb_ux", "POSTGRES_PASSWORD": "mbb_ux_disposable", "REDIS_HOST": "127.0.0.1", "REDIS_PORT": str(redis_port), "CELERY_BROKER_URL": f"redis://127.0.0.1:{redis_port}/0", "CELERY_RESULT_BACKEND": f"redis://127.0.0.1:{redis_port}/1", "BROWSER_AUTH_ENABLED": "true", "BROWSER_ALLOWED_ORIGIN": origin, "BROWSER_SESSION_HMAC_SECRET": secrets.token_hex(32), "BROWSER_CSRF_HMAC_SECRET": secrets.token_hex(32), "BROWSER_IDEMPOTENCY_HMAC_SECRET": secrets.token_hex(32), "JWT_SECRET": secrets.token_hex(32), "AI_ADAPTER": "disabled", "AI_TURN_PROVIDER": "disabled", "WHATSAPP_SEND_ENABLED": "false", "CRM_SEND_ENABLED": "false", "PAYMENT_SEND_ENABLED": "false", "RELANCE_ENABLED": "false", "SCHEDULED_TASKS_ENABLED": "false", "M1_MAPS_FANOUT_ENABLED": "false"}
         subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], cwd=BACKEND, env=environment, check=True)
         seed_accounts(environment, password)
+        verify_seed_target(postgres_name, state["containers"][postgres_name], token)
+        subprocess.run([sys.executable, str(ROOT / "scripts" / "seed_orders_ux_review.py")], cwd=BACKEND,
+                       env={**environment, "MBB_ORDERS_UX_OWNED": "true"}, check=True)
         certificate, private_key, nginx_config = (runtime / name for name in ("cert.pem", "key.pem", "nginx.conf"))
         subprocess.run(["openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048", "-keyout", str(private_key), "-out", str(certificate), "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         nginx_config.write_text("events {}\nhttp { include /etc/nginx/mime.types; server { listen 443 ssl; server_name localhost; ssl_certificate /etc/nginx/certs/cert.pem; ssl_certificate_key /etc/nginx/certs/key.pem; root /usr/share/nginx/html; index index.html; location /api/ { proxy_pass http://host.docker.internal:" + str(api_port) + "; proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto https; } location / { try_files $uri $uri/ /index.html; } } }\n", encoding="utf-8")
@@ -192,7 +206,7 @@ def start() -> None:
         state["accounts"] = ["uxreview.administrator", "uxreview.operator"]
         state["password"] = password
         STATE.write_text(json.dumps(state, indent=2), encoding="utf-8")
-        print(f"Review URL: {state['url']}\nAccounts: {', '.join(state['accounts'])}\nPassword: {password}\nOrders: none (foundation only)\nStop: python scripts/orders_ux_review.py stop")
+        print(f"Review URL: {state['url']}\nAccounts: {', '.join(state['accounts'])}\nPassword: {password}\nOrders: 17 fictional UX review records\nStop: python scripts/orders_ux_review.py stop")
     except BaseException:
         stop_owned(state)
         raise
@@ -211,7 +225,7 @@ def main() -> None:
     for name, identity in state["containers"].items():
         owned_container(name, identity, state["token"])
     if action == "status":
-        print(f"Review URL: {state['url']}\nAccounts: {', '.join(state['accounts'])}\nOrders: none (foundation only)")
+        print(f"Review URL: {state['url']}\nAccounts: {', '.join(state['accounts'])}\nOrders: fictional UX review records")
     else:
         stop_owned(state)
         print("Stopped only registered Orders UX review resources")

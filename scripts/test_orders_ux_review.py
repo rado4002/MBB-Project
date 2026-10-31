@@ -47,6 +47,16 @@ class ReviewSafetyTests(unittest.TestCase):
         with patch.object(review, "command", return_value=review.json.dumps(mounts)):
             self.assertEqual(review.owned_data_volumes("owned-postgres"), ["disposable-postgres"])
 
+    def test_seed_target_requires_owned_container_and_separate_data_volume(self):
+        with patch.object(review, "owned_container", return_value=True), patch.object(
+            review, "owned_data_volumes", side_effect=[["shared"], ["shared"]]
+        ):
+            with self.assertRaisesRegex(RuntimeError, "shares retained P2 storage"):
+                review.verify_seed_target("mbb-orders-ux-postgres-token", "id", "token")
+        with patch.object(review, "owned_container", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "ownership could not be established"):
+                review.verify_seed_target("mbb-orders-ux-postgres-token", "id", "token")
+
 
 if __name__ == "__main__":
     unittest.main()
