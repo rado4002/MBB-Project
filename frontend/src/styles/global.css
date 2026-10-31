@@ -848,23 +848,35 @@ h2 { font-size: 1.125rem; }
 .orders-caution, .orders-current-note { color: #64748b; font-size: .9rem; }
 .orders-caution { margin: calc(-1 * var(--space-3)) 0 var(--space-5); }
 .orders-workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-5); align-items: start; }
+.orders-workspace:not(.orders-workspace--selected) { max-width: 56rem; }
 .orders-workspace--selected { grid-template-columns: minmax(16rem, .8fr) minmax(0, 1.4fr); }
 .orders-list, .orders-detail { min-width: 0; padding: var(--space-5); border: 1px solid #dce3ee; border-radius: .5rem; background: #fff; }
+.orders-workspace--selected .orders-list { max-height: calc(100dvh - 7rem); overflow-y: auto; scroll-padding-block: var(--space-4); }
 .orders-list label { display: block; margin-bottom: var(--space-2); font-weight: 650; }
 .orders-list select { width: min(100%, 20rem); min-height: 2.75rem; padding: var(--space-2); border: 1px solid #dce3ee; border-radius: .5rem; background: #fff; color: #0f172a; font: inherit; }
 .orders-list ul, .orders-lines { list-style: none; margin: var(--space-4) 0; padding: 0; }
-.orders-list li { border-top: 1px solid #dce3ee; }
-.orders-list li a { display: grid; gap: var(--space-2); padding: var(--space-4) var(--space-2); color: #0f172a; text-decoration: none; }
-.orders-list li a:hover, .orders-list li a[aria-current="page"] { background: #eef4ff; }
-.orders-list li span, .orders-list time { color: #64748b; font-size: .875rem; }
+.orders-list ul { border: 1px solid #dce3ee; border-radius: .5rem; overflow: clip; }
+.orders-list li + li { border-top: 1px solid #dce3ee; }
+.orders-list li a { display: grid; gap: var(--space-2); padding: var(--space-3) var(--space-4); color: #0f172a; text-decoration: none; }
+.orders-list li a:hover { background: #f6f9ff; }
+.orders-list li a[aria-current="page"] { background: #eef4ff; box-shadow: inset .2rem 0 #2563eb; }
+.orders-list li a:focus-visible { position: relative; z-index: 1; outline: 2px solid #1d4ed8; outline-offset: -3px; border-radius: .25rem; }
+.orders-queue-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: .125rem var(--space-3); }
+.orders-list li .orders-queue-heading strong { color: #0f172a; font-size: .95rem; }
+.orders-list li .orders-queue-heading time { color: #64748b; font-size: .78rem; }
+.orders-list li .orders-queue-product { color: #334155; font-size: .9rem; line-height: 1.35; }
 .orders-queue-meta { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-5); }
 .orders-list li .orders-queue-meta > span { display: grid; gap: .125rem; color: #0f172a; }
 .orders-queue-meta small { color: #64748b; font-size: .72rem; font-weight: 650; letter-spacing: .02em; text-transform: uppercase; }
 .orders-queue-meta strong { font-size: .95rem; }
-.orders-queue-states { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2) var(--space-4); margin: var(--space-2) 0 0; }
-.orders-queue-states > div { min-width: 0; padding-top: var(--space-2); border-top: 1px solid #e8edf4; }
+.orders-queue-states { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2) var(--space-4); margin: 0; padding-top: var(--space-2); border-top: 1px solid #e8edf4; }
+.orders-queue-states > div { min-width: 0; }
 .orders-queue-states dt { color: #64748b; font-size: .72rem; font-weight: 650; text-transform: uppercase; }
-.orders-queue-states dd { margin: .125rem 0 0; color: #0f172a; font-size: .8rem; font-weight: 650; }
+.orders-queue-states dd { width: fit-content; margin: .125rem 0 0; padding: .1rem .4rem; border-radius: .25rem; background: #f1f5f9; color: #475569; font-size: .8rem; font-weight: 650; }
+.orders-queue-states dd[data-tone="progress"] { background: #eff6ff; color: #1d4ed8; }
+.orders-queue-states dd[data-tone="success"] { background: #ecfdf3; color: #166534; }
+.orders-queue-states dd[data-tone="warning"] { background: #fff7ed; color: #9a3412; }
+.orders-queue-states dd[data-tone="neutral"] { background: #f8fafc; color: #334155; }
 .orders-list li .orders-queue-alert { color: #b42318; font-weight: 700; }
 .orders-pagination, .orders-links { display: flex; flex-wrap: wrap; gap: var(--space-3); }
 .orders-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-top: var(--space-5); }

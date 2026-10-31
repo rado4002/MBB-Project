@@ -826,25 +826,24 @@ export function OrdersPage() {
         {list && <ul>{list.items.map((order) => <li key={order.order_id}>
           <Link data-order-id={order.order_id} onClick={() => { lastSelectedOrder.current = order.order_id }}
             to={`/business/orders/${encodeURIComponent(order.order_id)}?${new URLSearchParams({ status: status ?? 'all', offset: String(offset) })}`} aria-current={order.order_id === orderId ? 'page' : undefined}>
-            <strong>Order {order.order_id.slice(0, 8)}</strong>
-            <span>{order.first_product_name ?? 'Product unavailable'}</span>
+            <span className="orders-queue-heading"><strong>Order {order.order_id.slice(0, 8)}</strong><time dateTime={order.created_at}>{formatDate(order.created_at)}</time></span>
+            <span className="orders-queue-product">{order.first_product_name ?? 'Product unavailable'}</span>
             <span className="orders-queue-meta">
               <span><small>Items</small><strong>{order.item_count}</strong></span>
               <span><small>Accepted total</small><strong>{formatAmount(order.total_cdf, order.currency)}</strong></span>
             </span>
-            <time dateTime={order.created_at}>{formatDate(order.created_at)}</time>
             <dl className="orders-queue-states">
-              <div><dt>Order</dt><dd>{humanize(order.status)}</dd></div>
-              <div><dt>Payment</dt><dd>{queuePayment(order.readiness.payment_state)}</dd></div>
-              <div><dt>Stock</dt><dd>{queueStock(order)}</dd></div>
-              <div><dt>Delivery</dt><dd>{queueDelivery(order)}</dd></div>
+              <div><dt>Order</dt><dd data-tone={order.status === 'delivered' ? 'success' : order.status === 'cancelled' ? 'muted' : order.status === 'pending' ? 'neutral' : 'progress'}>{humanize(order.status)}</dd></div>
+              <div><dt>Payment</dt><dd data-tone={order.readiness.payment_state === 'verified' ? 'success' : order.readiness.payment_state === 'mismatch' ? 'warning' : 'muted'}>{queuePayment(order.readiness.payment_state)}</dd></div>
+              <div><dt>Stock</dt><dd data-tone={order.readiness.stock_state === 'full_unconsumed' && order.readiness.inventory_state === 'ready' ? 'success' : order.readiness.stock_state === 'mismatch' || order.readiness.inventory_state === 'conflict' && order.readiness.stock_state === 'full_unconsumed' ? 'warning' : 'muted'}>{queueStock(order)}</dd></div>
+              <div><dt>Delivery</dt><dd data-tone={order.readiness.delivery_state === 'delivered' ? 'success' : order.readiness.delivery_state === 'delivering' ? 'progress' : 'muted'}>{queueDelivery(order)}</dd></div>
             </dl>
             {order.readiness.issue_state === 'open' && <span className="orders-queue-alert">Open delivery issue</span>}
           </Link>
         </li>)}</ul>}
-        {list && <div className="orders-pagination">
-          <button className="button button--secondary" disabled={offset === 0} onClick={() => chooseOffset(Math.max(0, offset - 20))}>Previous</button>
-          <button className="button button--secondary" disabled={!list.has_more || offset + 20 > 10000} onClick={() => chooseOffset(offset + 20)}>Next</button>
+        {list && (offset > 0 || list.has_more && offset + 20 <= 10000) && <div className="orders-pagination">
+          {offset > 0 && <button className="button button--secondary" onClick={() => chooseOffset(Math.max(0, offset - 20))}>Previous</button>}
+          {list.has_more && offset + 20 <= 10000 && <button className="button button--secondary" onClick={() => chooseOffset(offset + 20)}>Next</button>}
         </div>}
       </section>
       {orderId && <section className="orders-detail" aria-label="Order detail">

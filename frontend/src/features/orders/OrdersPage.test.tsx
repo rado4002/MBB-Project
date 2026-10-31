@@ -63,11 +63,36 @@ function setup(conversation: string | null = conversationId, role: 'operator' | 
 }
 
 describe('read-only Business Orders', () => {
+  it('hides inactive paging controls and keeps Orders beyond the first 20 accessible', async () => {
+    const orders = Array.from({ length: 23 }, (_, index) => ({
+      ...summary,
+      order_id: `${String(index + 1).padStart(8, '0')}-1111-4111-8111-111111111111`,
+      first_product_name: `Fictional Product ${index + 1}`,
+    }))
+    setup()
+    server.use(http.get(base, ({ request }) => {
+      const offset = Number(new URL(request.url).searchParams.get('offset') ?? '0')
+      return HttpResponse.json({ items: orders.slice(offset, offset + 20), has_more: offset + 20 < orders.length })
+    }))
+    const user = userEvent.setup()
+    renderApp('/business/orders?status=all&offset=0')
+    expect(await screen.findAllByRole('link', { name: /Fictional Product/ })).toHaveLength(20)
+    expect(screen.queryByRole('button', { name: 'Previous' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Next' }))
+    expect(await screen.findAllByRole('link', { name: /Fictional Product/ })).toHaveLength(3)
+    expect(screen.getByText('Fictional Product 23')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Next' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Previous' }))
+    expect(await screen.findAllByRole('link', { name: /Fictional Product/ })).toHaveLength(20)
+  })
+
   it('shows the accepted snapshot and associated Inbox link without actions', async () => {
     setup()
     const user = userEvent.setup()
     renderApp('/business/orders')
     const queueLink = await screen.findByRole('link', { name: /Order 11111111.*Fictional Air Fryer/i })
+    expect(screen.queryByRole('button', { name: 'Previous' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Next' })).not.toBeInTheDocument()
     expect(within(queueLink).getByText('Items')).toBeInTheDocument()
     expect(within(queueLink).getByText('1')).toBeInTheDocument()
     expect(within(queueLink).getByText('Accepted total')).toBeInTheDocument()
