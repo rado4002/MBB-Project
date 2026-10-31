@@ -841,10 +841,10 @@ export function OrdersPage() {
             {order.readiness.issue_state === 'open' && <span className="orders-queue-alert">Open delivery issue</span>}
           </Link>
         </li>)}</ul>}
-        {list && (offset > 0 || list.has_more && offset + 20 <= 10000) && <div className="orders-pagination">
-          {offset > 0 && <button className="button button--secondary" onClick={() => chooseOffset(Math.max(0, offset - 20))}>Previous</button>}
-          {list.has_more && offset + 20 <= 10000 && <button className="button button--secondary" onClick={() => chooseOffset(offset + 20)}>Next</button>}
-        </div>}
+        <div className="orders-pagination">
+          <button className="button button--secondary" disabled={!list || offset === 0} onClick={() => chooseOffset(Math.max(0, offset - 20))}>Previous</button>
+          <button className="button button--secondary" disabled={!list || !list.has_more || offset + 20 > 10000} onClick={() => chooseOffset(offset + 20)}>Next</button>
+        </div>
       </section>
       {orderId && <section className="orders-detail" aria-label="Order detail">
         <Link className="orders-back" to={listPath}>Back to Orders</Link>
