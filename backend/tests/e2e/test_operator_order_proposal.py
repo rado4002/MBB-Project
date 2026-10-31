@@ -8,6 +8,8 @@ import re
 import sys
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from playwright.sync_api import expect, sync_playwright
@@ -22,6 +24,8 @@ from app.models.order import Order
 from app.models.order_draft import OrderDraft
 from app.models.payment import Payment
 from app.models.stock_movement import StockMovement
+from app.tasks import m1
+from test_order_drafts_postgres import _block_m1_external_effects
 from test_products_stock_inbox import (
     BASE_URL,
     OPERATOR_PASSWORD,
@@ -118,7 +122,7 @@ async def _seed_operator_conversation() -> tuple[int, int, int, int, int, int]:
         await engine.dispose()
 
 
-async def _assert_persisted(before: tuple[int, int, int, int, int, int]) -> None:
+async def _assert_persisted(before: tuple[int, int, int, int, int, int]) -> tuple[uuid.UUID, int, uuid.UUID, dict]:
     try:
         async with async_session_factory() as session:
             draft = await session.scalar(
@@ -126,6 +130,8 @@ async def _assert_persisted(before: tuple[int, int, int, int, int, int]) -> None
             )
             assert draft is not None
             assert draft.status == "awaiting_confirmation"
+            assert draft.draft_version == 1
+            assert draft.order_id is None
             assert draft.presented_outbound_message_id is not None
             proposal = await session.get(Message, draft.presented_outbound_message_id)
             assert proposal is not None
@@ -144,11 +150,23 @@ async def _assert_persisted(before: tuple[int, int, int, int, int, int]) -> None
                 .where(SellableItem.sku == SKU)
             )
             assert item_inventory is not None and item_inventory.quantity == before[5]
+            lead_id = await session.scalar(select(Lead.lead_id).where(Lead.conversation_id == CONVERSATION_ID))
+            assert lead_id is not None
+            snapshot = {
+                "product_id": str(draft.product_id),
+                "sellable_item_id": str(draft.sellable_item_id),
+                "price_id": str(draft.price_id),
+                "exchange_rate_id": str(draft.exchange_rate_id),
+                "quantity": str(draft.quantity),
+                "unit_price_usd": str(draft.unit_price_usd),
+                "unit_price_cdf": str(draft.unit_price_cdf),
+            }
+            return draft.draft_id, draft.draft_version, lead_id, snapshot
     finally:
         await engine.dispose()
 
 
-def test_operator_explicitly_reviews_and_submits_order_proposal() -> None:
+def test_operator_explicitly_reviews_and_submits_order_proposal(monkeypatch: pytest.MonkeyPatch) -> None:
     before = asyncio.run(_seed_operator_conversation())
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -226,4 +244,92 @@ def test_operator_explicitly_reviews_and_submits_order_proposal() -> None:
 
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    asyncio.run(_assert_persisted(before))
+    draft_id, draft_version, lead_id, snapshot = asyncio.run(_assert_persisted(before))
+    external_calls = _block_m1_external_effects(
+        monkeypatch, async_session_factory, whatsapp_send_enabled=False,
+    )
+
+    class TaskStub:
+        request = SimpleNamespace(retries=0)
+
+        def retry(self, **_kwargs):
+            raise AssertionError("M1 unexpectedly requested a Celery retry")
+
+    async def confirm(message_id: uuid.UUID, wa_id: str) -> dict:
+        return await m1._process(
+            task=TaskStub(), message_id=str(message_id),
+            customer_phone=CUSTOMER_PHONE, content=f"OUI {confirmation_code}",
+            content_type="text", timestamp=datetime.now(timezone.utc).isoformat(),
+            whatsapp_message_id=wa_id,
+        )
+
+    async def check_confirmed(order_id: uuid.UUID) -> None:
+        async with async_session_factory() as session:
+                orders = list((await session.scalars(select(Order))).all())
+                assert len(orders) == before[0] + 1
+                order = next(order for order in orders if order.order_id == order_id)
+                assert order.order_id == order_id
+                assert order.status == "pending"
+                assert order.customer_id == CUSTOMER_PHONE and order.lead_id == lead_id
+                assert order.currency == "CDF" and order.total_amount == draft_total
+                assert len(order.items) == 1
+                line = order.items[0]
+                for key, value in snapshot.items():
+                    assert str(line[key]) == value
+                draft = await session.get(OrderDraft, (draft_id, draft_version))
+                assert draft is not None and draft.status == "confirmed"
+                assert draft.order_id == order_id and draft.draft_version == 1
+                assert await session.scalar(select(func.count()).select_from(OrderDraft)) == before[4] + 1
+                assert await session.scalar(select(func.count()).select_from(Payment)) == before[1]
+                assert await session.scalar(select(func.count()).select_from(StockMovement)) == before[2]
+
+    async def load_confirmation() -> tuple[str, Decimal]:
+        async with async_session_factory() as session:
+                draft = await session.get(OrderDraft, (draft_id, draft_version))
+                assert draft is not None
+                return draft.confirmation_code, draft.total_cdf
+
+    async def connected_confirmation() -> uuid.UUID:
+        nonlocal confirmation_code, draft_total
+        try:
+            confirmation_code, draft_total = await load_confirmation()
+            first = await confirm(uuid.uuid4(), "guided-order-confirm-first")
+            assert first["status"] == "order_draft_confirmed"
+            assert first["send_status"] == "skipped"
+            order_id = uuid.UUID(first["order_id"])
+            await check_confirmed(order_id)
+            replay = await confirm(uuid.uuid4(), "guided-order-confirm-replay")
+            assert replay["status"] == "order_draft_already_confirmed"
+            assert replay["order_id"] == first["order_id"]
+            assert replay["send_status"] == "skipped"
+            await check_confirmed(order_id)
+            assert external_calls == []
+            return order_id
+        finally:
+            await engine.dispose()
+
+    confirmation_code = ""
+    draft_total = Decimal(0)
+    order_id = asyncio.run(connected_confirmation())
+
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        context = browser.new_context(ignore_https_errors=True)
+        page = context.new_page()
+        _login(page, "e2e.operator", OPERATOR_PASSWORD)
+        listing = page.request.get(f"{BASE_URL}/api/v1/business/orders?limit=20&offset=0&status=pending")
+        assert listing.status == 200
+        assert any(item["order_id"] == str(order_id) for item in listing.json()["items"])
+        detail = page.request.get(f"{BASE_URL}/api/v1/business/orders/{order_id}")
+        assert detail.status == 200
+        assert detail.json()["order_id"] == str(order_id)
+        assert detail.json()["status"] == "pending"
+        page.goto(f"{BASE_URL}/business/orders?status=pending&offset=0")
+        order_link = page.locator(f'a[data-order-id="{order_id}"]')
+        expect(order_link).to_be_visible()
+        order_link.click()
+        expect(page.get_by_role("region", name="Order detail")).to_contain_text("Pending")
+        context.close()
+        browser.close()
