@@ -947,6 +947,11 @@ h2 { font-size: 1.125rem; }
   .customers-search > div { align-items: stretch; flex-direction: column; }
   .orders-list, .orders-detail { padding: var(--space-4); }
   .orders-facts { grid-template-columns: minmax(0, 1fr); }
+  .orders-current-state:has(> .orders-actions) { display: flex; flex-direction: column; }
+  .orders-current-state:has(> .orders-actions) > .orders-current-focus { order: 1; }
+  .orders-current-state:has(> .orders-actions) > .orders-actions { order: 2; margin-top: var(--space-4); }
+  .orders-current-state:has(> .orders-actions) > .orders-detail-summary { order: 3; }
+  .orders-current-state:has(> .orders-actions) > :not(h3, .orders-current-focus, .orders-actions, .orders-detail-summary) { order: 4; }
   .business-page-heading { align-items: start; flex-wrap: wrap; }
   .business-page-heading .button { width: 100%; }
   .orders-page:has(.orders-workspace--selected) > .business-page-heading,
