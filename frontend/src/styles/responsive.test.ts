@@ -63,6 +63,15 @@ describe('responsive Inbox style contract', () => {
     expect(globalCss).not.toContain('.workspace-detail-region')
   })
 
+  it('keeps the guided toolbar on its own row at tablet and desktop widths', () => {
+    expect(globalCss).toContain(
+      '@media (min-width: 48rem) {\n  .inbox-page .inbox-layout { grid-template-columns: minmax(16rem, 27fr) minmax(0, 73fr); }\n  .inbox-page .queue-panel { height: 100%; }\n  .workspace-header .workspace-toolbar__actions:has(> [role="status"]) { grid-column: 1 / -1; grid-row: 2; width: 100%; justify-content: space-between; }',
+    )
+    expect(globalCss).toMatch(
+      /\.workspace-header \.workspace-toolbar__actions > \[role="status"\] \{[^}]*flex: 1 1 16rem;[^}]*min-width: 0;[^}]*overflow-wrap: anywhere/,
+    )
+  })
+
   it('uses a compact selected-conversation filter disclosure and dense readable messages', () => {
     expect(globalCss).toMatch(
       /\.inbox-page--selected \.inbox-header h1 \{[^}]*font-size: 1\.125rem/,

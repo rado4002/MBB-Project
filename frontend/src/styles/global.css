@@ -564,10 +564,10 @@ h2 { font-size: 1.125rem; }
 @media (min-width: 48rem) {
   .inbox-page .inbox-layout { grid-template-columns: minmax(16rem, 27fr) minmax(0, 73fr); }
   .inbox-page .queue-panel { height: 100%; }
-}
-@media (min-width: 48rem) and (max-width: 79.99rem) {
   .workspace-header .workspace-toolbar__actions:has(> [role="status"]) { grid-column: 1 / -1; grid-row: 2; width: 100%; justify-content: space-between; }
   .workspace-header .workspace-toolbar__actions > [role="status"] { flex: 1 1 16rem; min-width: 0; margin: 0; overflow-wrap: anywhere; }
+}
+@media (min-width: 48rem) and (max-width: 79.99rem) {
   .inbox-page .inbox-layout { grid-template-columns: minmax(19rem, 34fr) minmax(0, 66fr); }
   .queue-tools { padding: var(--space-3); }
   .queue-quick-filters { overflow: visible; flex-wrap: wrap; padding: 0; }
