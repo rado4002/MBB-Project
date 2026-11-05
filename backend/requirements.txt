@@ -16,6 +16,7 @@ alembic==1.13.3                # Database migrations
 # ── Cache / Queue ─────────────────────────────────────────────────────────────
 redis==5.1.1
 celery[redis]==5.4.0
+kombu==5.6.2                 # Compatible Redis transport for redis-py 5.1.1
 celery-redbeat==2.2.0          # Redis-backed Celery Beat scheduler
 
 # ── HTTP Client ───────────────────────────────────────────────────────────────
